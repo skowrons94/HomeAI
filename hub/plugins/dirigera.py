@@ -287,7 +287,7 @@ class DirigeraPlugin(Plugin):
             challenge = base64.urlsafe_b64encode(
                 hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
             try:
-                async with self.hub.http.post(
+                async with self.hub.http.get(  # GET: the hub answers 404 to POST
                         f"{self.base}/oauth/authorize", ssl=False, timeout=TIMEOUT,
                         params={"audience": "homesmart.local", "response_type": "code",
                                 "code_challenge": challenge,
