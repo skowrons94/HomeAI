@@ -430,11 +430,6 @@ class Hub:
             items.append({"id": "homekit.pair", "level": "info", "title": i18n._("Add Casa to Apple Home"),
                           "detail": i18n._("Scan the setup code with the Home app."),
                           "action": {"type": "homekit"}})
-        if self.notify.channels == ["app"]:
-            items.append({"id": "notify.phone", "level": "info",
-                          "title": i18n._("Get notifications on your phone"),
-                          "detail": i18n._("Free with the ntfy app: downloads, favourites found, alerts."),
-                          "action": {"type": "core", "section": "notify"}})
         dismissed = set(self.store.get("attention.dismissed", []))
         for it in items:
             it["dismissed"] = it["id"] in dismissed

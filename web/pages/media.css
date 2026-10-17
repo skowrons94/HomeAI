@@ -75,3 +75,7 @@
   background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 .m-chips .chip.g.on { background: var(--accent); color: #fff; }
 .m-more { display: flex; justify-content: center; padding: 18px 0; }
+
+/* breathing room between the page tabs and the Film/Serie switch + genres */
+.seg.m-kind { margin-top: 18px; }
+.m-stale { opacity: .45; transition: opacity .2s; pointer-events: none; }

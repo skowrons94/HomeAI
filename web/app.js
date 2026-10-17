@@ -287,7 +287,15 @@ function connectEvents() {
   // EventSource reconnects by itself; resync once it's back
   let wasDown = false;
   es.onerror = () => { wasDown = true; };
-  es.onopen = () => { if (wasDown) { wasDown = false; refreshState().then(render); } };
+  // back online (e.g. the app returns from background): resync; re-draw the page only if
+  // nobody is typing in it, so a reconnect never wipes a half-written search or note
+  es.onopen = () => {
+    if (!wasDown) return;
+    wasDown = false;
+    refreshState().then(() => {
+      if (!document.activeElement?.matches?.("input, textarea, select")) render();
+    });
+  };
 }
 
 /** True when a plugin is running (enabled and started). */

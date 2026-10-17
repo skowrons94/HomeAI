@@ -164,7 +164,8 @@ def test_attention():
         hub.plugins = {"broken": b, "tv": Unpaired(hub, {})}
         items = hub.attention()
         assert [i["id"] for i in items][:2] == ["broken.error", "tv.setup"]
-        assert {"tv.key", "notify.phone"} <= {i["id"] for i in items}
+        assert "tv.key" in {i["id"] for i in items}
+        assert "notify.phone" not in {i["id"] for i in items}  # no nagging: the toggle is in Altro
         hub.dismiss_attention("tv.key")
         hub.dismiss_attention("broken.error")  # errors stay visible
         ids = {i["id"] for i in hub.attention()}

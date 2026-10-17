@@ -147,13 +147,14 @@ export function openAttention(mode = "list") {
 }
 
 /** Compact card; updates itself. Hidden when there is nothing to show. */
-export function attentionBanner() {
+/** Home: only what needs fixing. Settings ({ suggestions: true }) also lists suggestions. */
+export function attentionBanner({ suggestions = false } = {}) {
   css();
   const box = h("div.at-banner-box");
   const draw = () => {
     const items = store.attentionItems || [];
     const urgent = items.filter((i) => i.level !== "info");
-    if (!items.length) return box.replaceChildren();
+    if (!items.length || (!urgent.length && !suggestions)) return box.replaceChildren();
     if (!urgent.length) {
       return box.replaceChildren(h("button.at-info.ghost", { onclick: () => openAttention() },
         icon("bulb"), h("span", items.length === 1 ? items[0].title : t("{n} suggestions", { n: items.length })),

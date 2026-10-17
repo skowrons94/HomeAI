@@ -45,13 +45,26 @@ export default {
       h("div.m-head", h("h1", t("Media")),
         h("div.m-search", icon("search"), search)),
       tabs, h("div#m-warn"), results);
-    const doSearch = debounce(async (q) => {
-      if (!q.trim()) { if (view === "search") go("#/media/discover"); return; }
+    // search in place (no hash navigation = no page re-render under the keyboard); a slower
+    // older answer never replaces a newer one; Enter searches at once and closes the keyboard
+    let lastQ = view === "search" ? rest.join("/").trim() : "";
+    const runSearch = async (q) => {
+      q = q.trim();
+      if (q === lastQ) return;
+      lastQ = q;
+      if (q.length < 2) {
+        if (!q) { history.replaceState(null, "", "#/media"); await renderDiscover(results); }
+        return;
+      }
       history.replaceState(null, "", `#/media/search/${enc(q)}`);
       tabs.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
-      await renderSearch(results, q);
-    }, 450);
+      await renderSearch(results, q, () => lastQ === q);
+    };
+    const doSearch = debounce(runSearch, 700);
     search.addEventListener("input", () => doSearch(search.value));
+    search.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); search.blur(); runSearch(search.value); }
+    });
 
     P("status").then((s) => { status = s; warnings(root.querySelector("#m-warn"), s); }).catch(() => {});
 
@@ -67,11 +80,8 @@ export default {
 // ---------------------------------------------------------------- shared bits
 
 function warnings(el, s) {
+  // the "add a TMDB key" hint lives in Settings' suggestions, not on every visit here
   const out = [];
-  if (!s.tmdb) out.push(h("div.m-banner", "🎬",
-    h("div", h("b", t("Using Cinemeta (English titles). ")),
-      t("For Italian titles, trends and upcoming releases, add a free TMDB key: themoviedb.org → Settings → API, then "),
-      h("code", "tmdb_api_key"), t(" under [plugins.media] in config.toml."))));
   if (s.transmission && s.transmission.ok === false) out.push(h("div.m-banner", "⚠️",
     h("div", h("b", t("Transmission offline. ")), s.transmission.error, t(" - downloads can't start."))));
   fill(el, ...out);
@@ -117,7 +127,7 @@ async function renderDiscover(el, kind, genre) {
   genre = genre ? decodeURIComponent(genre) : "";
   const chips = h("div.m-chips");
   const out = h("div");
-  const seg = h("div.seg");
+  const seg = h("div.seg.m-kind");
   let genres = [];
   let token = null;
   const setHash = () => history.replaceState(null, "", genre ? `#/media/discover/${kind}/${enc(genre)}` : "#/media");
@@ -185,9 +195,12 @@ async function renderDiscover(el, kind, genre) {
   await start();
 }
 
-async function renderSearch(el, q) {
-  fill(el, loading());
-  const items = await P(`search?q=${enc(q)}`);
+async function renderSearch(el, q, current = () => true) {
+  // keep the previous results on screen (dimmed) while the new ones load: no jumping
+  if (el.querySelector(".m-grid")) el.classList.add("m-stale"); else fill(el, loading());
+  let items;
+  try { items = await P(`search?q=${enc(q)}`); } finally { if (current()) el.classList.remove("m-stale"); }
+  if (!current()) return;
   fill(el, 
     h("div.section", h("h2", t("Results for “{q}”", { q })), h("span.muted", items.length)),
     items.length ? h("div.m-grid", items.map((it) => poster(it))) : h("div.empty", t("Nothing found.")));

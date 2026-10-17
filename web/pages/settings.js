@@ -186,7 +186,7 @@ export default {
         h("button", { onclick: (e) => { if (confirm(t("Restart Casa now?"))) restartHub(e.currentTarget); } },
           icon("power"), t("Restart"))),
       banner,
-      attentionBanner(),
+      attentionBanner({ suggestions: true }),
       h("div.section", h("h2", t("Integrations"))), intBox,
       h("div.section", h("h2", t("Casa"))), coreBox,
       hiddenBox);
