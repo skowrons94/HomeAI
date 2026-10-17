@@ -280,3 +280,23 @@ button.icon.m-add { background: var(--ok); color: #fff; min-width: 32px; min-hei
 .m-profile { display: flex; align-items: center; gap: 14px; cursor: pointer; }
 .m-avatar { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; flex: none;
             background: var(--accent); color: var(--accent-text); font-size: 20px; font-weight: 700; }
+
+/* ---------- notifications sheet ---------- */
+.notif-list { display: flex; flex-direction: column; }
+.notif { display: flex; align-items: flex-start; gap: 12px; padding: 10px 2px; border-top: 1px solid var(--line); }
+.notif:first-child { border-top: 0; }
+.notif.unread .n-title::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                                 background: var(--accent); margin-right: 6px; vertical-align: middle; }
+.n-img { width: 40px; height: 60px; border-radius: 6px; object-fit: cover; flex: none; background: var(--surface-2); }
+.n-ico { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; flex: none; }
+.n-ico svg.i { width: 20px; height: 20px; }
+.n-ico.k-tv { background: color-mix(in srgb, #a970ff 18%, transparent); color: #a970ff; }
+.n-ico.k-note { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.n-ico.k-warn { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+.n-ico.k-info { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.n-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.n-title { font-weight: 650; font-size: 15px; line-height: 1.3; overflow-wrap: anywhere; }
+.n-text { font-size: 14px; color: var(--muted); line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical; overflow: hidden; }
+.n-time { font-size: 12px; color: var(--muted); }
+.notif .n-x { margin: -6px -6px 0 0; opacity: .6; }

@@ -231,8 +231,7 @@ class Downloads:
                                    if row["season"] is not None else "")
             await self.hub.notify.send(
                 _("Ready to watch: {what}", what=what),
-                _("{quality} · {n} file(s) in the library - open Infuse",
-                  quality=row["quality"] or "", n=len(targets)),
+                _("It's in your library: open Infuse to watch it."),
                 url=f"#/media/{row['type']}/{row['data'].get('id')}",
                 image=row["data"].get("poster") or "", tag="tv")
             self.plugin.watcher.on_imported(row)

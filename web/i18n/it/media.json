@@ -141,8 +141,6 @@
   "no subtitles found online": "nessun sottotitolo trovato online",
   "no candidate passed the checks": "nessun candidato ha superato i controlli",
   "download had no usable .srt": "il download non conteneva un .srt utilizzabile",
-  "timing adjusted to the video": "sincronizzazione corretta sul video",
-  "timing not verified": "sincronizzazione non verificata",
   "{lang} subtitles ready: {what}": "Sottotitoli in {lang} pronti: {what}",
   "only {n} cues": "solo {n} battute",
   "wrong language": "lingua sbagliata",
@@ -180,7 +178,6 @@
   "subtitles are disabled in settings": "i sottotitoli sono disattivati nelle impostazioni",
   "pick a single movie or episode": "scegli un solo film o episodio",
   "Ready to watch: {what}": "Pronto da guardare: {what}",
-  "{quality} · {n} file(s) in the library - open Infuse": "{quality} · {n} file nella libreria - apri Infuse",
   "import: {err}": "importazione: {err}",
   "Import failed: {what}": "Importazione non riuscita: {what}",
   "no video file in the torrent": "nessun file video nel torrent",
@@ -236,5 +233,9 @@
   "Tap the heart on a film or series and I'll tell you when it's ready to watch.": "Tocca il cuore su un film o una serie e ti avviso quando è pronto da guardare.",
   "Discover movies": "Scopri film",
   "Nothing is downloading right now.": "Al momento non si sta scaricando nulla.",
-  "Your library is empty. Films you download will show up here.": "La libreria è vuota. I film che scarichi appariranno qui."
+  "Your library is empty. Films you download will show up here.": "La libreria è vuota. I film che scarichi appariranno qui.",
+  "It's in your library: open Infuse to watch it.": "È nella libreria: aprilo con Infuse per guardarlo.",
+  "Timing adjusted to the video. Choose them in Infuse.": "Sincronizzazione corretta sul video. Scegli i sottotitoli in Infuse.",
+  "Timing not checked: if they're off, tell Casa from the film's page.": "Sincronizzazione non verificata: se sono sfasati, cercane altri dalla pagina del film.",
+  "In sync with the video. Choose them in Infuse.": "Sincronizzati con il video. Scegli i sottotitoli in Infuse."
 }

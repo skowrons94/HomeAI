@@ -324,17 +324,38 @@ function updateBadge() {
 
 // ---------------------------------------------------------------- notifications
 
+// kind of notification (Notifier tag) -> icon + colour
+const NOTE_KIND = { tv: ["film", "tv"], subtitles: ["film", "tv"], note: ["edit", "note"], warning: ["bell", "warn"],
+                    bell: ["bell", "info"], house: ["home", "info"] };
+
+/** Notifications sheet: compact rows, tap to open, × to remove one, "Svuota" for all. */
 export async function openNotifications() {
-  const list = await api("notifications");
-  const s = sheet(t("Notifications"), list.length ? h("div.list", list.map((n) =>
-    h("div.item", { style: { alignItems: "flex-start", cursor: n.url ? "pointer" : "" },
-                    onclick: () => n.url && (location.href = n.url) },
-      n.image ? h("img", { src: n.image, style: { width: "44px", height: "66px", objectFit: "cover", borderRadius: "6px" } })
-              : h("div.tile", h("div.ico", icon("bell"))),
-      h("div.stack", { style: { gap: "2px", minWidth: 0 } },
-        h("div.row", h("b", n.title), !n.read && h("span.chip.accent", t("new"))),
-        n.body && h("div.small", n.body),
-        h("div.tiny.muted", fmt.ago(n.ts)))))) : h("div.empty", t("Nothing yet.")));
+  let list = await api("notifications");
+  const box = h("div.notif-list");
+  const clearBtn = h("button.small", { onclick: () => {
+    if (!confirm(t("Delete all notifications?"))) return;
+    act(async () => { await api("notifications/clear", { body: {} }); list = []; draw(); }, clearBtn);
+  } }, icon("trash"), t("Clear notifications"));
+  const remove = (n) => act(async () => {
+    await api(`notifications/${n.id}`, { method: "DELETE" });
+    list = list.filter((x) => x.id !== n.id); draw();
+  });
+  const row = (n) => {
+    const [ico, kind] = NOTE_KIND[n.tag] || ["bell", "info"];
+    return h(`div.notif${n.read ? "" : ".unread"}`,
+      { onclick: () => { if (n.url) { s.close(); location.href = n.url; } }, style: { cursor: n.url ? "pointer" : "" } },
+      n.image ? h("img.n-img", { src: n.image, alt: "", loading: "lazy" }) : h(`span.n-ico.k-${kind}`, icon(ico)),
+      h("div.n-body", h("div.n-title", n.title), n.body && h("div.n-text", n.body),
+        h("div.n-time", fmt.ago(n.ts))),
+      h("button.icon.ghost.n-x", { "aria-label": t("Delete"), onclick: (ev) => { ev.stopPropagation(); remove(n); } }, icon("x")));
+  };
+  const draw = () => {
+    clearBtn.disabled = !list.length;
+    box.replaceChildren(...(list.length ? list.map(row)
+      : [h("div.empty", h("span.n-ico.k-info", { style: { margin: "0 auto 10px" } }, icon("bell")), t("Nothing yet."))]));
+  };
+  draw();
+  const s = sheet(t("Notifications"), [h("div.row", h("div.spacer"), clearBtn), box]);
   if (store.unread) { await api("notifications/read", { body: {} }); store.unread = 0; updateBadge(); }
   return s;
 }

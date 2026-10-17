@@ -178,3 +178,9 @@ class Store:
 
     def mark_notifications_read(self) -> None:
         self.db.execute("UPDATE notifications SET read=1 WHERE read=0")
+
+    def delete_notification(self, nid: int) -> None:
+        self.db.execute("DELETE FROM notifications WHERE id=?", (nid,))
+
+    def clear_notifications(self) -> None:
+        self.db.execute("DELETE FROM notifications")

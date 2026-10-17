@@ -15,6 +15,7 @@
   POST  /api/attention/{id}                {dismissed} - hide (or restore) a hint
   GET   /api/events                        server-sent events (entity, notification, ...)
   GET   /api/notifications   POST /api/notifications/read   POST /api/notifications/test
+  POST  /api/notifications/clear   DELETE /api/notifications/{id}
   GET   /api/homekit         GET /api/homekit/qr.svg
   *     /api/p/<plugin>/...                plugin routes
 """
@@ -89,6 +90,8 @@ class WebServer:
         r.add_get("/api/notifications", self.notifications)
         r.add_post("/api/notifications/read", self.notifications_read)
         r.add_post("/api/notifications/test", self.notifications_test)
+        r.add_post("/api/notifications/clear", self.notifications_clear)
+        r.add_delete("/api/notifications/{id}", self.notification_delete)
         r.add_get("/api/homekit", self.homekit)
         r.add_get("/api/homekit/qr.svg", self.homekit_qr)
         # plugins come and go at runtime, so their routes are resolved per request
@@ -318,8 +321,16 @@ class WebServer:
         self.hub.store.mark_notifications_read()
         return _json({"ok": True})
 
+    async def notifications_clear(self, request):
+        self.hub.store.clear_notifications()
+        return _json({"ok": True})
+
+    async def notification_delete(self, request):
+        self.hub.store.delete_notification(int(request.match_info["id"]))
+        return _json({"ok": True})
+
     async def notifications_test(self, request):
-        await self.hub.notify.send("Casa", "Test notification - it works 🎉", tag="bell")
+        await self.hub.notify.send("Casa", i18n._("Test notification - it works 🎉"), tag="bell")
         return _json({"ok": True, "channels": self.hub.notify.channels})
 
     # -- settings ---------------------------------------------------------------------

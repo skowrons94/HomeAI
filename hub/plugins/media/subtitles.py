@@ -944,10 +944,12 @@ class Subtitles:
         names = {"it": _("Italian"), "en": _("English"), "es": _("Spanish"), "fr": _("French"),
                  "de": _("German"), "pt": _("Portuguese")}
         lang = names.get(self.lang, self.lang.upper())
-        note = {"adapted": _("timing adjusted to the video"),
-                "unverified": _("timing not verified")}.get(st["status"], "")
+        note = {"adapted": _("Timing adjusted to the video. Choose them in Infuse."),
+                "unverified": _("Timing not checked: if they're off, tell Casa from the film's page.")
+                }.get(st["status"], _("In sync with the video. Choose them in Infuse."))
         with contextlib.suppress(Exception):
-            await self.hub.notify.send(_("{lang} subtitles ready: {what}", lang=lang, what=what), note, tag="tv")
+            await self.hub.notify.send(_("{lang} subtitles ready: {what}", lang=lang, what=what), note,
+                                       tag="subtitles")
 
     @staticmethod
     def _write(target: str, text: str):
