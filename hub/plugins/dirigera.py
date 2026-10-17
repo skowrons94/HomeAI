@@ -321,14 +321,20 @@ class DirigeraPlugin(Plugin):
             return reply(PRESS_MSG, step="token")
         if step == "token" and self._pairing:
             for _ in range(30):  # a minute to press the button
-                async with self.hub.http.post(
-                        f"{self.base}/oauth/token", ssl=False, timeout=TIMEOUT,
-                        data={"code": self._pairing["code"], "name": socket.gethostname(),
-                              "grant_type": "authorization_code",
-                              "code_verifier": self._pairing["verifier"]}) as r:
-                    if r.status == 200:
-                        self.token = (await r.json())["access_token"]
-                        break
+                try:
+                    async with self.hub.http.post(
+                            f"{self.base}/oauth/token", ssl=False, timeout=TIMEOUT,
+                            data={"code": self._pairing["code"], "name": socket.gethostname(),
+                                  "grant_type": "authorization_code",
+                                  "code_verifier": self._pairing["verifier"]}) as r:
+                        if r.status == 200:
+                            self.token = (await r.json())["access_token"]
+                            break
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+                    self._pairing = {}
+                    return reply(f"Lost contact with DIRIGERA at {self.host} (it may be "
+                                 "restarting or updating). Wait until its light is steady, "
+                                 "then tap Continue to start again.", step=None, error=str(err))
                 await asyncio.sleep(2)
             if not self.token:
                 self._pairing = {}  # expired on the hub too: the next try starts fresh
