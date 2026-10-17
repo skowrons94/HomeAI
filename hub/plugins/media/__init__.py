@@ -18,6 +18,7 @@ Transmission downloads into the NAS library, favourites with notifications.
     italian_grace_days = 3
     indexers = ["torrentio", "knaben", "apibay", "eztv", "yts", "ilcorsaronero", "1337x"]
     [plugins.media.transmission]
+    enabled = true                    # false: never contact Transmission (e.g. a test/dev machine)
     url = "http://127.0.0.1:9091/transmission/rpc"
     [plugins.media.proxy]
     url = ""                          # socks5h://user:pass@host:1080 or http://host:3128
@@ -82,6 +83,9 @@ SCHEMA = [
        help="Wait this long for an Italian release before taking English."),
     _f("indexers", "Indexers", "list", advanced=True,
        help="Empty = all: torrentio, knaben, apibay, eztv, yts, ilcorsaronero, 1337x."),
+    _f("transmission.enabled", "Use Transmission", "bool", default=True,
+       help="Off: this hub never contacts Transmission (no downloads, folder sync or polling). "
+            "Useful on a second machine that shares the same Transmission."),
     _f("transmission.url", "Transmission RPC URL", advanced=True,
        default="http://127.0.0.1:9091/transmission/rpc"),
     _f("transmission.username", "Transmission user", advanced=True),
@@ -121,11 +125,12 @@ class MediaPlugin(Plugin):
         await self.indexers.open()  # raises with a clear message if the proxy can't work
         await self.transmission.open()
         hub = self.hub
-        if self.config.get("download_dir"):
-            hub.spawn(self._sync_download_dir(self.config["download_dir"]), "transmission dir")
+        if self.transmission.enabled:
+            if self.config.get("download_dir"):
+                hub.spawn(self._sync_download_dir(self.config["download_dir"]), "transmission dir")
+            hub.every(10, self.downloads.poll, "transmission poll", initial_delay=3)
         hub.spawn(self.indexers.probe(), "indexer probe")
         hub.every(3600, self.indexers.probe, "indexer probe")
-        hub.every(10, self.downloads.poll, "transmission poll", initial_delay=3)
         hub.every(6 * 3600, self._scan, "library scan", initial_delay=5)
         hub.every(15 * 60, self.watcher.tick, "watchlist", initial_delay=90)
 
@@ -149,8 +154,8 @@ class MediaPlugin(Plugin):
         return {
             "metadata": self.metadata.provider,
             "tmdb": bool(self.metadata.key),
-            "transmission": {"ok": self.downloads.ok, "error": self.downloads.error,
-                             "url": self.transmission.url},
+            "transmission": {"enabled": self.transmission.enabled, "ok": self.downloads.ok,
+                             "error": self.downloads.error, "url": self.transmission.url},
             "proxy": _mask(self.indexers.proxy),
             "indexers": self.indexers.health,
             "library": self.library.stats(),

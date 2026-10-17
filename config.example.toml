@@ -127,6 +127,7 @@ italian_grace_days = 3        # wait this long for an Italian release before tak
 # mirrors = { yts = ["https://yts.gg"] }
 
 [plugins.media.transmission]
+# enabled = false              # never contact Transmission from this hub (dev/test machine)
 url = "http://127.0.0.1:9091/transmission/rpc"
 # username = ""
 # password = ""

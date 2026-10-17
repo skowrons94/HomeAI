@@ -30,7 +30,8 @@ work to subagents and pick the **cheapest model that can do it**:
 - **Production runs on the user's Raspberry Pi** (deploy details are in Claude's memory, not in
   this repo — the repo is generic for every user). Never start a hub on the Mac with the real
   `config.toml`: test instances use a temp config with `[homekit] enabled = false`, another
-  `[web] port`, and no `kef`/`hisense`/`appletv`/`ariston` plugins.
+  `[web] port`, `[plugins.media.transmission] enabled = false`, and no
+  `kef`/`hisense`/`appletv`/`ariston` plugins.
 - Only **one** hub may run at a time: HomeKit identity, and the KEF speaker accepts one TCP client.
   Stop the running instance before starting another (`pgrep -f "python -m hub"`).
 - `data/homekit.*` must survive every change: losing it means re-pairing every accessory.

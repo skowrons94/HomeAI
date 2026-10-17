@@ -21,12 +21,15 @@ class TransmissionError(Exception):
 class Transmission:
     def __init__(self, cfg: dict):
         self.url = cfg.get("url", "http://127.0.0.1:9091/transmission/rpc")
+        self.enabled = cfg.get("enabled", True) is not False  # false: this hub never talks to Transmission
         user, pw = cfg.get("username"), cfg.get("password")
         self.auth = aiohttp.BasicAuth(user, pw or "") if user else None
         self.session_id = ""
         self.http: aiohttp.ClientSession | None = None
 
     async def open(self):
+        if not self.enabled:
+            return
         # local daemon: never through the indexer proxy
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
 
@@ -35,6 +38,8 @@ class Transmission:
             await self.http.close()
 
     async def call(self, method: str, **arguments) -> dict:
+        if not self.enabled:
+            raise TransmissionError("Downloads are turned off on this hub (Transmission disabled in Media settings)")
         body = {"method": method, "arguments": arguments}
         for _ in range(2):
             try:
