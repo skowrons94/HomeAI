@@ -119,6 +119,16 @@ class Plugin:
         """Extra info for the settings page."""
         return {}
 
+    def attention(self) -> list[dict]:
+        """Things the user should fix or set up, shown in the attention list.
+
+        ``{"id", "level": "error"|"warning"|"info", "title", "detail",
+        "action": {"type": "settings"|"setup"|"panel"|"page"|"url", ...}}``.
+        Errors and "needs pairing" are reported by the hub itself; return only
+        plugin-specific hints (a missing optional key, an unreachable service).
+        """
+        return []
+
 
 class Hub:
     def __init__(self, cfg, root: Path):
@@ -378,6 +388,59 @@ class Hub:
             self.notify = Notifier(self, self.config.get("notify", {}))
         elif section == "history":
             self._apply_history_config()
+
+    def attention(self, include_dismissed: bool = False) -> list[dict]:
+        """Everything that needs the user's attention, most important first."""
+        items: list[dict] = []
+        for name, p in self.plugins.items():
+            title = p.title or name.title()
+            settings = {"type": "settings", "plugin": name}
+            if p.error:
+                items.append({"id": f"{name}.error", "level": "error",
+                              "title": f"{title} isn't working", "detail": p.error,
+                              "action": settings})
+                continue
+            try:
+                st = p.status() or {}
+            except Exception:
+                st = {}
+            if st.get("setup") and not st.get("configured"):
+                items.append({"id": f"{name}.setup", "level": "warning",
+                              "title": f"Pair {title}", "detail": st.get("setup_hint", ""),
+                              "action": {"type": "setup", "plugin": name}})
+            try:
+                for it in p.attention() or []:
+                    it = dict(it)
+                    it["id"] = f"{name}.{it.get('id', 'hint')}"
+                    it.setdefault("level", "info")
+                    it.setdefault("action", settings)
+                    items.append(it)
+            except Exception:
+                log.exception("plugin %s attention() failed", name)
+        hk = self.homekit.info()
+        if hk.get("running") and not hk.get("paired"):
+            items.append({"id": "homekit.pair", "level": "info", "title": "Add Casa to Apple Home",
+                          "detail": "Scan the setup code with the Home app.",
+                          "action": {"type": "homekit"}})
+        if self.notify.channels == ["app"]:
+            items.append({"id": "notify.phone", "level": "info",
+                          "title": "Get notifications on your phone",
+                          "detail": "Free with the ntfy app: downloads, favourites found, alerts.",
+                          "action": {"type": "core", "section": "notify"}})
+        dismissed = set(self.store.get("attention.dismissed", []))
+        for it in items:
+            it["dismissed"] = it["id"] in dismissed
+        if not include_dismissed:
+            # errors can't be dismissed: they come back until fixed
+            items = [i for i in items if not i["dismissed"] or i["level"] == "error"]
+        order = {"error": 0, "warning": 1, "info": 2}
+        return sorted(items, key=lambda i: order.get(i["level"], 3))
+
+    def dismiss_attention(self, item_id: str, dismissed: bool = True) -> None:
+        cur = set(self.store.get("attention.dismissed", []))
+        (cur.add if dismissed else cur.discard)(item_id)
+        self.store.set("attention.dismissed", sorted(cur))
+        self.publish("attention", None)
 
     @property
     def onboarded(self) -> bool:

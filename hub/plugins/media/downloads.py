@@ -11,6 +11,8 @@ post_process:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import errno
 import json
 import logging
 import os
@@ -38,6 +40,26 @@ ACTIVE = ("queued", "downloading", "paused", "completed", "seeding")
 def safe_name(s: str) -> str:
     s = re.sub(r'[\\/:*?"<>|]+', " ", s or "").strip(" .")
     return re.sub(r"\s{2,}", " ", s)[:180] or "Untitled"
+
+
+def copy_file(src: str, dst: str) -> None:
+    """Copy safely onto network shares: write ``dst.part`` and rename it, so a
+    half-copied file never looks complete. Timestamps/permissions are copied
+    when allowed - SMB/NFS mounts often refuse them (EPERM), which is fine."""
+    tmp = dst + ".part"
+    try:
+        shutil.copyfile(src, tmp)
+        if os.path.getsize(tmp) != os.path.getsize(src):
+            raise OSError(f"incomplete copy of {src}")
+        try:
+            shutil.copystat(src, tmp)
+        except OSError:
+            pass
+        os.replace(tmp, dst)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
 
 
 def _is_within(path: str, root: str) -> bool:
@@ -212,6 +234,7 @@ class Downloads:
                 url=f"#/media/{row['type']}/{row['data'].get('id')}",
                 image=row["data"].get("poster") or "", tag="tv")
             self.plugin.watcher.on_imported(row)
+            self.store.delete(f"media.import.{h}")
         except Exception as err:
             log.exception("import of %s failed", row["name"] if row else h)
             self._update(h, state="failed", error=f"import: {err}")
@@ -277,6 +300,9 @@ class Downloads:
         plan = _unique_dests(plan)
 
         if self.post_process == "move":
+            # keep what we need for "retry import": the torrent is gone after this
+            self.store.set(f"media.import.{row['hash']}",
+                           {"downloadDir": t["downloadDir"], "files": t.get("files") or []})
             # Transmission must let go of the files before we move them
             await self._remove_torrent(row["hash"], delete_data=False)
         await asyncio.to_thread(self._transfer, plan, self.post_process == "move")
@@ -291,12 +317,22 @@ class Downloads:
     def _transfer(plan, move: bool):
         for src, dst in plan:
             os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if not os.path.exists(src) and os.path.exists(dst):
+                log.info("already in place: %s", dst)  # a retried import
+                continue
             if os.path.exists(dst):
                 log.info("replacing %s", dst)
             if move:
-                shutil.move(src, dst)
-            else:
-                shutil.copy2(src, dst)
+                try:
+                    os.replace(src, dst)  # same filesystem: instant
+                    log.info("moved %s -> %s", src, dst)
+                    continue
+                except OSError as err:
+                    if err.errno != errno.EXDEV:
+                        raise
+            copy_file(src, dst)
+            if move:
+                os.remove(src)
             log.info("%s %s -> %s", "moved" if move else "copied", src, dst)
 
     async def _episode_titles(self, row) -> dict:
@@ -333,10 +369,11 @@ class Downloads:
             self.store.execute("DELETE FROM media_downloads WHERE hash=?", (h,))
         elif action == "retry_import":
             ts = await self.tr.torrents([h], files=True)
-            if not ts:
+            t = ts[0] if ts else self.store.get(f"media.import.{h}")
+            if not t:
                 raise ValueError("torrent no longer in Transmission")
             self._update(h, state="downloading")
-            await self._import(h, ts[0])
+            await self._import(h, t)
         else:
             raise ValueError(f"unknown action {action}")
         self._publish()

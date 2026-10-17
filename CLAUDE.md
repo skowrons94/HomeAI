@@ -27,6 +27,10 @@ work to subagents and pick the **cheapest model that can do it**:
 ### Safety
 - Never commit or print `config.toml`, `data/`, `legacy/` (credentials, HomeKit keys).
 - The NAS library is real: tests must never write to `/mnt/nas` or `/Volumes/*`; use a temp dir.
+- **Production runs on the user's Raspberry Pi** (deploy details are in Claude's memory, not in
+  this repo — the repo is generic for every user). Never start a hub on the Mac with the real
+  `config.toml`: test instances use a temp config with `[homekit] enabled = false`, another
+  `[web] port`, and no `kef`/`hisense`/`appletv`/`ariston` plugins.
 - Only **one** hub may run at a time: HomeKit identity, and the KEF speaker accepts one TCP client.
   Stop the running instance before starting another (`pgrep -f "python -m hub"`).
 - `data/homekit.*` must survive every change: losing it means re-pairing every accessory.
@@ -78,6 +82,8 @@ deploy/          Pi installer, VPN script, macOS launchd
   kind are documented at the top of `hub/core.py`. Any numeric key of a `sensor` entity is
   stored in history automatically; units go in `attrs["units"] = {"key": "unit"}`.
 - Routes: `routes()` returns `aiohttp.web` RouteDefs, served under `/api/p/<name>/…`.
+- `attention()` returns hints for the Home page's "Needs attention" list (errors and unpaired
+  plugins are reported by the hub automatically); each item has an `action` the UI can run.
 - Interactive pairing: `POST /api/p/<name>/setup {step, value}` →
   `{message, input, choices, step, done, error}`; set `status()["setup"] = True` to show the wizard.
 - Keep dependencies light (Pi 4, ~400 MB memory cap); import heavy libraries inside `start()`.

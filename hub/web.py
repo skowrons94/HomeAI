@@ -11,6 +11,8 @@
   POST  /api/restart                       restart the whole hub
   GET   /api/fs?path=                      folder browser for "path" settings
   POST  /api/onboarding                    {done} - first-run guided setup finished / rerun
+  GET   /api/attention[?all=1]             things to fix / set up, most important first
+  POST  /api/attention/{id}                {dismissed} - hide (or restore) a hint
   GET   /api/events                        server-sent events (entity, notification, ...)
   GET   /api/notifications   POST /api/notifications/read   POST /api/notifications/test
   GET   /api/homekit         GET /api/homekit/qr.svg
@@ -74,6 +76,8 @@ class WebServer:
         r.add_post("/api/restart", self.restart)
         r.add_get("/api/fs", self.fs)
         r.add_post("/api/onboarding", self.onboarding)
+        r.add_get("/api/attention", self.attention)
+        r.add_post("/api/attention/{id}", self.attention_dismiss)
         r.add_get("/api/events", self.events)
         r.add_get("/api/notifications", self.notifications)
         r.add_post("/api/notifications/read", self.notifications_read)
@@ -194,6 +198,7 @@ class WebServer:
             "rooms": hub.config.get("rooms", []),
             "name": hub.config.get("name", "Casa"),
             "onboarding": not hub.onboarded,
+            "attention": sum(1 for i in hub.attention() if i["level"] != "info"),
         })
 
     async def action(self, request):
@@ -323,6 +328,14 @@ class WebServer:
         return _json({"path": str(path), "parent": str(path.parent) if path.parent != path else None,
                       "dirs": dirs, "roots": roots, "writable": os.access(path, os.W_OK),
                       "free_gb": round(usage.free / 1e9, 1)})
+
+    async def attention(self, request):
+        return _json(self.hub.attention(include_dismissed=bool(request.query.get("all"))))
+
+    async def attention_dismiss(self, request):
+        body = await request.json() if request.can_read_body else {}
+        self.hub.dismiss_attention(request.match_info["id"], bool(body.get("dismissed", True)))
+        return _json({"ok": True})
 
     async def onboarding(self, request):
         body = await request.json()

@@ -143,6 +143,35 @@ def test_live_reload_and_routes():
     asyncio.run(run())
 
 
+def test_attention():
+    with tempfile.TemporaryDirectory() as d:
+        hub = Hub({"homekit": {"enabled": False}}, Path(d))
+
+        class Broken(Plugin):
+            name, title = "broken", "Broken"
+
+        class Unpaired(Plugin):
+            name, title = "tv", "TV"
+
+            def status(self):
+                return {"setup": True, "configured": False}
+
+            def attention(self):
+                return [{"id": "key", "title": "Add a key", "level": "info"}]
+
+        b = Broken(hub, {})
+        b.error = "boom"
+        hub.plugins = {"broken": b, "tv": Unpaired(hub, {})}
+        items = hub.attention()
+        assert [i["id"] for i in items][:2] == ["broken.error", "tv.setup"]
+        assert {"tv.key", "notify.phone"} <= {i["id"] for i in items}
+        hub.dismiss_attention("tv.key")
+        hub.dismiss_attention("broken.error")  # errors stay visible
+        ids = {i["id"] for i in hub.attention()}
+        assert "tv.key" not in ids and "broken.error" in ids
+        assert "tv.key" in {i["id"] for i in hub.attention(include_dismissed=True)}
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):
