@@ -12,6 +12,7 @@ button on the hub when asked); the token is stored in the hub database.
 from __future__ import annotations
 
 import asyncio
+import time
 import base64
 import hashlib
 import json
@@ -27,6 +28,8 @@ from ..core import Entity, Plugin
 PORT = 8443
 REFRESH_EVERY = 300  # full device refresh as a fallback to the websocket
 TIMEOUT = aiohttp.ClientTimeout(total=10)
+PRESS_MSG = ("Press the action button on the bottom of the DIRIGERA hub now, then tap "
+             "Continue. Casa waits up to a minute for the press.")
 
 
 def map_device(dev: dict) -> tuple[str, dict, dict] | None:
@@ -282,27 +285,42 @@ class DirigeraPlugin(Plugin):
                 return reply("DIRIGERA not found on the network. Is it powered on? "
                              "Enter its IP address:", step="host",
                              input={"label": "DIRIGERA IP address", "type": "text"})
+            # a request we opened in the last minute is still valid: reuse it (a new
+            # one would be refused with 409 "Already one ongoing pairing request")
+            if self._pairing and time.monotonic() - self._pairing.get("at", 0) < 55:
+                return reply(PRESS_MSG, step="token")
             verifier = "".join(secrets.choice(string.ascii_letters + string.digits + "-._~")
                                for _ in range(128))
             challenge = base64.urlsafe_b64encode(
                 hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+            deadline = time.monotonic() + 120
+            code = None
             try:
-                async with self.hub.http.get(  # GET: the hub answers 404 to POST
-                        f"{self.base}/oauth/authorize", ssl=False, timeout=TIMEOUT,
-                        params={"audience": "homesmart.local", "response_type": "code",
-                                "code_challenge": challenge,
-                                "code_challenge_method": "S256"}) as r:
-                    r.raise_for_status()
-                    code = (await r.json())["code"]
+                while code is None:
+                    async with self.hub.http.get(  # GET: the hub answers 404 to POST
+                            f"{self.base}/oauth/authorize", ssl=False, timeout=TIMEOUT,
+                            params={"audience": "homesmart.local", "response_type": "code",
+                                    "code_challenge": challenge,
+                                    "code_challenge_method": "S256"}) as r:
+                        if r.status == 409 and time.monotonic() < deadline:
+                            # an earlier attempt is still pending on the hub: wait it out
+                            await asyncio.sleep(5)
+                            continue
+                        r.raise_for_status()
+                        code = (await r.json())["code"]
             except Exception as err:
-                return reply(f"Could not reach DIRIGERA at {self.host}.", step="host",
-                             input={"label": "DIRIGERA IP address", "type": "text"},
+                busy = "409" in str(err)
+                return reply("DIRIGERA is still busy with an earlier pairing attempt. "
+                             "Wait two minutes and try again." if busy else
+                             f"Could not reach DIRIGERA at {self.host}.",
+                             step=None if busy else "host",
+                             input=None if busy else {"label": "DIRIGERA IP address",
+                                                      "type": "text"},
                              error=str(err))
-            self._pairing = {"code": code, "verifier": verifier}
-            return reply("Press the action button on the bottom of the DIRIGERA hub "
-                         "now, then tap Continue (within 60 seconds).", step="token")
+            self._pairing = {"code": code, "verifier": verifier, "at": time.monotonic()}
+            return reply(PRESS_MSG, step="token")
         if step == "token" and self._pairing:
-            for _ in range(15):
+            for _ in range(30):  # a minute to press the button
                 async with self.hub.http.post(
                         f"{self.base}/oauth/token", ssl=False, timeout=TIMEOUT,
                         data={"code": self._pairing["code"], "name": socket.gethostname(),
@@ -313,8 +331,9 @@ class DirigeraPlugin(Plugin):
                         break
                 await asyncio.sleep(2)
             if not self.token:
-                return reply("The button press wasn't detected. Press it and try again.",
-                             step="token", error="timeout")
+                self._pairing = {}  # expired on the hub too: the next try starts fresh
+                return reply("The button press wasn't detected in time. Tap Continue to "
+                             "start again, then press the button.", step=None, error="timeout")
             self.hub.store.set("dirigera.token", self.token)
             self._pairing = {}
             self.error = None
