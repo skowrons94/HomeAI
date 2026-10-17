@@ -249,7 +249,8 @@ export const fmt = {
     const h_ = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
     return h_ ? `${h_}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
   },
-  temp: (v) => (v === null || v === undefined ? "–" : (+v).toFixed(1)),
+  temp: (v) => (v === null || v === undefined ? "–"
+    : (+v).toLocaleString(locale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 })),
 };
 
 // ---------------------------------------------------------------- state + events

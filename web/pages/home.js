@@ -311,8 +311,10 @@ function climateRow(e) {
     h("div.stepper.sm",
       h("button.icon", { onclick: () => step(-1), "aria-label": t("Lower") }, icon("minus")), val,
       h("button.icon", { onclick: () => step(1), "aria-label": t("Raise") }, icon("plus"))),
-    modes.includes("off") && onMode && toggle(st.mode !== "off",
-      (on) => act(() => callEntity(e.id, "set_mode", { mode: on ? onMode : "off" })), !e.available));
+    // no "off" mode (e.g. hot water): keep the switch's place so the −/+ of every row line up
+    modes.includes("off") && onMode ? toggle(st.mode !== "off",
+      (on) => act(() => callEntity(e.id, "set_mode", { mode: on ? onMode : "off" })), !e.available)
+      : h("span.sw-slot"));
 }
 
 /** Tap = on/off, hold = brightness and colour. */
