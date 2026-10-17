@@ -43,6 +43,7 @@ import aiohttp
 from .downloads import LANG3, _is_within
 from .library import VIDEO_EXT, _videos
 from .ranking import parse
+from ...i18n import _
 
 log = logging.getLogger("hub.media.subtitles")
 
@@ -677,12 +678,12 @@ class Providers:
 
     async def _os_download(self, c: Cand) -> bytes:
         if not self.os_quota_left():
-            raise RuntimeError("OpenSubtitles daily quota used up")
+            raise RuntimeError(_("OpenSubtitles daily quota used up"))
         d = await self._os_json("POST", "/download", json={"file_id": int(c.id), "sub_format": "srt"})
         if d.get("remaining") == 0:
             self._os_exhausted(d.get("reset_time_utc"))
         if not d.get("link"):
-            raise RuntimeError(d.get("message") or "no download link")
+            raise RuntimeError(d.get("message") or _("no download link"))
         return await self._get(d["link"])
 
     # -- SubDL ---------------------------------------------------------------------
@@ -874,13 +875,13 @@ class Subtitles:
         prev = self.state(v.path) or {}
         ours = bool(prev.get("written")) and old == target
         if old and not ours:
-            return self._set(v, status="found", provider="", message="a subtitle already exists",
+            return self._set(v, status="found", provider="", message=_("a subtitle already exists"),
                              checked_at=now(), written=False)
         info = await probe(v.path)
         v.duration, v.fps = info.get("duration", 0.0), info.get("fps", 0.0)
         if check_audio and not manual and self.lang in info.get("audio", []):
             self._drop_pending(v)
-            return self._set(v, status="skipped", message="audio already has the language",
+            return self._set(v, status="skipped", message=_("audio already has the language"),
                              checked_at=now())
         with contextlib.suppress(OSError):
             v.size = os.path.getsize(v.path)
@@ -888,12 +889,12 @@ class Subtitles:
         self._set(v, status="searching", message="", checked_at=now())
 
         if not self.providers.configured():
-            return self._miss(v, "add an OpenSubtitles or SubDL API key in Settings → Media")
+            return self._miss(v, _("add an OpenSubtitles or SubDL API key in Settings → Media"))
         cands = rank_candidates(await self.providers.search(v), v.release or Path(v.path).stem, v.fps)
         if not cands:
-            return self._miss(v, "no subtitles found online")
+            return self._miss(v, _("no subtitles found online"))
         ref_cache: dict = {}
-        tried, last = 0, "no candidate passed the checks"
+        tried, last = 0, _("no candidate passed the checks")
         rejected = set(prev.get("rejected") or [])
         for c in cands:
             if tried >= MAX_TRIES:
@@ -907,7 +908,7 @@ class Subtitles:
                 raw = await self.providers.download(c)
                 srt = extract_srt(raw, v.season, v.episode)
                 if not srt:
-                    last = "download had no usable .srt"
+                    last = _("download had no usable .srt")
                     continue
                 res = await self._check(v, c, decode_text(srt), ref_cache)
             except Exception as err:
@@ -940,12 +941,13 @@ class Subtitles:
         what = v.title or Path(v.path).stem
         if v.season is not None and v.episode is not None:
             what += f" S{v.season:02d}E{v.episode:02d}"
-        lang = {"it": "Italian", "en": "English", "es": "Spanish", "fr": "French", "de": "German",
-                "pt": "Portuguese"}.get(self.lang, self.lang.upper())
-        note = {"adapted": "timing adjusted to the video", "unverified": "timing not verified"}.get(
-            st["status"], "")
+        names = {"it": _("Italian"), "en": _("English"), "es": _("Spanish"), "fr": _("French"),
+                 "de": _("German"), "pt": _("Portuguese")}
+        lang = names.get(self.lang, self.lang.upper())
+        note = {"adapted": _("timing adjusted to the video"),
+                "unverified": _("timing not verified")}.get(st["status"], "")
         with contextlib.suppress(Exception):
-            await self.hub.notify.send(f"{lang} subtitles ready: {what}", note, tag="tv")
+            await self.hub.notify.send(_("{lang} subtitles ready: {what}", lang=lang, what=what), note, tag="tv")
 
     @staticmethod
     def _write(target: str, text: str):
@@ -965,11 +967,11 @@ class Subtitles:
         cues = await asyncio.to_thread(parse_srt, text)
         need = 20 if v.season is not None else 50
         if len(cues) < need:
-            return {"reject": f"only {len(cues)} cues"}
+            return {"reject": _("only {n} cues", n=len(cues))}
         if not language_ok(" ".join(t for _, _, t in cues), self.lang):
-            return {"reject": "wrong language"}
+            return {"reject": _("wrong language")}
         if v.duration and cues[-1][1] > v.duration * 1.06 + 60:
-            return {"reject": "longer than the video"}
+            return {"reject": _("longer than the video")}
 
         res = {"status": "unverified", "scale": 1.0, "offset": 0.0, "score": None}
         ref = await self._reference(v, c, ref_cache)
@@ -984,17 +986,19 @@ class Subtitles:
                 fit = await asyncio.to_thread(fit_single, cues, refs, THRESH_SUB)
             log.debug("subtitles: %s fit vs %s: %s", Path(v.path).name, kind, fit)
             if fit["status"] == "rejected":
-                return {"reject": f"timing doesn't match the video ({kind} score {fit['score']})"}
+                return {"reject": _("timing doesn't match the video ({kind} score {score})",
+                                    kind=_("audio") if kind == "audio" else _("subtitle"),
+                                    score=fit["score"])}
             res.update(status=fit["status"], scale=fit["scale"], offset=fit["offset"],
-                       score=fit["score"], note=f"checked against {kind}")
+                       score=fit["score"], note=_("checked against {kind}", kind=_("audio") if kind == "audio" else _("subtitle")))
         a, b = res["scale"], res["offset"]
         if res["status"] == "adapted":
             cues = [(max(0.0, a * s + b), a * e + b, t) for s, e, t in cues if a * e + b > 0]
         if v.duration and cues:
             if cues[-1][1] > v.duration + 60:
-                return {"reject": "longer than the video after alignment"}
+                return {"reject": _("longer than the video after alignment")}
             if (cues[-1][1] - cues[0][0]) < 0.6 * v.duration:
-                return {"reject": "covers too little of the runtime"}
+                return {"reject": _("covers too little of the runtime")}
         res["text"] = format_srt(cues)
         return res
 

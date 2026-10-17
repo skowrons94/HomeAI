@@ -14,6 +14,7 @@ from urllib.parse import quote, urlparse
 import aiohttp
 
 from . import parse
+from ...i18n import _
 
 log = logging.getLogger("hub.recipes")
 
@@ -30,14 +31,14 @@ IMG_TYPES = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png", "im
 def check_url(url: str) -> str:
     u = urlparse(url.strip())
     if u.scheme not in ("http", "https") or not u.hostname:
-        raise ValueError("enter a full web address (https://...)")
+        raise ValueError(_("Enter a full web address (https://...)"))
     host = u.hostname.lower()
     if host == "localhost" or host.endswith(".local"):
-        raise ValueError("local addresses are not allowed")
+        raise ValueError(_("Local addresses are not allowed"))
     try:
         ip = ipaddress.ip_address(host)
         if ip.is_private or ip.is_loopback or ip.is_link_local:
-            raise ValueError("local addresses are not allowed")
+            raise ValueError(_("Local addresses are not allowed"))
     except ValueError as e:
         if "not allowed" in str(e):
             raise
@@ -49,7 +50,7 @@ async def _read(resp: aiohttp.ClientResponse, limit: int) -> bytes:
     async for chunk in resp.content.iter_chunked(65536):
         buf += chunk
         if len(buf) > limit:
-            raise ValueError("response too large")
+            raise ValueError(_("Response too large"))
     return bytes(buf)
 
 
@@ -60,7 +61,7 @@ async def fetch_text(http, url: str) -> tuple[str, str]:
                                       "Accept": "text/html,application/json;q=0.9,*/*;q=0.5"},
                         timeout=TIMEOUT, allow_redirects=True) as r:
         if r.status >= 400:
-            raise ValueError(f"the site answered HTTP {r.status}")
+            raise ValueError(_("The site answered HTTP {status}", status=r.status))
         data = await _read(r, MAX_PAGE)
         enc = r.charset or "utf-8"
         return data.decode(enc, errors="replace"), str(r.url)
@@ -101,7 +102,7 @@ async def import_url(http, url: str) -> dict:
     page, final = await fetch_text(http, url)
     rec = parse.parse_page(page, final)
     if not rec:
-        raise ValueError("no recipe found on that page (it has no schema.org Recipe data)")
+        raise ValueError(_("No recipe found on that page (it has no schema.org Recipe data)"))
     rec["lang"] = guess_lang(urlparse(final).netloc, page)
     return rec
 
@@ -150,7 +151,7 @@ async def mealdb_get(http, mid: str) -> dict:
         data = await r.json(content_type=None)
     meals = data.get("meals") or []
     if not meals:
-        raise KeyError("recipe not found on TheMealDB")
+        raise KeyError(_("Recipe not found on TheMealDB"))
     return mealdb_recipe(meals[0])
 
 

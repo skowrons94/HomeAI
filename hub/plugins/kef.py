@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 
 from ..core import Entity, Plugin
+from ..i18n import _
 
 PORT = 50001
 TIMEOUT = 3.0
@@ -87,7 +88,7 @@ class KefClient:
                     await self.close()
                     if attempt:
                         raise
-            raise ConnectionError("unreachable")
+            raise ConnectionError(_("Not reachable"))
 
     async def get(self, reg: int) -> int:
         reply = await self._send(bytes([ord("G"), reg, 0x80]))

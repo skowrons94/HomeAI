@@ -1,6 +1,6 @@
 // Shared feed: friends' diary (watched / rated / watchlist) and shared recipes with tips (hub/plugins/sync).
 // Routes: #/social[/diary|recipes|recipe/<slug>]
-import { api, h, icon, toast, ensureCss, act, debounce, fmt, go, hasPlugin } from "../app.js";
+import { api, h, icon, toast, ensureCss, act, debounce, fmt, go, hasPlugin, t, locale } from "../app.js";
 
 const P = (path, opts) => api(`p/sync/${path}`, opts);
 const enc = encodeURIComponent;
@@ -16,13 +16,13 @@ const stars = (r) => {
   const full = Math.floor(r), half = r - full >= 0.5;
   return "★".repeat(full) + (half ? "½" : "");
 };
-const day = (d) => new Date(d + "T12:00").toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+const day = (d) => new Date(d + "T12:00").toLocaleDateString(locale(), { day: "numeric", month: "short", year: "numeric" });
 
 function syncLine(st) {
   const bits = [];
-  if (st.last_sync) bits.push(`Last sync ${fmt.ago(toSec(st.last_sync))}`);
-  else bits.push("Never synced");
-  if (st.pending) bits.push(`${st.pending} pending`);
+  if (st.last_sync) bits.push(t("Last sync {when}", { when: fmt.ago(toSec(st.last_sync)) }));
+  else bits.push(t("Never synced"));
+  if (st.pending) bits.push(t("{n} pending", { n: st.pending }));
   return h("div.tiny.muted.s-sync", bits.join(" · "),
     st.last_error && h("span.s-err", ` · ${st.last_error}`));
 }
@@ -31,12 +31,12 @@ export default {
   async render(root, args) {
     ensureCss(`/static/pages/social.css?v=${window.CASA_V}`);
     const [view, slug] = args;
-    if (!hasPlugin("sync")) { fill(root, h("div.empty", "Shared feed is off: set it up in Settings.")); return; }
+    if (!hasPlugin("sync")) { fill(root, h("div.empty", t("Shared feed is off: set it up in Settings."))); return; }
     let st;
     try { st = await P("status"); } catch (e) { fill(root, h("div.empty", e.message)); return; }
     if (!st.configured) {
-      fill(root, h("div.empty", "Shared feed is off: set it up in Settings.",
-        h("div", { style: { marginTop: "12px" } }, h("button.primary", { onclick: () => go("#/settings") }, icon("settings"), "Open Settings"))));
+      fill(root, h("div.empty", t("Shared feed is off: set it up in Settings."),
+        h("div", { style: { marginTop: "12px" } }, h("button.primary", { onclick: () => go("#/settings") }, icon("settings"), t("Open Settings")))));
       return;
     }
     if (view === "recipe" && slug) { await renderRecipe(root, slug); return; }
@@ -49,14 +49,14 @@ export default {
     const syncBtn = h("button", { onclick: (e) => act(async () => {
       st = await P("sync", { body: {} });
       refreshLine(st);
-      toast(st.last_error ? "Sync finished with an error" : "Synced", !!st.last_error);
+      toast(st.last_error ? t("Sync finished with an error") : t("Synced"), !!st.last_error);
       if (tab === "diary") renderDiary(body, st);
-    }, e.currentTarget) }, icon("refresh"), "Sync now");
+    }, e.currentTarget) }, icon("refresh"), t("Sync now"));
     fill(root,
-      h("div.s-head", h("h1", "Feed"), syncBtn),
+      h("div.s-head", h("h1", t("Feed")), syncBtn),
       line,
       h("div.tabs", { style: { margin: "10px 0" } }, TABS.map(([k, l]) =>
-        h(`button${k === tab ? ".active" : ""}`, { onclick: () => go(`#/social/${k}`) }, l))),
+        h(`button${k === tab ? ".active" : ""}`, { onclick: () => go(`#/social/${k}`) }, t(l)))),
       body);
     if (tab === "recipes") await renderRecipes(body);
     else await renderDiary(body, st);
@@ -66,9 +66,9 @@ export default {
 // ---------------------------------------------------------------- diary
 
 function what(it) {
-  if (it.kind === "watch") return it.watched_at ? `watched on ${day(it.watched_at)}` : null;
+  if (it.kind === "watch") return it.watched_at ? t("watched on {date}", { date: day(it.watched_at) }) : null;
   if (it.kind === "rating") return it.rating != null ? h("span", h("span.s-stars", stars(it.rating)), ` ${it.rating}`) : null;
-  if (it.kind === "watchlist") return it.on ? "added to watchlist" : "removed from watchlist";
+  if (it.kind === "watchlist") return it.on ? t("added to watchlist") : t("removed from watchlist");
   return it.kind;
 }
 
@@ -94,7 +94,7 @@ async function renderDiary(el, st) {
   const paintChips = () => fill(chips,
     (st.users || []).length > 1 && (st.users || []).map((u) =>
       h(`button.chipbtn${state.user === u ? ".active" : ""}`, { onclick: () => { state.user = state.user === u ? "" : u; load(true); } }, u)),
-    KINDS.map(([k, l]) => h(`button.chipbtn${state.kind === k ? ".active" : ""}`, { onclick: () => { state.kind = k; load(true); } }, l)));
+    KINDS.map(([k, l]) => h(`button.chipbtn${state.kind === k ? ".active" : ""}`, { onclick: () => { state.kind = k; load(true); } }, t(l))));
 
   async function load(reset) {
     if (reset) { last = null; fill(list, loading()); paintChips(); }
@@ -108,8 +108,8 @@ async function renderDiary(el, st) {
     const cards = items.map(diaryCard).filter(Boolean);
     list.append(...cards);
     if (items.length) last = items[items.length - 1].ts;
-    if (!list.children.length) fill(list, h("div.empty", "Nothing here yet. Rate or mark something as watched in Media."));
-    fill(more, items.length >= PAGE && h("button", { onclick: (e) => act(() => load(false), e.currentTarget) }, "Load more"));
+    if (!list.children.length) fill(list, h("div.empty", t("Nothing here yet. Rate or mark something as watched in Media.")));
+    fill(more, items.length >= PAGE && h("button", { onclick: (e) => act(() => load(false), e.currentTarget) }, t("Load more")));
   }
   await load(true);
 }
@@ -118,7 +118,7 @@ async function renderDiary(el, st) {
 
 async function renderRecipes(el) {
   const state = { q: "", tag: "" };
-  const q = h("input", { type: "search", placeholder: "Search shared recipes…" });
+  const q = h("input", { type: "search", placeholder: t("Search shared recipes…") });
   const filters = h("div.s-filters"), grid = h("div.s-rgrid");
   fill(el, h("div.s-search", h("div.s-input", icon("search"), q)), filters, grid);
   let allTags = [];
@@ -133,10 +133,10 @@ async function renderRecipes(el) {
     fill(grid, items.length ? items.map((r) =>
       h("div.s-rcard", { onclick: () => go(`#/social/recipe/${enc(r.slug)}`), title: r.title },
         h("div.img", r.image ? h("img", { src: imgUrl(r.image), loading: "lazy", alt: "" }) : h("div.ph", icon("utensils")),
-          r.tips_count ? h("span.s-badge", `${r.tips_count} tips`) : null),
+          r.tips_count ? h("span.s-badge", t("{n} tips", { n: r.tips_count })) : null),
         h("div.t", r.title),
-        h("div.y", [r.author, r.time_min && `${r.time_min} min`].filter(Boolean).join(" · "))))
-      : h("div.empty", state.q || state.tag ? "Nothing found." : "No shared recipes yet. Open one of your recipes and tap Share with friends."));
+        h("div.y", [r.author, r.time_min && t("{n} min", { n: r.time_min })].filter(Boolean).join(" · "))))
+      : h("div.empty", state.q || state.tag ? t("Nothing found.") : t("No shared recipes yet. Open one of your recipes and tap Share with friends.")));
   }
   q.addEventListener("input", debounce(() => { state.q = q.value.trim(); load(); }, 250));
   await load();
@@ -147,35 +147,35 @@ async function renderRecipe(root, slug) {
   let r;
   try { r = await P(`recipes/${enc(slug)}`); } catch (e) { fill(root, h("div.empty", e.message)); return; }
   const paint = () => {
-    const tipInput = h("input", { placeholder: "Add your trucco…", enterkeyhint: "send", maxlength: 500 });
+    const tipInput = h("input", { placeholder: t("Add your tip…"), enterkeyhint: "send", maxlength: 500 });
     const addTip = (e) => { e?.preventDefault?.(); const text = tipInput.value.trim(); if (!text) return;
-      act(async () => { r = await P(`recipes/${enc(slug)}/tips`, { body: { text } }); toast("Tip added"); paint(); }); };
+      act(async () => { r = await P(`recipes/${enc(slug)}/tips`, { body: { text } }); toast(t("Tip added")); paint(); }); };
     let n = 0;
-    const meta = [r.author && `by ${r.author}`, r.servings && `${r.servings} servings`, r.time_min && `${r.time_min} min`].filter(Boolean).join(" · ");
+    const meta = [r.author && t("by {author}", { author: r.author }), r.servings && t("{n} servings", { n: r.servings }), r.time_min && t("{n} min", { n: r.time_min })].filter(Boolean).join(" · ");
     fill(root, h("div.s-detail",
       h("div.s-hero", r.image ? h("img", { src: imgUrl(r.image), alt: "" }) : h("div.ph", icon("utensils")),
-        h("button.icon.back", { onclick: () => go("#/social/recipes"), "aria-label": "Back" }, icon("left"))),
+        h("button.icon.back", { onclick: () => go("#/social/recipes"), "aria-label": t("Back") }, icon("left"))),
       h("h1", r.title),
       h("div.row.wrap.small.muted", { style: { gap: "8px" } }, meta,
         (r.tags || []).map((x) => h("span.chip", x)),
-        r.source && /^https?:/.test(r.source) && h("a", { href: r.source, target: "_blank", rel: "noopener" }, icon("link"), " source")),
+        r.source && /^https?:/.test(r.source) && h("a", { href: r.source, target: "_blank", rel: "noopener" }, icon("link"), " ", t("source"))),
       h("div.row.wrap", h("button.primary", { onclick: (e) => act(async () => {
         const res = await P(`recipes/${enc(slug)}/import`, { body: {} });
-        toast("Added to your recipes");
+        toast(t("Added to your recipes"));
         if (res?.id != null) go(`#/recipes/recipe/${res.id}`);
-      }, e.currentTarget) }, icon("plus"), "Add to my recipes")),
+      }, e.currentTarget) }, icon("plus"), t("Add to my recipes"))),
       h("div.s-cols",
-        h("div.card.stack", { style: { gap: "10px" } }, h("h2", "Ingredients"),
+        h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("Ingredients")),
           h("div.s-ings", (r.ingredients || []).map((i) => typeof i === "string"
             ? (i.startsWith("# ") ? h("div.s-sub", i.slice(2)) : h("div.s-ing", i)) : h("div.s-ing", i.text || i.heading)))),
-        h("div.card.stack", { style: { gap: "10px" } }, h("h2", "Steps"),
+        h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("Method")),
           (r.steps || []).map((s) => s.startsWith("# ") ? h("div.s-sub", s.slice(2))
             : h("div.s-step", h("span.n", ++n), h("p", s))))),
-      h("div.card.stack", { style: { gap: "10px" } }, h("h2", "Trucchi"),
-        (r.tips || []).length ? (r.tips || []).map((t) => h("div.s-tip", h("span.chip.accent", t.user), h("span", t.text)))
-          : h("div.muted.small", "No tips yet."),
+      h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("Tips")),
+        (r.tips || []).length ? (r.tips || []).map((tp) => h("div.s-tip", h("span.chip.accent", tp.user), h("span", tp.text)))
+          : h("div.muted.small", t("No tips yet.")),
         h("form.s-search", { onsubmit: addTip, style: { margin: 0 } }, tipInput,
-          h("button.primary", { type: "submit" }, icon("plus"), "Add")))));
+          h("button.primary", { type: "submit" }, icon("plus"), t("Add"))))));
   };
   paint();
 }

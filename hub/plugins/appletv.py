@@ -21,6 +21,7 @@ import time
 from aiohttp import web
 
 from ..core import Entity, Plugin
+from ..i18n import _
 
 APPS = {
     "infuse": "com.firecore.infuse",
@@ -123,7 +124,7 @@ class AppleTVPlugin(Plugin):
             confs = await self._scan()
             if not confs:
                 self.hub.update(self.eid, available=False)
-                raise ConnectionError("Apple TV not found on the network")
+                raise ConnectionError(_("Apple TV not found on the network"))
             conf = confs[0]
             for proto, cred in self.creds.items():
                 conf.set_credentials(Protocol[proto], cred)
@@ -282,8 +283,8 @@ class AppleTVPlugin(Plugin):
 
     def _need(self):
         if self.atv is None:
-            raise ConnectionError("Apple TV not connected" +
-                                  ("" if self.creds else " - pair it in Settings"))
+            raise ConnectionError(_("Apple TV not connected") +
+                                  ("" if self.creds else _(" - pair it in Settings")))
         return self.atv
 
     async def turn_on(self):
@@ -327,15 +328,15 @@ class AppleTVPlugin(Plugin):
             tvs = [c for c in confs if c.device_info.operating_system == OperatingSystem.TvOS
                    and "homepod" not in c.device_info.model.name.lower()]
             if not tvs:
-                return reply("No Apple TV found on the network.", error="not found")
-            return reply("Which Apple TV?", step="device", choices=[
+                return reply(_("No Apple TV found on the network."), error="not found")
+            return reply(_("Which Apple TV?"), step="device", choices=[
                 {"label": f"{c.name} ({c.address})", "value": c.identifier} for c in tvs])
 
         if step == "device":
             self.identifier = value
             confs = await self._scan()
             if not confs:
-                return reply("That Apple TV disappeared from the network.", error="not found")
+                return reply(_("That Apple TV disappeared from the network."), error="not found")
             self.conf = confs[0]
             self._pair_queue = []
             for proto in PAIR_ORDER:
@@ -344,9 +345,9 @@ class AppleTVPlugin(Plugin):
                     continue
                 if svc.pairing == PairingRequirement.Disabled:
                     return reply(
-                        "Pairing is disabled on the Apple TV. On the TV open Settings → "
-                        "AirPlay and HomeKit → Allow Access and choose \"Everyone on the "
-                        "Same Network\", then start again.", error="pairing disabled")
+                        _("Pairing is disabled on the Apple TV. On the TV open Settings → "
+                          "AirPlay and HomeKit → Allow Access and choose \"Everyone on the "
+                          "Same Network\", then start again."), error="pairing disabled")
                 self._pair_queue.append(proto)
             return await self._next_pairing(reply)
 
@@ -362,10 +363,10 @@ class AppleTVPlugin(Plugin):
                 await self._pairing.close()
                 self._pairing = None
             if not ok:
-                return reply("Wrong PIN or pairing timed out. Start again.", error="failed")
+                return reply(_("Wrong PIN or pairing timed out. Start again."), error="failed")
             return await self._next_pairing(reply)
 
-        return reply("Start again.", error="unknown step")
+        return reply(_("Start again."), error="unknown step")
 
     async def _next_pairing(self, reply):
         import pyatv
@@ -376,13 +377,13 @@ class AppleTVPlugin(Plugin):
             self.hub.store.set("appletv.credentials", self.creds)
             await self._disconnect()
             self.hub.spawn(self._ensure_connected(), "appletv connect")
-            return reply(f"Paired with {self.conf.name}.", done=True)
+            return reply(_("Paired with {name}.", name=self.conf.name), done=True)
         proto = self._pair_queue.pop(0)
         self._pairing = await pyatv.pair(self.conf, Protocol[proto], asyncio.get_running_loop(),
                                          name="Casa")
         await self._pairing.begin()
-        return reply(f"Enter the PIN shown on the TV ({proto}).", step=f"pin:{proto}",
-                     input={"label": "PIN", "type": "number"})
+        return reply(_("Enter the PIN shown on the TV ({proto}).", proto=proto), step=f"pin:{proto}",
+                     input={"label": _("PIN"), "type": "number"})
 
 
 class _PushListener:

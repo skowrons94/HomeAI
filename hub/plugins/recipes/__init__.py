@@ -16,6 +16,7 @@ import re
 from aiohttp import web
 
 from ...core import Plugin
+from ...i18n import _
 from . import sources
 from .db import Book
 
@@ -123,7 +124,7 @@ class RecipesPlugin(Plugin):
         else:
             url = (b.get("url") or "").strip()
             if not url:
-                raise ValueError("url is required")
+                raise ValueError(_("A link is required"))
             rec = None
         if rec is None:
             url = sources.check_url(url)
@@ -162,7 +163,7 @@ class RecipesPlugin(Plugin):
         try:
             return int(request.match_info["id"])
         except ValueError:
-            raise KeyError("recipe not found")
+            raise KeyError(_("Recipe not found"))
 
     async def r_get(self, request):
         sv = request.query.get("servings")

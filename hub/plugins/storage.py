@@ -27,6 +27,7 @@ from urllib.parse import quote
 from aiohttp import web
 
 from ..core import Entity, Plugin
+from ..i18n import _
 from ..settings import SECRET
 
 MAC = sys.platform == "darwin"
@@ -306,9 +307,9 @@ class StoragePlugin(Plugin):
 
     async def list_shares(self, host: str, user: str, password: str, version: str = "auto"):
         if not valid_host(host):
-            raise ValueError("invalid host")
+            raise ValueError(_("Invalid host"))
         if not valid_user(user):
-            raise ValueError("invalid username")
+            raise ValueError(_("Invalid username"))
         if MAC:
             auth = f"{quote(user, safe='')}:{quote(password, safe='')}@" if user and password \
                 else (f"{quote(user, safe='')}@" if user else "")
@@ -317,7 +318,7 @@ class StoragePlugin(Plugin):
             parse = parse_smbutil
         else:
             if not shutil.which("smbclient"):
-                raise RuntimeError("smbclient is not installed (sudo apt install smbclient)")
+                raise RuntimeError(_("smbclient is not installed (sudo apt install smbclient)"))
             cmd = ["smbclient", "-L", f"//{host}", "-g"]
             cmd += ["-U", user] if user else ["-N"]
             proto = {"1.0": "NT1", "2.0": "SMB2", "2.1": "SMB2", "3.0": "SMB3"}.get(version)
@@ -328,7 +329,7 @@ class StoragePlugin(Plugin):
         shares = parse(out)
         if not shares and rc != 0:
             msg = (err or out).strip().splitlines()
-            raise RuntimeError(msg[-1] if msg else "could not list shares")
+            raise RuntimeError(msg[-1] if msg else _("Could not list shares"))
         return shares
 
     # -- mount / unmount ---------------------------------------------------------------------
@@ -341,15 +342,15 @@ class StoragePlugin(Plugin):
         mp = os.path.expanduser(mount_point or self.mount_point)
         version = version or self.version
         if not valid_host(host):
-            raise ValueError("invalid host")
+            raise ValueError(_("Invalid host"))
         if not valid_share(share):
-            raise ValueError("invalid share name")
+            raise ValueError(_("Invalid share name"))
         if not valid_user(user):
-            raise ValueError("invalid username")
+            raise ValueError(_("Invalid username"))
         if not valid_mount_point(mp):
-            raise ValueError("mount point must be under /mnt or /media")
+            raise ValueError(_("Mount point must be under /mnt or /media"))
         if version not in VERSIONS:
-            raise ValueError("invalid SMB version")
+            raise ValueError(_("Invalid SMB version"))
         if is_mounted(mp):
             return {"mounted": True, "mount_point": mp, "already": True}
         self.busy = True
@@ -367,7 +368,7 @@ class StoragePlugin(Plugin):
                 rc, out, err = await run(cmd, stdin=f"{user}\n{password}\n", timeout=60)
             if rc != 0 or not is_mounted(mp):
                 msg = (err or out).strip().splitlines()
-                self.mount_error = msg[-1] if msg else f"mount failed (exit {rc})"
+                self.mount_error = msg[-1] if msg else _("Mount failed (exit {rc})", rc=rc)
                 raise RuntimeError(self.mount_error)
             self.mount_error = None
             self.log.info("mounted //%s/%s on %s", host, share, mp)
@@ -379,7 +380,7 @@ class StoragePlugin(Plugin):
     async def unmount(self, mount_point=None):
         mp = os.path.expanduser(mount_point or self.mount_point)
         if not valid_mount_point(mp):
-            raise ValueError("invalid mount point")
+            raise ValueError(_("Invalid mount point"))
         if not is_mounted(mp):
             return {"mounted": False}
         self.busy = True
@@ -393,7 +394,7 @@ class StoragePlugin(Plugin):
             rc, out, err = await run(cmd, timeout=30)
             if rc != 0 and is_mounted(mp):
                 msg = (err or out).strip().splitlines()
-                raise RuntimeError(msg[-1] if msg else "umount failed (busy?)")
+                raise RuntimeError(msg[-1] if msg else _("Unmount failed (busy?)"))
             await self._refresh()
             return {"mounted": False}
         finally:
@@ -427,7 +428,7 @@ class StoragePlugin(Plugin):
             if eid not in self._entities:
                 self._entities.add(eid)
                 self.hub.add_entity(Entity(
-                    id=eid, name=f"{labels[key]} space", kind="sensor", plugin=self.name,
+                    id=eid, name=_("{what} space", what=_(labels[key])), kind="sensor", plugin=self.name,
                     attrs={"units": {"free_gb": "GB", "total_gb": "GB", "used_pct": "%"},
                            "path": path, "history": ["free_gb", "used_pct"]}))
             ent = self.hub.entities[eid]

@@ -22,6 +22,7 @@ import socket
 import ssl
 
 from ..core import Entity, Plugin
+from ..i18n import _
 
 MQTT_PORT = 36669
 KEYS = {
@@ -145,7 +146,7 @@ class HisensePlugin(Plugin):
 
     def _publish(self, topic: str, payload: str):
         if not self.mqtt_ok:
-            raise ConnectionError("TV MQTT not connected (experimental; needs certificates)")
+            raise ConnectionError(_("TV MQTT not connected (experimental; needs certificates)"))
         self.mqtt.publish(topic, payload)
 
     def _mqtt_connect(self):

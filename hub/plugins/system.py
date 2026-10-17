@@ -17,6 +17,7 @@ import sys
 import time
 
 from ..core import Entity, Plugin
+from ..i18n import _
 
 LATENCY_EVERY = 60  # seconds between internet checks
 
@@ -137,22 +138,22 @@ class SystemPlugin(Plugin):
         self.data_dir = str(getattr(self.hub, "data_dir", "/"))
         psutil.cpu_percent(None)  # prime
         self.hub.add_entity(Entity(
-            "system.cpu", "CPU", "sensor", self.name, "",
+            "system.cpu", _("CPU"), "sensor", self.name, "",
             attrs={"units": {"usage": "%", "temperature": "°C", "load": ""},
-                   "history": ["usage", "temperature", "load"], "primary": "temperature", "group": "This hub", "icon": "cpu"}))
+                   "history": ["usage", "temperature", "load"], "primary": "temperature", "group": _("This hub"), "icon": "cpu"}))
         self.hub.add_entity(Entity(
-            "system.memory", "Memory", "sensor", self.name, "",
-            attrs={"units": {"used": "%", "free": "MB"}, "history": ["used"], "primary": "used", "group": "This hub", "icon": "cpu"}))
+            "system.memory", _("Memory"), "sensor", self.name, "",
+            attrs={"units": {"used": "%", "free": "MB"}, "history": ["used"], "primary": "used", "group": _("This hub"), "icon": "cpu"}))
         self.hub.add_entity(Entity(
-            "system.disk", "Disk", "sensor", self.name, "",
-            attrs={"units": {"free": "GB", "used": "%"}, "history": ["free"], "primary": "free", "group": "This hub", "icon": "storage"}))
+            "system.disk", _("Disk"), "sensor", self.name, "",
+            attrs={"units": {"free": "GB", "used": "%"}, "history": ["free"], "primary": "free", "group": _("This hub"), "icon": "storage"}))
         self.hub.add_entity(Entity(
-            "system.network", "Network", "sensor", self.name, "",
+            "system.network", _("Network"), "sensor", self.name, "",
             attrs={"units": {"download": "Mbit/s", "upload": "Mbit/s", "signal": "dBm", "quality": "%"},
-                   "history": ["download", "upload", "signal", "quality"], "primary": "download", "group": "This hub", "icon": "wifi"}))
+                   "history": ["download", "upload", "signal", "quality"], "primary": "download", "group": _("This hub"), "icon": "wifi"}))
         self.hub.add_entity(Entity(
-            "system.internet", "Internet", "sensor", self.name, "",
-            attrs={"units": {"latency": "ms"}, "history": ["latency"], "primary": "latency", "group": "This hub", "icon": "wifi"}))
+            "system.internet", _("Internet"), "sensor", self.name, "",
+            attrs={"units": {"latency": "ms"}, "history": ["latency"], "primary": "latency", "group": _("This hub"), "icon": "wifi"}))
         interval = max(5, float(self.config.get("interval", 15) or 15))
         self.hub.every(interval, self.poll, "system", initial_delay=1)
 

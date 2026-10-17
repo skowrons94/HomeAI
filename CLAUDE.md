@@ -1,6 +1,6 @@
 # HomeAI (Casa) — notes for Claude
 
-A lightweight home hub for a Raspberry Pi 4: one Python process (aiohttp + HAP-python) with
+A lightweight home hub for a Raspberry Pi (production: Pi 3 B+, 1 GB RAM): one Python process (aiohttp + HAP-python) with
 plugins, a HomeKit bridge, a media center and a no-build web app. See README.md for the user
 view; this file is how to work on it.
 
@@ -88,7 +88,19 @@ deploy/          Pi installer, VPN script, macOS launchd
   plugins are reported by the hub automatically); each item has an `action` the UI can run.
 - Interactive pairing: `POST /api/p/<name>/setup {step, value}` →
   `{message, input, choices, step, done, error}`; set `status()["setup"] = True` to show the wizard.
-- Keep dependencies light (Pi 4, ~400 MB memory cap); import heavy libraries inside `start()`.
+- Keep dependencies light (Pi 3 B+, 1 GB RAM, ~400 MB memory cap); import heavy libraries inside `start()`.
+
+### Language, people, layout
+- The UI is translated, Italian by default (`language` in config, Settings → General). Keys are
+  the **English source text**: `t("Ready: {what}", { what })` in JS (from `web/app.js`), `_()`
+  from `hub/i18n.py` in Python for user-facing server text (notifications, attention, setup
+  messages, UI errors) — never for logs. Dictionaries: `web/i18n/it/<area>.json`, one per area;
+  same `{placeholders}` as the source (`tests/test_i18n.py`). Plugin `schema` texts, `title` and
+  `description` stay English in Python and are translated client-side (`schemas.json`).
+- Dates/numbers: `fmt.date/time/num` and `locale()` in `web/app.js`, never bare `toLocale*()`.
+- `people` (config) + "Chi sei?" per phone (localStorage `casa.person`, sent as the
+  `X-Casa-Person` header). Layout prefs per person: `GET/PUT /api/prefs?person=` →
+  `{tabs: [page ids], home: {order, hidden}}`. The phone tab bar = pinned pages + "More".
 
 ### History
 Graphite-style rollups in SQLite (`h1m` 1-minute for 2 days, `h5m` 5-minute for 30 days, `h1h`

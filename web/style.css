@@ -93,7 +93,7 @@ header.page { display: flex; align-items: center; gap: 12px; margin-bottom: 20px
     border-right: 0; border-top: 1px solid var(--line);
     background: color-mix(in srgb, var(--surface) 88%, transparent); backdrop-filter: blur(20px);
   }
-  nav.side .brand, nav.side .spacer { display: none; }
+  nav.side .brand, nav.side .spacer, nav a.tab:not(.pin), nav a.tab.desk { display: none; }
   nav.side { padding-left: calc(4px + env(safe-area-inset-left)); padding-right: calc(4px + env(safe-area-inset-right)); gap: 0; }
   nav a.tab { flex-direction: column; align-items: center; gap: 2px; font-size: 10.5px; padding: 6px 2px; flex: 1 1 0; min-width: 0; }
   nav a.tab span:not(.dot):not(.count-badge) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -240,3 +240,4 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .swatches { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
 .swatch { aspect-ratio: 1; border-radius: 50%; padding: 0; min-width: 0;
           box-shadow: inset 0 0 0 2px rgb(255 255 255 / .25); }
+.section.off h2 { opacity: .45; text-decoration: line-through; }

@@ -19,6 +19,7 @@ import time
 from aiohttp import web
 
 from ...core import Entity, Plugin
+from ...i18n import _
 from .parsers import UNITS, parse, values
 
 PUSH_EVERY = 60  # re-send unchanged values at most this often
@@ -244,18 +245,18 @@ class BluetoothPlugin(Plugin):
         low = msg.lower()
         if sys.platform == "darwin" and any(w in low for w in
                                             ("authoriz", "permission", "denied", "not allowed")):
-            return ("Bluetooth permission denied: allow this app (or your terminal) in "
-                    "System Settings > Privacy & Security > Bluetooth, then reload the plugin.")
+            return _("Bluetooth permission denied: allow this app (or your terminal) in "
+                     "System Settings > Privacy & Security > Bluetooth, then reload the plugin.")
         if "turned off" in low or "powered off" in low:
-            return "Bluetooth is turned off."
-        return f"Bluetooth unavailable: {msg}" if msg else \
-            "Bluetooth unavailable (no adapter or no permission)"
+            return _("Bluetooth is turned off.")
+        return _("Bluetooth unavailable: {msg}", msg=msg) if msg else \
+            _("Bluetooth unavailable (no adapter or no permission)")
 
     async def _scan_forever(self):
         try:
             from bleak import BleakScanner
         except ImportError:
-            self.error = "bleak is not installed (pip install bleak)"
+            self.error = _("bleak is not installed (pip install bleak)")
             return
         delay = 15
         passive_ok = sys.platform.startswith("linux") and not self.config.get("active_scan", False)
@@ -290,7 +291,7 @@ class BluetoothPlugin(Plugin):
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError:
-                self.error = "Bluetooth did not start (timeout; permission prompt pending?)"
+                self.error = _("Bluetooth did not start (timeout; permission prompt pending?)")
             except Exception as err:
                 self.error = self._friendly(err)
             if self.error:

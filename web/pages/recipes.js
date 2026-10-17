@@ -1,56 +1,11 @@
 // Recipes: discover/import, personal recipe book, shopping list, calorie log (hub/plugins/recipes).
 // Routes: #/recipes[/discover|mine|shopping|today|recipe/<id>]
-import { api, h, icon, toast, sheet, ensureCss, act, debounce, go, hasPlugin } from "../app.js";
+import { api, h, icon, toast, sheet, ensureCss, act, debounce, go, hasPlugin, t, locale } from "../app.js";
 
 const P = (path, opts) => api(`p/recipes/${path}`, opts);
 const enc = encodeURIComponent;
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false && k !== ""));
 const loading = () => h("div.empty", h("div.spin"));
-
-// ---------------------------------------------------------------- i18n (Italian first)
-const TXT = {
-  title: ["Ricette", "Recipes"], discover: ["Scopri", "Discover"], mine: ["Le mie ricette", "My recipes"],
-  shopping: ["Spesa", "Shopping"], today: ["Oggi", "Today"],
-  searchPh: ["Cerca o incolla un link…", "Search or paste a link…"],
-  search: ["Cerca", "Search"], import: ["Importa", "Import"], create: ["Nuova ricetta", "New recipe"],
-  searching: ["Ricerca in corso…", "Searching…"], nothing: ["Nessun risultato.", "Nothing found."],
-  discoverHint: ["Cerca su GialloZafferano e TheMealDB, oppure incolla il link di una ricetta da qualsiasi sito: viene salvata sul tuo hub e funziona anche offline.",
-                 "Search GialloZafferano and TheMealDB, or paste the link of a recipe from any site: it is saved on your hub and works offline."],
-  saved: ["Salvata", "Saved"], importing: ["Importo…", "Importing…"], imported: ["Ricetta salvata", "Recipe saved"],
-  favourites: ["Preferite", "Favourites"], filterPh: ["Filtra le tue ricette…", "Filter your recipes…"],
-  noRecipes: ["Nessuna ricetta salvata. Cerca o importa la prima!", "No saved recipes yet. Search or import your first one!"],
-  back: ["Indietro", "Back"], servings: ["Porzioni", "Servings"], ingredients: ["Ingredienti", "Ingredients"],
-  steps: ["Preparazione", "Method"], notes: ["Note personali", "Personal notes"],
-  notesPh: ["Le tue note: modifiche, trucchi, voto della famiglia…", "Your notes: tweaks, tips, family verdict…"],
-  addAll: ["Aggiungi alla spesa", "Add to shopping list"], added: ["Aggiunti alla lista della spesa", "Added to the shopping list"],
-  edit: ["Modifica", "Edit"], save: ["Salva", "Save"], cancel: ["Annulla", "Cancel"],
-  reset: ["Ripristina originale", "Reset to original"], resetQ: ["Tornare alla versione originale? Le tue modifiche a titolo, ingredienti e preparazione andranno perse.", "Go back to the original version? Your edits to title, ingredients and method will be lost."],
-  del: ["Elimina", "Delete"], delQ: ["Eliminare questa ricetta dal tuo hub?", "Delete this recipe from your hub?"],
-  logPortion: ["Registra una porzione", "Log a portion"], portions: ["Porzioni mangiate", "Portions eaten"],
-  logged: ["Aggiunto al diario di oggi", "Added to today's log"],
-  kcalServing: ["kcal a porzione", "kcal per serving"], estimate: ["stima dagli ingredienti", "estimated from the ingredients"],
-  noKcal: ["calorie non note", "calories unknown"], titleF: ["Titolo", "Title"],
-  ingF: ["Ingredienti (uno per riga, '# Titolo' per un gruppo)", "Ingredients (one per line, '# Heading' for a group)"],
-  stepF: ["Preparazione (un passaggio per riga)", "Method (one step per line)"],
-  tagsF: ["Tag (separati da virgola)", "Tags (comma separated)"],
-  kcalF: ["Calorie a porzione (vuoto = automatico)", "Calories per serving (empty = automatic)"],
-  edited: ["modificata", "edited"], source: ["Fonte", "Source"], subs: ["Sostituzioni", "Substitutions"],
-  addOne: ["Aggiungi alla spesa", "Add to shopping list"],
-  shopPh: ["Aggiungi un articolo (es. 2 kg patate)…", "Add an item (e.g. 2 kg potatoes)…"], add: ["Aggiungi", "Add"],
-  clearChecked: ["Rimuovi spuntati", "Clear checked"], clearAll: ["Svuota lista", "Clear all"],
-  shopEmpty: ["La lista è vuota. Apri una ricetta e aggiungi gli ingredienti.", "Nothing to buy. Open a recipe and add its ingredients."],
-  fromRecipes: ["da", "from"], goal: ["obiettivo", "goal"], eaten: ["mangiate", "eaten"], left: ["restanti", "left"], over: ["oltre", "over"],
-  manual: ["Aggiunta manuale", "Manual entry"], name: ["Cosa hai mangiato", "What you ate"], kcal: ["kcal", "kcal"],
-  fromBook: ["Da una tua ricetta", "From your recipes"], last7: ["Ultimi 7 giorni", "Last 7 days"],
-  logEmpty: ["Niente registrato per questo giorno.", "Nothing logged for this day."], pick: ["Scegli una ricetta…", "Pick a recipe…"],
-  new: ["Nuova", "New"], manualTitle: ["Nuova ricetta", "New recipe"], needTitle: ["Serve un titolo", "A title is required"],
-  min: ["min", "min"], prep: ["preparazione", "prep"], cook: ["cottura", "cook"], offline: ["Non raggiungibile", "Unreachable"],
-  share: ["Condividi con gli amici", "Share with friends"], shared: ["Ricetta condivisa.", "Recipe shared."],
-  view: ["Vedi", "View"],
-  srcErr: ["Alcune fonti non rispondono", "Some sources didn't answer"],
-};
-let LANG = 0;
-const t = (k) => (TXT[k] || [k, k])[LANG];
 
 const fmtMin = (m) => !m ? "" : m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60}` : ""}` : `${m} ${t("min")}`;
 const kcalText = (r) => r.kcal ? `${r.kcal_est ? "~" : ""}${r.kcal} kcal` : "";
@@ -61,22 +16,22 @@ const FLAG = { it: "🇮🇹", en: "🇬🇧" };
 let status = { language: "it", goal: 2000 };
 
 const TABS = ["discover", "mine", "shopping", "today"];
+const TAB_LABEL = () => ({ discover: t("Discover"), mine: t("My recipes"), shopping: t("Shopping"), today: t("Today") });
 
 export default {
   async render(root, args) {
     ensureCss(`/static/pages/recipes.css?v=${window.CASA_V}`);
     try { status = await P("status"); } catch (e) { fill(root, h("div.empty", e.message)); return; }
-    LANG = status.language === "en" ? 1 : 0;
     const [view, id] = args;
     if (view === "recipe") { await renderDetail(root, id); return; }
 
     const tab = TABS.includes(view) ? view : "discover";
     const body = h("div.r-body");
     fill(root,
-      h("div.r-head", h("h1", t("title")),
-        h("button.primary", { onclick: () => newRecipe() }, icon("plus"), t("create"))),
+      h("div.r-head", h("h1", t("Recipes")),
+        h("button.primary", { onclick: () => newRecipe() }, icon("plus"), t("New recipe"))),
       h("div.tabs", TABS.map((k) =>
-        h(`button${k === tab ? ".active" : ""}`, { onclick: () => go(`#/recipes/${k}`) }, t(k)))),
+        h(`button${k === tab ? ".active" : ""}`, { onclick: () => go(`#/recipes/${k}`) }, TAB_LABEL()[k]))),
       body);
     ({ discover: renderDiscover, mine: renderMine, shopping: renderShopping, today: renderToday })[tab](body);
   },
@@ -95,11 +50,11 @@ function card(r, onclick, extra) {
 // ---------------------------------------------------------------- discover
 
 function renderDiscover(el) {
-  const input = h("input", { type: "search", placeholder: t("searchPh"), enterkeyhint: "search",
+  const input = h("input", { type: "search", placeholder: t("Search or paste a link…"), enterkeyhint: "search",
                              value: sessionStorage.getItem("r-q") || "" });
   const out = h("div");
   const btn = h("button.primary", { type: "submit" });
-  const label = () => fill(btn, icon(isUrl(input.value) ? "download" : "search"), isUrl(input.value) ? t("import") : t("search"));
+  const label = () => fill(btn, icon(isUrl(input.value) ? "download" : "search"), isUrl(input.value) ? t("Import") : t("Search"));
   label();
   input.addEventListener("input", label);
   const submit = async (e) => {
@@ -114,12 +69,12 @@ function renderDiscover(el) {
   };
   fill(el, h("form.r-search", { onsubmit: submit }, h("div.r-input", icon("search"), input), btn), out);
   if (input.value.trim() && !isUrl(input.value)) submit(new Event("submit"));
-  else fill(out, h("div.empty", t("discoverHint")));
+  else fill(out, h("div.empty", t("Search GialloZafferano and TheMealDB, or paste the link of a recipe from any site: it is saved on your hub and works offline.")));
 }
 
 function showResults(out, res, q) {
   const warn = Object.keys(res.errors || {}).length
-    ? h("div.r-banner", "⚠️", h("div", `${t("srcErr")}: ${Object.entries(res.errors).map(([k, v]) => `${k} (${v})`).join(", ")}`)) : null;
+    ? h("div.r-banner", "⚠️", h("div", `${t("Some sources didn't answer")}: ${Object.entries(res.errors).map(([k, v]) => `${k} (${v})`).join(", ")}`)) : null;
   fill(out, warn, res.results.length
     ? h("div.r-grid", res.results.map((r) => {
       const c = card({ image: r.image, title: r.title, meta: `${FLAG[r.lang] || ""} ${r.subtitle || r.site}` },
@@ -127,34 +82,34 @@ function showResults(out, res, q) {
         r.saved ? h("span.r-badge", icon("check")) : null);
       return c;
     }))
-    : h("div.empty", `${t("nothing")} “${q}”`));
+    : h("div.empty", `${t("Nothing found.")} “${q}”`));
 }
 
 async function importRecipe(body, busyEl) {
   busyEl.classList.add("busy");
   if (busyEl.tagName === "BUTTON") busyEl.disabled = true;
   try {
-    toast(t("importing"));
+    toast(t("Importing…"));
     const r = await P("import", { body });
-    if (!r.existing) toast(t("imported"));
+    if (!r.existing) toast(t("Recipe saved"));
     go(`#/recipes/recipe/${r.id}`);
   } catch (e) { toast(e.message, true); }
   finally { busyEl.classList.remove("busy"); if (busyEl.tagName === "BUTTON") busyEl.disabled = false; }
 }
 
 async function newRecipe() {
-  const title = h("input", { placeholder: t("titleF") });
-  const ing = h("textarea", { rows: 6, placeholder: "200 g spaghetti\n2 uova" });
+  const title = h("input", { placeholder: t("Title") });
+  const ing = h("textarea", { rows: 6, placeholder: t("200 g spaghetti\n2 eggs") });
   const steps = h("textarea", { rows: 4 });
   const sv = h("input", { type: "number", min: 1, value: status.default_servings || 2 });
-  const s = sheet(t("manualTitle"), [
-    h("label.field", t("titleF"), title), h("label.field", t("servings"), sv),
-    h("label.field", t("ingF"), ing), h("label.field", t("stepF"), steps),
+  const s = sheet(t("New recipe"), [
+    h("label.field", t("Title"), title), h("label.field", t("Servings"), sv),
+    h("label.field", t("Ingredients (one per line, '# Heading' for a group)"), ing), h("label.field", t("Method (one step per line)"), steps),
     h("button.primary.lg", { onclick: (e) => act(async () => {
-      if (!title.value.trim()) return toast(t("needTitle"), true);
+      if (!title.value.trim()) return toast(t("A title is required"), true);
       const r = await P("recipes", { body: { title: title.value, servings: +sv.value, ingredients: ing.value, steps: steps.value } });
       s.close(); go(`#/recipes/recipe/${r.id}`);
-    }, e.currentTarget) }, t("save"))]);
+    }, e.currentTarget) }, t("Save"))]);
   title.focus();
 }
 
@@ -163,11 +118,11 @@ async function newRecipe() {
 async function renderMine(el) {
   const state = { fav: false, tag: "", q: "" };
   const list = h("div"), filters = h("div.r-filters");
-  const q = h("input", { type: "search", placeholder: t("filterPh") });
+  const q = h("input", { type: "search", placeholder: t("Filter your recipes…") });
   fill(el, h("div.r-search", h("div.r-input", icon("search"), q)), filters, list);
   const tags = await P("tags");
   const paintFilters = () => fill(filters,
-    h(`button.chipbtn${state.fav ? ".active" : ""}`, { onclick: () => { state.fav = !state.fav; refresh(); } }, icon("heart"), t("favourites")),
+    h(`button.chipbtn${state.fav ? ".active" : ""}`, { onclick: () => { state.fav = !state.fav; refresh(); } }, icon("heart"), t("Favourites")),
     tags.slice(0, 14).map((x) => h(`button.chipbtn${state.tag === x.tag ? ".active" : ""}`,
       { onclick: () => { state.tag = state.tag === x.tag ? "" : x.tag; refresh(); } }, x.tag)));
   async function refresh() {
@@ -177,7 +132,7 @@ async function renderMine(el) {
       ? h("div.r-grid", items.map((r) => card({ ...r, meta: [kcalText(r), fmtMin(r.total_min)].filter(Boolean).join(" · ") || r.site },
         () => go(`#/recipes/recipe/${r.id}`),
         [r.fav && h("span.r-badge.fav", icon("heart")), r.edited && h("span.r-badge.ed", icon("edit"))])))
-      : h("div.empty", state.fav || state.tag || state.q ? t("nothing") : t("noRecipes")));
+      : h("div.empty", state.fav || state.tag || state.q ? t("Nothing found.") : t("No saved recipes yet. Search or import your first one!")));
   }
   q.addEventListener("input", debounce(() => { state.q = q.value; refresh(); }, 250));
   await refresh();
@@ -205,7 +160,7 @@ function paintDetail(view, rec, ctx) {
   const { id } = ctx;
   const upd = (patch) => act(async () => { await ctx.reload(patch); ctx.paint(); });
 
-  const heart = h(`button.icon.heart${rec.fav ? ".on" : ""}`, { title: t("favourites"), onclick: () => upd({ fav: !rec.fav }) }, icon("heart"));
+  const heart = h(`button.icon.heart${rec.fav ? ".on" : ""}`, { title: t("Favourites"), onclick: () => upd({ fav: !rec.fav }) }, icon("heart"));
   const stars = h("div.stars", [1, 2, 3, 4, 5].map((n) =>
     h(`button.star${n <= rec.rating ? ".on" : ""}`, { onclick: () => upd({ rating: rec.rating === n ? 0 : n }), "aria-label": `${n}` }, icon("star"))));
 
@@ -215,8 +170,8 @@ function paintDetail(view, rec, ctx) {
   ].filter(Boolean).join(" · ");
 
   const kcalChip = rec.kcal
-    ? h("span.chip.accent", { title: rec.kcal_est ? t("estimate") : "" }, `${rec.kcal_est ? "~" : ""}${rec.kcal} ${t("kcalServing")}`)
-    : h("span.chip", t("noKcal"));
+    ? h("span.chip.accent", { title: rec.kcal_est ? t("estimated from the ingredients") : "" }, `${rec.kcal_est ? "~" : ""}${rec.kcal} ${t("kcal per serving")}`)
+    : h("span.chip", t("calories unknown"));
 
   let target = rec.servings;
   const val = h("span.val", target % 1 ? target.toFixed(1) : target);
@@ -228,12 +183,12 @@ function paintDetail(view, rec, ctx) {
 
   const ingList = h("div.r-ings", rec.ingredients.map((i) => {
     if (i.heading) return h("div.r-sub", i.heading);
-    const subs = i.subs?.length ? h("div.r-subs.hidden", h("b", `${t("subs")}: `), i.subs.join(" · ")) : null;
+    const subs = i.subs?.length ? h("div.r-subs.hidden", h("b", `${t("Substitutions")}: `), i.subs.join(" · ")) : null;
     return h("div.r-ing",
       h("div.line", h("span.txt", i.text),
-        subs && h("button.icon.ghost", { title: t("subs"), onclick: () => subs.classList.toggle("hidden") }, "⇄"),
-        h("button.icon.ghost", { title: t("addOne"), onclick: (e) => act(async () => {
-          await P("shopping", { body: { name: i.text } }); toast(t("added"));
+        subs && h("button.icon.ghost", { title: t("Substitutions"), onclick: () => subs.classList.toggle("hidden") }, "⇄"),
+        h("button.icon.ghost", { title: t("Add to shopping list"), onclick: (e) => act(async () => {
+          await P("shopping", { body: { name: i.text } }); toast(t("Added to the shopping list"));
         }, e.currentTarget) }, icon("cart"))),
       subs);
   }));
@@ -245,46 +200,46 @@ function paintDetail(view, rec, ctx) {
     steps.push(h("div.r-step", h("span.n", ++n), h("p", s)));
   }
 
-  const notes = h("textarea", { rows: 3, placeholder: t("notesPh"), value: rec.notes });
+  const notes = h("textarea", { rows: 3, placeholder: t("Your notes: tweaks, tips, family verdict…"), value: rec.notes });
   notes.addEventListener("change", () => act(async () => { await P(`recipe/${id}`, { method: "PUT", body: { notes: notes.value } }); rec.notes = notes.value; }));
 
-  const tagInput = h("input", { placeholder: t("tagsF"), value: rec.tags.join(", ") });
+  const tagInput = h("input", { placeholder: t("Tags (comma separated)"), value: rec.tags.join(", ") });
   tagInput.addEventListener("change", () => upd({ tags: tagInput.value }));
 
   fill(view,
     h("div.r-hero", rec.image ? h("img", { src: rec.image, alt: "" }) : h("div.ph", icon("utensils")),
-      h("button.icon.back", { onclick: () => go("#/recipes/mine"), "aria-label": t("back") }, icon("left"))),
+      h("button.icon.back", { onclick: () => go("#/recipes/mine"), "aria-label": t("Back") }, icon("left"))),
     h("div.r-titlebar", h("h1", rec.title), heart),
     h("div.row.wrap.small.muted", { style: { gap: "8px" } },
       kcalChip, meta && h("span", meta), rec.edited && h("span.chip.warn", t("edited")),
-      rec.source_url && h("a", { href: rec.source_url, target: "_blank", rel: "noopener" }, icon("link"), " ", rec.site || t("source"))),
+      rec.source_url && h("a", { href: rec.source_url, target: "_blank", rel: "noopener" }, icon("link"), " ", rec.site || t("Source"))),
     h("div.row.wrap", { style: { gap: "14px" } }, stars, h("div.spacer"),
-      h("button", { onclick: () => logPortion(rec) }, icon("utensils"), t("logPortion"))),
+      h("button", { onclick: () => logPortion(rec) }, icon("utensils"), t("Log a portion"))),
     h("div.r-cols",
       h("div.card.stack", { style: { gap: "10px" } },
-        h("div.row", h("h2", t("ingredients")), h("div.spacer"), h("span.small.muted", t("servings")), sv),
+        h("div.row", h("h2", t("Ingredients")), h("div.spacer"), h("span.small.muted", t("Servings")), sv),
         ingList,
         h("button", { onclick: (e) => act(async () => {
-          await P("shopping", { body: { recipe_id: rec.id, servings: rec.servings } }); toast(t("added"));
-        }, e.currentTarget) }, icon("cart"), t("addAll"))),
-      h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("steps")), steps.length ? steps : h("div.muted", "–"))),
-    h("div.card.stack", { style: { gap: "8px" } }, h("h2", t("notes")), notes,
-      h("label.field", t("tagsF").split(" (")[0], tagInput)),
+          await P("shopping", { body: { recipe_id: rec.id, servings: rec.servings } }); toast(t("Added to the shopping list"));
+        }, e.currentTarget) }, icon("cart"), t("Add to shopping list"))),
+      h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("Method")), steps.length ? steps : h("div.muted", "–"))),
+    h("div.card.stack", { style: { gap: "8px" } }, h("h2", t("Personal notes")), notes,
+      h("label.field", t("Tags (comma separated)").split(" (")[0], tagInput)),
     h("div.row.wrap", { style: { gap: "8px" } },
-      h("button", { onclick: () => editMode(view, rec, ctx) }, icon("edit"), t("edit")),
+      h("button", { onclick: () => editMode(view, rec, ctx) }, icon("edit"), t("Edit")),
       hasPlugin("sync") && h("button", { onclick: (e) => act(async () => {
         const r = await api("p/sync/recipes/share", { body: { recipe_id: rec.id } });
-        const el = h("div.toast", `${t("shared")} `, h("a", { href: `#/social/recipe/${encodeURIComponent(r.slug)}` }, t("view")));
+        const el = h("div.toast", `${t("Recipe shared.")} `, h("a", { href: `#/social/recipe/${encodeURIComponent(r.slug)}` }, t("View")));
         document.getElementById("toasts").append(el);
         setTimeout(() => el.remove(), 7000);
-      }, e.currentTarget) }, icon("users"), t("share")),
-      rec.has_original && rec.edited && h("button", { onclick: () => confirm(t("resetQ")) && act(async () => {
+      }, e.currentTarget) }, icon("users"), t("Share with friends")),
+      rec.has_original && rec.edited && h("button", { onclick: () => confirm(t("Go back to the original version? Your edits to title, ingredients and method will be lost.")) && act(async () => {
         await P(`recipe/${id}/reset`, { body: {} }); ctx.servings = 0; await ctx.reload(); ctx.paint();
-      }) }, icon("refresh"), t("reset")),
+      }) }, icon("refresh"), t("Reset to original")),
       h("div.spacer"),
-      h("button.danger", { onclick: () => confirm(t("delQ")) && act(async () => {
+      h("button.danger", { onclick: () => confirm(t("Delete this recipe from your hub?")) && act(async () => {
         await P(`recipe/${id}`, { method: "DELETE" }); go("#/recipes/mine");
-      }) }, icon("trash"), t("del"))));
+      }) }, icon("trash"), t("Delete"))));
 }
 
 function editMode(view, rec, ctx) {
@@ -294,17 +249,17 @@ function editMode(view, rec, ctx) {
   const kcal = h("input", { type: "number", min: 0, value: orig, placeholder: rec.kcal_est ? `~${rec.kcal}` : "" });
   const ing = h("textarea", { rows: Math.min(18, rec.ingredient_lines.length + 2), value: rec.ingredient_lines.join("\n") });
   const steps = h("textarea", { rows: Math.min(22, rec.steps.length * 3 + 2), value: rec.steps.join("\n") });
-  fill(view, h("h1", t("edit")), h("div.card.stack",
-    h("label.field", t("titleF"), title), h("label.field", t("servings"), sv),
-    h("label.field", t("kcalF"), kcal), h("label.field", t("ingF"), ing), h("label.field", t("stepF"), steps),
+  fill(view, h("h1", t("Edit")), h("div.card.stack",
+    h("label.field", t("Title"), title), h("label.field", t("Servings"), sv),
+    h("label.field", t("Calories per serving (empty = automatic)"), kcal), h("label.field", t("Ingredients (one per line, '# Heading' for a group)"), ing), h("label.field", t("Method (one step per line)"), steps),
     h("div.row", { style: { gap: "8px" } },
       h("button.primary", { onclick: (e) => act(async () => {
         const patch = { title: title.value, servings: +sv.value, ingredients: ing.value, steps: steps.value };
         if (kcal.value !== orig) patch.kcal = kcal.value === "" ? null : +kcal.value;
         ctx.servings = +sv.value;
         await ctx.reload(patch); ctx.paint();
-      }, e.currentTarget) }, icon("check"), t("save")),
-      h("button", { onclick: () => ctx.paint() }, t("cancel")))));
+      }, e.currentTarget) }, icon("check"), t("Save")),
+      h("button", { onclick: () => ctx.paint() }, t("Cancel")))));
 }
 
 function logPortion(rec) {
@@ -314,46 +269,46 @@ function logPortion(rec) {
   const total = h("div.small.muted");
   const upd = () => { const per = +k.value || rec.kcal || 0; total.textContent = per ? `= ${Math.round(per * (+n.value || 0))} kcal` : ""; };
   n.oninput = k.oninput = upd; upd();
-  const s = sheet(t("logPortion"), [
+  const s = sheet(t("Log a portion"), [
     h("div", h("b", rec.title)),
-    h("label.field", t("portions"), n),
-    h("label.field", `${t("kcalServing")}${rec.kcal ? "" : ""}`, k), total,
+    h("label.field", t("Portions eaten"), n),
+    h("label.field", `${t("kcal per serving")}${rec.kcal ? "" : ""}`, k), total,
     h("button.primary.lg", { onclick: (e) => act(async () => {
       await P("log", { body: { recipe_id: rec.id, servings: +n.value, ...(k.value ? { kcal: +k.value } : {}), day: localDay() } });
-      s.close(); toast(t("logged"));
-    }, e.currentTarget) }, t("logPortion"))]);
+      s.close(); toast(t("Added to today's log"));
+    }, e.currentTarget) }, t("Log a portion"))]);
 }
 
 // ---------------------------------------------------------------- shopping
 
 async function renderShopping(el) {
   const list = h("div");
-  const input = h("input", { placeholder: t("shopPh"), enterkeyhint: "done" });
+  const input = h("input", { placeholder: t("Add an item (e.g. 2 kg potatoes)…"), enterkeyhint: "done" });
   const addForm = h("form.r-search", { onsubmit: (e) => { e.preventDefault(); if (!input.value.trim()) return;
     act(async () => { const r = await P("shopping", { body: { name: input.value } }); input.value = ""; paint(r.items); }); } },
-    h("div.r-input", icon("plus"), input), h("button.primary", { type: "submit" }, t("add")));
+    h("div.r-input", icon("plus"), input), h("button.primary", { type: "submit" }, t("Add")));
   fill(el, addForm, list);
   const call = (path, opts) => act(async () => paint((await P(path, opts)).items));
 
   function paint(items) {
     const open = items.filter((i) => !i.checked), done = items.filter((i) => i.checked);
     const row = (i) => {
-      const subs = i.subs?.length ? h("div.r-subs.hidden", h("b", `${t("subs")}: `), i.subs.join(" · ")) : null;
+      const subs = i.subs?.length ? h("div.r-subs.hidden", h("b", `${t("Substitutions")}: `), i.subs.join(" · ")) : null;
       return h(`div.item.r-shop${i.checked ? ".done" : ""}`,
         h("input", { type: "checkbox", checked: i.checked, onchange: (e) => call(`shopping/${i.id}`, { method: "PATCH", body: { checked: e.target.checked } }) }),
         h("div.stack", { style: { gap: "2px", minWidth: 0, flex: 1 } },
           h("div.txt", i.text),
-          i.recipes.length ? h("div.tiny.muted.ellipsis", `${t("fromRecipes")} ${i.recipes.join(", ")}`) : null, subs),
-        subs && h("button.icon.ghost", { title: t("subs"), onclick: () => subs.classList.toggle("hidden") }, "⇄"),
-        h("button.icon.ghost", { onclick: () => call(`shopping/${i.id}`, { method: "DELETE" }), "aria-label": t("del") }, icon("x")));
+          i.recipes.length ? h("div.tiny.muted.ellipsis", t("from {recipes}", { recipes: i.recipes.join(", ") })) : null, subs),
+        subs && h("button.icon.ghost", { title: t("Substitutions"), onclick: () => subs.classList.toggle("hidden") }, "⇄"),
+        h("button.icon.ghost", { onclick: () => call(`shopping/${i.id}`, { method: "DELETE" }), "aria-label": t("Delete") }, icon("x")));
     };
     fill(list,
       items.length ? [
         h("div.list", [...open, ...done].map(row)),
         h("div.row", { style: { gap: "8px", marginTop: "12px" } },
-          done.length ? h("button", { onclick: () => call("shopping", { method: "DELETE" }) }, icon("check"), t("clearChecked")) : null,
-          h("button.danger", { onclick: () => confirm(t("clearAll") + "?") && call("shopping?all=1", { method: "DELETE" }) }, icon("trash"), t("clearAll")))]
-        : h("div.empty", t("shopEmpty")));
+          done.length ? h("button", { onclick: () => call("shopping", { method: "DELETE" }) }, icon("check"), t("Clear checked")) : null,
+          h("button.danger", { onclick: () => confirm(t("Clear all") + "?") && call("shopping?all=1", { method: "DELETE" }) }, icon("trash"), t("Clear all")))]
+        : h("div.empty", t("Nothing to buy. Open a recipe and add its ingredients.")));
   }
   paint(await P("shopping"));
 }
@@ -374,12 +329,12 @@ async function renderToday(el) {
       onchange: (e) => { day = e.target.value || localDay(); paint(); } });
 
     // add forms
-    const mName = h("input", { placeholder: t("name") });
+    const mName = h("input", { placeholder: t("What you ate") });
     const mKcal = h("input", { type: "number", min: 0, placeholder: t("kcal"), style: { maxWidth: "110px" } });
     const manual = h("form.r-search", { onsubmit: (e) => { e.preventDefault(); act(async () => {
       await P("log", { body: { day, name: mName.value, kcal: +mKcal.value } }); paint(); }); } },
       mName, mKcal, h("button.primary", { type: "submit" }, icon("plus")));
-    const pick = h("select", h("option", { value: "" }, t("pick")),
+    const pick = h("select", h("option", { value: "" }, t("Pick a recipe…")),
       recipes.map((r) => h("option", { value: r.id }, r.title + (r.kcal ? ` (${kcalText(r)})` : ""))));
     const por = h("input", { type: "number", min: 0.25, step: 0.25, value: 1, style: { maxWidth: "90px" } });
     const fromBook = h("form.r-search", { onsubmit: (e) => { e.preventDefault(); if (!pick.value) return; act(async () => {
@@ -390,24 +345,24 @@ async function renderToday(el) {
     const bars = h("div.r-bars", nut.days.map((d) => h("div.bar", { title: `${d.day}: ${Math.round(d.kcal)} kcal`,
       onclick: () => { day = d.day; paint(); } },
       h("div.col", h("div.goal", { style: { bottom: `${nut.goal / max * 100}%` } }), h(`div.fill${d.kcal > nut.goal ? ".over" : ""}${d.day === day ? ".sel" : ""}`, { style: { height: `${d.kcal / max * 100}%` } })),
-      h("div.lbl", new Date(d.day + "T12:00").toLocaleDateString(LANG ? "en" : "it", { weekday: "short" })),
+      h("div.lbl", new Date(d.day + "T12:00").toLocaleDateString(locale(), { weekday: "short" })),
       h("div.val", d.kcal ? Math.round(d.kcal) : ""))));
 
     fill(body,
       h("div.card.stack", { style: { gap: "10px" } },
-        h("div.row", { style: { gap: "10px" } }, dayInput, h("div.spacer"), h("span.muted.small", `${t("goal")} ${Math.round(log.goal)} kcal`)),
-        h("div.r-total", h("span.big", Math.round(log.total)), h("span.muted", ` kcal ${t("eaten")}`)),
+        h("div.row", { style: { gap: "10px" } }, dayInput, h("div.spacer"), h("span.muted.small", `${t("goal {n} kcal", { n: Math.round(log.goal) })}`)),
+        h("div.r-total", h("span.big", Math.round(log.total)), h("span.muted", " " + t("kcal eaten"))),
         h("div.progress", h(`div${log.total > log.goal ? ".over" : ""}`, { style: { width: `${pct}%` } })),
-        h("div.small.muted", diff >= 0 ? `${diff} kcal ${t("left")}` : `${-diff} kcal ${t("over")}`)),
+        h("div.small.muted", diff >= 0 ? t("{n} kcal left", { n: diff }) : t("{n} kcal over", { n: -diff }))),
       log.entries.length
         ? h("div.list", log.entries.map((e) => h("div.item",
           h("div.stack", { style: { gap: "2px", flex: 1, minWidth: 0 } }, h("div.ellipsis", e.name),
             h("div.tiny.muted", [e.time, e.servings && `× ${e.servings}`, e.est && "~"].filter(Boolean).join(" · "))),
           h("b", `${e.est ? "~" : ""}${Math.round(e.kcal)}`), h("span.muted.small", "kcal"),
-          h("button.icon.ghost", { onclick: () => act(async () => { await P(`log/${e.id}`, { method: "DELETE" }); paint(); }), "aria-label": t("del") }, icon("x")))))
-        : h("div.empty", t("logEmpty")),
-      h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("fromBook")), fromBook, h("h2", t("manual")), manual),
-      h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("last7")), bars));
+          h("button.icon.ghost", { onclick: () => act(async () => { await P(`log/${e.id}`, { method: "DELETE" }); paint(); }), "aria-label": t("Delete") }, icon("x")))))
+        : h("div.empty", t("Nothing logged for this day.")),
+      h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("From your recipes")), fromBook, h("h2", t("Manual entry")), manual),
+      h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("Last 7 days")), bars));
   }
   await paint();
 }

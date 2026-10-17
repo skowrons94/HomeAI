@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 
 import aiohttp
+from ...i18n import _
 
 FIELDS = ["id", "hashString", "name", "status", "percentDone", "rateDownload", "rateUpload",
           "eta", "totalSize", "sizeWhenDone", "leftUntilDone", "downloadDir", "error",
@@ -39,9 +40,9 @@ class Transmission:
 
     async def call(self, method: str, **arguments) -> dict:
         if not self.enabled:
-            raise TransmissionError("Downloads are turned off on this hub (Transmission disabled in Media settings)")
+            raise TransmissionError(_("Downloads are turned off on this hub (Transmission disabled in Media settings)"))
         body = {"method": method, "arguments": arguments}
-        for _ in range(2):
+        for _attempt in range(2):
             try:
                 async with self.http.post(self.url, json=body, auth=self.auth,
                                           headers={"X-Transmission-Session-Id": self.session_id}) as r:
@@ -49,15 +50,15 @@ class Transmission:
                         self.session_id = r.headers.get("X-Transmission-Session-Id", "")
                         continue
                     if r.status == 401:
-                        raise TransmissionError("Transmission: wrong username/password")
+                        raise TransmissionError(_("Transmission: wrong username/password"))
                     r.raise_for_status()
                     data = await r.json(content_type=None)
             except aiohttp.ClientConnectorError as err:
-                raise TransmissionError(f"Transmission not reachable at {self.url}") from err
+                raise TransmissionError(_("Transmission not reachable at {url}", url=self.url)) from err
             if data.get("result") != "success":
                 raise TransmissionError(f"Transmission: {data.get('result')}")
             return data.get("arguments", {})
-        raise TransmissionError("Transmission: session negotiation failed")
+        raise TransmissionError(_("Transmission: session negotiation failed"))
 
     async def add(self, magnet: str = "", download_dir: str | None = None, paused=False,
                   torrent: bytes | None = None) -> dict:

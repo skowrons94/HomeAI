@@ -24,6 +24,7 @@ from pathlib import Path
 from .library import SUB_EXT, VIDEO_EXT
 from .ranking import parse
 from .transmission import TransmissionError
+from ...i18n import _
 
 log = logging.getLogger("hub.media.downloads")
 
@@ -229,8 +230,9 @@ class Downloads:
                                                                 if row["episode"] else "")
                                    if row["season"] is not None else "")
             await self.hub.notify.send(
-                f"Ready to watch: {what}",
-                f"{row['quality'] or ''} · {len(targets)} file(s) in the library - open Infuse",
+                _("Ready to watch: {what}", what=what),
+                _("{quality} · {n} file(s) in the library - open Infuse",
+                  quality=row["quality"] or "", n=len(targets)),
                 url=f"#/media/{row['type']}/{row['data'].get('id')}",
                 image=row["data"].get("poster") or "", tag="tv")
             self.plugin.watcher.on_imported(row)
@@ -243,8 +245,8 @@ class Downloads:
             self.store.delete(f"media.import.{h}")
         except Exception as err:
             log.exception("import of %s failed", row["name"] if row else h)
-            self._update(h, state="failed", error=f"import: {err}")
-            await self.hub.notify.send(f"Import failed: {row['title'] if row else h}", str(err),
+            self._update(h, state="failed", error=_("import: {err}", err=err))
+            await self.hub.notify.send(_("Import failed: {what}", what=row["title"] if row else h), str(err),
                                        tag="warning")
         finally:
             self._importing.discard(h)
@@ -256,16 +258,16 @@ class Downloads:
                   if (row["file_idx"] is None or i == row["file_idx"])]
         videos = [(i, f) for i, f in wanted if Path(f["name"]).suffix.lower() in VIDEO_EXT
                   and "sample" not in f["name"].lower() and f["length"] > 20_000_000]
-        subs = [f for _, f in enumerate(t.get("files") or [])
+        subs = [f for _i, f in enumerate(t.get("files") or [])
                 if Path(f["name"]).suffix.lower() in SUB_EXT]
         if not videos:
-            raise RuntimeError("no video file in the torrent")
+            raise RuntimeError(_("no video file in the torrent"))
         if self.post_process == "none":
-            return [os.path.join(base, f["name"]) for _, f in videos]
+            return [os.path.join(base, f["name"]) for _i, f in videos]
 
         plan: list[tuple[str, str]] = []  # (source, destination)
         if row["type"] == "movie":
-            _, f = max(videos, key=lambda v: v[1]["length"])
+            _i, f = max(videos, key=lambda v: v[1]["length"])
             folder = safe_name(f"{row['title']} ({row['year']})" if row["year"] else row["title"])
             stem = f"{folder} {row['quality'] or ''}".strip()
             dest_dir = os.path.join(self.movies_dir, folder)
@@ -279,7 +281,7 @@ class Downloads:
             show = self.plugin.library.find_show(row["data"].get("titles") or [row["title"]])
             show_dir = show["path"] if show else os.path.join(self.series_dir, safe_name(row["title"]))
             ep_titles = await self._episode_titles(row)
-            for _, f in videos:
+            for _i, f in videos:
                 p = parse(Path(f["name"]).name)
                 season = p.season if p.season is not None else row["season"]
                 ep = p.episode if p.episode is not None else row["episode"]
@@ -302,7 +304,7 @@ class Downloads:
                                      os.path.join(dest_dir, stem + _sub_suffix(s["name"])
                                                   + Path(s["name"]).suffix.lower())))
         if not plan:
-            raise RuntimeError("nothing to import")
+            raise RuntimeError(_("nothing to import"))
         plan = _unique_dests(plan)
 
         if self.post_process == "move":
@@ -317,7 +319,7 @@ class Downloads:
             if "/" in (t["files"][0]["name"]) and _is_within(top, self.download_dir) \
                     and os.path.realpath(top) != os.path.realpath(self.download_dir):
                 await asyncio.to_thread(shutil.rmtree, top, True)
-        return [d for _, d in plan if Path(d).suffix.lower() in VIDEO_EXT]
+        return [d for _i, d in plan if Path(d).suffix.lower() in VIDEO_EXT]
 
     @staticmethod
     def _transfer(plan, move: bool):
@@ -377,7 +379,7 @@ class Downloads:
             ts = await self.tr.torrents([h], files=True)
             t = ts[0] if ts else self.store.get(f"media.import.{h}")
             if not t:
-                raise ValueError("torrent no longer in Transmission")
+                raise ValueError(_("torrent no longer in Transmission"))
             self._update(h, state="downloading")
             await self._import(h, t)
         else:

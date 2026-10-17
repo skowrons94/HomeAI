@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from . import nutrition, parse
+from ...i18n import _
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS recipes_recipe (
@@ -79,7 +80,7 @@ class Book:
     def _row(self, rid: int) -> dict:
         rows = self.store.query("SELECT * FROM recipes_recipe WHERE id=?", (rid,))
         if not rows:
-            raise KeyError("recipe not found")
+            raise KeyError(_("Recipe not found"))
         return rows[0]
 
     def find_by_url(self, url: str) -> int | None:
@@ -96,7 +97,7 @@ class Book:
         """Store a recipe dict (from an import or manual form)."""
         title = (rec.get("title") or "").strip()
         if not title:
-            raise ValueError("a recipe needs a title")
+            raise ValueError(_("A recipe needs a title"))
         ing, steps = _lines(rec.get("ingredients")), _lines(rec.get("steps"))
         now = time.time()
         servings = rec.get("servings") or self.default_servings
@@ -245,7 +246,7 @@ class Book:
     def reset(self, rid: int) -> None:
         r = self._row(rid)
         if not r["original"]:
-            raise ValueError("this recipe has no original to go back to")
+            raise ValueError(_("This recipe has no original to go back to"))
         o = json.loads(r["original"])
         self.store.execute(
             "UPDATE recipes_recipe SET title=?, servings=?, ingredients=?, steps=?, kcal=?, edited=0, updated=? WHERE id=?",
@@ -309,7 +310,7 @@ class Book:
     def shop_add_manual(self, name: str, qty=None, unit: str = "") -> None:
         name = name.strip()
         if not name:
-            raise ValueError("name is required")
+            raise ValueError(_("A name is required"))
         p = parse.parse_ingredient(name) if qty is None else None
         if p and p["qty"] is not None:  # "2 kg patate" typed into the box
             self._shop_merge(p["name"][:1].upper() + p["name"][1:], p["key"], p["qty"], p["unit"])
@@ -352,13 +353,13 @@ class Book:
             sv = float(servings or 1)
             per = float(kcal) if kcal not in (None, "") else v["kcal"]
             if per is None:
-                raise ValueError("no calories known for this recipe - enter them by hand")
+                raise ValueError(_("No calories known for this recipe: enter them by hand"))
             total, name, est = per * sv, name or v["title"], int(v["kcal_est"] and kcal in (None, ""))
         else:
             if not name.strip():
-                raise ValueError("name is required")
+                raise ValueError(_("A name is required"))
             if kcal in (None, ""):
-                raise ValueError("kcal is required")
+                raise ValueError(_("Calories are required"))
             total, sv = float(kcal), None
         cur = self.store.execute(
             "INSERT INTO recipes_log(day, ts, name, kcal, recipe_id, servings, est) VALUES(?,?,?,?,?,?,?)",

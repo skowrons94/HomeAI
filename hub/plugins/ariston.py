@@ -23,6 +23,7 @@ from pyhap.accessory import Accessory
 from pyhap.const import CATEGORY_THERMOSTAT
 
 from ..core import Entity, Plugin
+from ..i18n import _
 
 HK_OFF, HK_HEAT, HK_COOL, HK_AUTO = 0, 1, 2, 3
 MODE_TO_HK = {"off": HK_OFF, "heat": HK_HEAT, "auto": HK_AUTO}
@@ -75,7 +76,7 @@ class AristonPlugin(Plugin):
                 raise
             # use the cached layout so HomeKit keeps the accessories
             self.log.warning("Ariston offline (%s); using cached layout, will retry", err)
-            self.error = f"offline: {err}"
+            self.error = _("Offline: {err}", err=err)
         self._create_entities()
         self.hub.every(self.poll_interval, self.refresh, "ariston poll")
 
@@ -84,10 +85,10 @@ class AristonPlugin(Plugin):
 
         api = Ariston()
         if not await api.async_connect(self.config["username"], self.config["password"]):
-            raise PermissionError("Ariston login failed - check username/password")
+            raise PermissionError(_("Ariston login failed - check username/password"))
         devices = await api.async_discover()
         if not devices:
-            raise LookupError("no devices on this Ariston NET account")
+            raise LookupError(_("No devices on this Ariston NET account"))
         gw = self.config.get("gateway") or devices[0]["gw"]
         device = await api.async_hello(gw, is_metric=True)
         if device is None:
@@ -131,7 +132,7 @@ class AristonPlugin(Plugin):
         for zl in zones:
             z = zl["zone"]
             eid = f"ariston.zone{z}"
-            name = names.get(str(z)) or ("Heating" if len(zones) == 1 else f"Heating Zone {z}")
+            name = names.get(str(z)) or (_("Heating") if len(zones) == 1 else _("Heating Zone {z}", z=z))
             self.hub.add_entity(Entity(
                 id=eid, name=name, kind="climate", plugin=self.name, room=room,
                 attrs={"min": zl["min"], "max": zl["max"], "step": zl["step"],
@@ -147,7 +148,7 @@ class AristonPlugin(Plugin):
         dhw = self.layout.get("dhw")
         if dhw and self.config.get("expose_hot_water", True):
             self.hub.add_entity(Entity(
-                id="ariston.dhw", name=self.config.get("hot_water_name", "Hot Water"),
+                id="ariston.dhw", name=self.config.get("hot_water_name") or _("Hot Water"),
                 kind="water_heater", plugin=self.name, room=room,
                 attrs={"min": dhw["min"], "max": dhw["max"], "step": dhw["step"],
                        "modes": ["off", "heat"] if dhw["velis"] else ["heat"],
@@ -223,7 +224,7 @@ class AristonPlugin(Plugin):
 
     async def _write(self, coro_fn, *args):
         if self.device is None:
-            raise ConnectionError("Ariston is offline")
+            raise ConnectionError(_("Ariston is offline"))
         async with self.lock:
             await coro_fn(*args)
             self._last_write = time.monotonic()
@@ -238,7 +239,7 @@ class AristonPlugin(Plugin):
 
         dev = self.device
         if dev is None:
-            raise ConnectionError("Ariston is offline")
+            raise ConnectionError(_("Ariston is offline"))
         plant_opts = dev.plant_mode_options or []
         zone_opts = dev.get_zone_mode_options(zone) or []
 

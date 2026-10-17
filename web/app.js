@@ -7,12 +7,73 @@
 // "notification", "state", plus any type the hub publishes, e.g. "media").
 
 export const bus = new EventTarget();
-export const store = { entities: new Map(), plugins: [], homekit: {}, rooms: [], unread: 0, name: "Casa", attention: 0, attentionItems: [] };
+export const store = { entities: new Map(), plugins: [], homekit: {}, rooms: [], unread: 0, name: "Casa", attention: 0, attentionItems: [],
+                       people: [], prefs: {} };
+
+// ---------------------------------------------------------------- i18n
+// English source text is the key: t("Downloads") -> "Download" from web/i18n/<lang>/*.json
+// (merged by GET /api/i18n). Placeholders: t("{n} min ago", { n }). Missing -> English.
+
+let TEXTS = {};
+export let LANG = "it";
+export const locale = () => (LANG === "it" ? "it-IT" : "en-GB");
+
+export function t(s, vars) {
+  let out = TEXTS[s] ?? s;
+  if (vars) out = out.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m));
+  return out;
+}
+
+async function loadTexts() {
+  try {
+    const d = await (await fetch("/api/i18n")).json();
+    TEXTS = d.texts || {};
+    LANG = d.language || "it";
+  } catch {}
+  document.documentElement.lang = LANG;
+}
+
+// ---------------------------------------------------------------- people + preferences
+// Each phone picks who uses it once ("Chi sei?"); the layout (tab bar, Home sections) is
+// saved on the hub per person, so it follows the person, not the browser.
+
+const PERSON_KEY = "casa.person";
+export function person() {
+  try { return localStorage.getItem(PERSON_KEY) || ""; } catch { return ""; }
+}
+
+async function loadPrefs() {
+  store.prefs = await api(`prefs?person=${encodeURIComponent(person())}`).catch(() => ({}));
+}
+
+export async function savePrefs(patch, { rerender = true } = {}) {
+  store.prefs = { ...store.prefs, ...patch };
+  await api(`prefs?person=${encodeURIComponent(person())}`, { method: "PUT", body: store.prefs });
+  if (rerender) { buildNav(); render(); }
+}
+
+/** "Chi sei?" - pick the person using this phone. Resolves once chosen (or closed). */
+export function choosePerson({ apply = true } = {}) {
+  return new Promise((resolve) => {
+    const pick = async (p) => {
+      try { localStorage.setItem(PERSON_KEY, p); } catch {}
+      s.close();
+      if (apply) { await loadPrefs(); buildNav(); render(); }
+      resolve(p);
+    };
+    const s = sheet(t("Who are you?"), [
+      h("p.muted", { style: { margin: 0 } }, t("Casa remembers it on this phone: your layout, and your name on notes and events.")),
+      h("div.stack", { style: { gap: "8px" } }, store.people.map((p) =>
+        h(`button.lg${p === person() ? ".primary" : ""}`, { onclick: () => pick(p) }, p))),
+    ], { onClose: () => resolve(person()) });
+  });
+}
 
 // ---------------------------------------------------------------- helpers
 
 export async function api(path, { method, body, raw } = {}) {
-  const opts = { method: method || (body !== undefined ? "POST" : "GET"), headers: {} };
+  const opts = { method: method || (body !== undefined ? "POST" : "GET"),
+                 headers: { "X-Casa-Person": encodeURIComponent(person()) } };
   if (body !== undefined) {
     opts.body = JSON.stringify(body);
     opts.headers["Content-Type"] = "application/json";
@@ -128,7 +189,7 @@ export function sheet(title, content, { wide = false, onClose } = {}) {
   const bd = h("div.backdrop", { onclick: (e) => e.target === bd && close() },
     h(`div.sheet${wide ? ".wide" : ""}`,
       h("header", h("h2.ellipsis", title), h("div.spacer"),
-        h("button.icon.ghost", { onclick: close, "aria-label": "Close" }, icon("x"))),
+        h("button.icon.ghost", { onclick: close, "aria-label": t("Close") }, icon("x"))),
       body));
   document.addEventListener("keydown", esc);
   document.body.append(bd);
@@ -164,11 +225,20 @@ export const fmt = {
   },
   ago(ts) {
     const s = Date.now() / 1000 - ts;
-    if (s < 60) return "just now";
-    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-    return new Date(ts * 1000).toLocaleDateString();
+    if (s < 60) return t("just now");
+    if (s < 3600) return t("{n} min ago", { n: Math.floor(s / 60) });
+    if (s < 86400) return t("{n} h ago", { n: Math.floor(s / 3600) });
+    return new Date(ts * 1000).toLocaleDateString(locale());
   },
+  /** "sab 18 ott" (weekday: false -> "18 ott"; year added when not this year) */
+  date(d, { weekday = true } = {}) {
+    d = d instanceof Date ? d : new Date(typeof d === "number" ? d * 1000 : d);
+    return d.toLocaleDateString(locale(), { weekday: weekday ? "short" : undefined, day: "numeric", month: "short",
+                                            year: d.getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+  },
+  time: (d) => (d instanceof Date ? d : new Date(typeof d === "number" ? d * 1000 : d))
+    .toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }),
+  num: (v, digits = 0) => (+v).toLocaleString(locale(), { maximumFractionDigits: digits }),
   duration(sec) {
     if (!sec && sec !== 0) return "";
     sec = Math.round(sec);
@@ -184,7 +254,8 @@ export async function refreshState() {
   const s = await api("state");
   store.entities = new Map(s.entities.map((e) => [e.id, e]));
   Object.assign(store, { plugins: s.plugins, homekit: s.homekit, rooms: s.rooms, unread: s.unread,
-                         name: s.name, notify_channels: s.notify_channels, onboarding: s.onboarding });
+                         name: s.name, notify_channels: s.notify_channels, onboarding: s.onboarding,
+                         people: s.people || [] });
   document.title = s.name;
   store.attention = s.attention || 0;
   updateBadge();
@@ -242,15 +313,15 @@ function updateBadge() {
 
 export async function openNotifications() {
   const list = await api("notifications");
-  const s = sheet("Notifications", list.length ? h("div.list", list.map((n) =>
+  const s = sheet(t("Notifications"), list.length ? h("div.list", list.map((n) =>
     h("div.item", { style: { alignItems: "flex-start", cursor: n.url ? "pointer" : "" },
                     onclick: () => n.url && (location.href = n.url) },
       n.image ? h("img", { src: n.image, style: { width: "44px", height: "66px", objectFit: "cover", borderRadius: "6px" } })
               : h("div.tile", h("div.ico", icon("bell"))),
       h("div.stack", { style: { gap: "2px", minWidth: 0 } },
-        h("div.row", h("b", n.title), !n.read && h("span.chip.accent", "new")),
+        h("div.row", h("b", n.title), !n.read && h("span.chip.accent", t("new"))),
         n.body && h("div.small", n.body),
-        h("div.tiny.muted", fmt.ago(n.ts)))))) : h("div.empty", "Nothing yet."));
+        h("div.tiny.muted", fmt.ago(n.ts)))))) : h("div.empty", t("Nothing yet.")));
   if (store.unread) { await api("notifications/read", { body: {} }); store.unread = 0; updateBadge(); }
   return s;
 }
@@ -259,38 +330,55 @@ export async function openNotifications() {
 
 function showLogin() {
   if (document.querySelector("#login")) return;
-  const pw = h("input", { type: "password", placeholder: "Password", autocomplete: "current-password" });
+  const pw = h("input", { type: "password", placeholder: t("Password"), autocomplete: "current-password" });
   const go = async (e) => {
     e.preventDefault();
     const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
                                           body: JSON.stringify({ password: pw.value }) });
-    if (r.ok) location.reload(); else toast("Wrong password", true);
+    if (r.ok) location.reload(); else toast(t("Wrong password"), true);
   };
   document.body.append(h("div.backdrop#login",
     h("form.sheet.stack", { onsubmit: go, style: { maxWidth: "360px" } },
-      h("h2", "Casa"), pw, h("button.primary.lg", { type: "submit" }, "Unlock"))));
+      h("h2", "Casa"), pw, h("button.primary.lg", { type: "submit" }, t("Unlock")))));
   pw.focus();
 }
 
 // ---------------------------------------------------------------- router
 
-const PAGES = [
-  { id: "home", title: "Home", icon: "home" },
-  { id: "media", title: "Media", icon: "film" },
-  { id: "recipes", title: "Recipes", icon: "utensils" },
+// title: English source (shown through t()); tab: in the phone tab bar by default.
+// The phone tab bar shows the person's pinned pages (store.prefs.tabs) + "More"; the
+// desktop sidebar shows everything.
+export const PAGES = [
+  { id: "home", title: "Home", icon: "home", tab: true },
+  { id: "media", title: "Media", icon: "film", tab: true },
+  { id: "recipes", title: "Kitchen", icon: "utensils", tab: true },
   { id: "social", title: "Feed", icon: "users", plugin: "sync" },
   { id: "history", title: "History", icon: "chart" },
   { id: "network", title: "Network", icon: "network" },
   { id: "settings", title: "Settings", icon: "settings" },
+  { id: "more", title: "More", icon: "more", hidden: true },
   { id: "welcome", title: "Welcome", icon: "home", hidden: true },  // first-run setup
 ];
+export const MAX_TABS = 4;
 const loaded = {};
 let cleanup = null;
+
+/** Pages that can be pinned to the tab bar (running plugins only). */
+export const pinnable = () => PAGES.filter((p) => !p.hidden && (!p.plugin || hasPlugin(p.plugin)));
+
+/** The person's pinned pages, in order. */
+export function pinnedTabs() {
+  const ok = new Set(pinnable().map((p) => p.id));
+  const ids = Array.isArray(store.prefs?.tabs) ? store.prefs.tabs : PAGES.filter((p) => p.tab).map((p) => p.id);
+  return ids.filter((id) => ok.has(id)).slice(0, MAX_TABS);
+}
 
 async function render() {
   const [id = "home", ...args] = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
   const page = PAGES.find((p) => p.id === id) || PAGES[0];
-  document.querySelectorAll("nav a.tab").forEach((a) => a.classList.toggle("active", a.dataset.id === page.id));
+  const pinned = pinnedTabs();
+  document.querySelectorAll("nav a.tab").forEach((a) => a.classList.toggle("active",
+    a.dataset.id === page.id || (a.dataset.id === "more" && !pinned.includes(page.id) && page.id !== "home")));
   const main = document.querySelector("main");
   if (typeof cleanup === "function") { try { cleanup(); } catch {} }
   cleanup = null;
@@ -300,28 +388,49 @@ async function render() {
     cleanup = await loaded[page.id].render(main, args);
   } catch (e) {
     console.error(e);
-    main.replaceChildren(h("div.empty", `Couldn't load ${page.title}: ${e.message}`));
+    main.replaceChildren(h("div.empty", t("Couldn't load {page}: {error}", { page: t(page.title), error: e.message })));
   }
 }
 
 /** Same page, different args, without a full re-render when the page supports it. */
 export const go = (hash) => { location.hash = hash; };
 
-function shell() {
+const navTab = (p, cls = "") => h(`a.tab${cls}`, { href: `#/${p.id}`, "data-id": p.id, "data-plugin": p.plugin },
+  icon(p.icon), h("span", t(p.title)),
+  (p.id === "settings" || p.id === "more") && h("span.count-badge.hidden", { "data-attn": "", title: t("Needs attention") }),
+  p.id === "more" && h("span.dot.hidden", { "data-unread": "" }));
+
+/** Sidebar (desktop) / tab bar (phone). Pinned pages first; on phones only those + More. */
+function buildNav() {
+  const pinned = pinnedTabs();
+  const rest = PAGES.filter((p) => !p.hidden && !pinned.includes(p.id));
   const nav = h("nav.side",
-    h("div.brand", "Casa"),
-    PAGES.filter((p) => !p.hidden).map((p) => h("a.tab", { href: `#/${p.id}`, "data-id": p.id, "data-plugin": p.plugin }, icon(p.icon), h("span", p.title),
-      p.id === "settings" && h("span.count-badge.hidden", { "data-attn": "", title: "Needs attention" }))),
+    h("div.brand", store.name || "Casa"),
+    pinned.map((id) => navTab(PAGES.find((p) => p.id === id), ".pin")),
+    rest.map((p) => navTab(p)),
+    navTab(PAGES.find((p) => p.id === "more"), ".pin.more-tab"),
     h("div.spacer"),
-    h("a.tab", { href: "javascript:void 0", onclick: openNotifications },
-      icon("bell"), h("span", "Alerts"), h("span.dot.hidden", { "data-unread": "" })));
-  document.getElementById("app").replaceChildren(nav, h("main"));
+    h("a.tab.desk", { href: "javascript:void 0", onclick: openNotifications },
+      icon("bell"), h("span", t("Alerts")), h("span.dot.hidden", { "data-unread": "" })));
+  const old = document.querySelector("nav.side");
+  old ? old.replaceWith(nav) : document.getElementById("app").prepend(nav);
+  updateNav();
+  updateBadge();
+}
+
+function shell() {
+  document.getElementById("app").replaceChildren(h("main"));
+  buildNav();
 }
 
 async function boot() {
   ensureCss(`/static/pages/attention.css?v=${window.CASA_V}`);
+  await loadTexts();
   shell();
   try { await refreshState(); } catch (e) { if (e.message !== "login required") toast(e.message, true); return; }
+  if (store.people.length && !store.people.includes(person())) await choosePerson({ apply: false });
+  await loadPrefs();
+  buildNav();
   if (!location.search.includes("static")) connectEvents();  // ?static: no live updates (screenshots)
   window.addEventListener("hashchange", render);
   // first run: guided setup (skippable; Settings can start it again)

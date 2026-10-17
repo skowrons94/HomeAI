@@ -25,6 +25,11 @@ CORE: dict[str, dict] = {
         "title": "General", "table": None, "restart": False,
         "fields": [
             {"key": "name", "label": "Home name", "type": "text", "default": "Casa"},
+            {"key": "language", "label": "Language", "type": "select", "default": "it",
+             "options": ["it", "en"], "help": "it = Italiano, en = English."},
+            {"key": "people", "label": "People", "type": "list", "default": [],
+             "help": "Who lives here. Each phone picks one: notes and events show who added them, "
+                     "and each person can arrange the app their own way."},
             {"key": "rooms", "label": "Rooms", "type": "list", "default": [],
              "help": "Used to group devices on the Home page."},
         ],

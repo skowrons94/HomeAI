@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from urllib.parse import quote, quote_plus
 
 import aiohttp
+from ...i18n import _
 
 log = logging.getLogger("hub.media.indexers")
 
@@ -111,7 +112,7 @@ class Indexers:
             try:
                 from aiohttp_socks import ProxyConnector
             except ImportError:
-                self.error = "proxy is socks but 'aiohttp-socks' isn't installed (pip install aiohttp-socks)"
+                self.error = _("proxy is socks but 'aiohttp-socks' isn't installed (pip install aiohttp-socks)")
                 raise RuntimeError(self.error)
             # rdns: hostnames are resolved by the proxy -> no ISP DNS blocks
             # socks5h/socks4a = "resolve on the proxy", which rdns=True does anyway
@@ -119,7 +120,7 @@ class Indexers:
             try:
                 connector = ProxyConnector.from_url(url, rdns=True)
             except ValueError as err:
-                self.error = f"bad proxy url: {err}"
+                self.error = _("bad proxy url: {err}", err=err)
                 raise RuntimeError(self.error) from err
         elif self.proxy:
             self._req_kw = {"proxy": self.proxy}
@@ -407,9 +408,9 @@ def _dedupe_rows(rows: list[dict]) -> list[dict]:
 
 def _err(err: Exception) -> str:
     if isinstance(err, asyncio.TimeoutError):
-        return "timeout"
+        return _("timeout")
     if isinstance(err, aiohttp.ClientConnectorError):
-        return "unreachable (blocked or offline)"
+        return _("unreachable (blocked or offline)")
     if isinstance(err, aiohttp.ClientResponseError):
         return f"HTTP {err.status}"
     return str(err) or type(err).__name__

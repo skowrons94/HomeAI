@@ -27,6 +27,7 @@ from pathlib import Path
 from aiohttp import web
 
 from ...core import Plugin
+from ...i18n import _
 from ..recipes.parse import strip_accents
 from . import recipes_md
 from .db import SyncDB
@@ -128,7 +129,7 @@ class SyncPlugin(Plugin):
 
     def _need(self) -> None:
         if self.missing():
-            raise ValueError("Shared feed isn't set up: fill in " + " and ".join(self.missing()))
+            raise ValueError(_("Shared feed isn't set up: fill in {fields}", fields=" / ".join(_("Repository") if k == "repo_url" else _("Your name in the feed") for k in self.missing())))
 
     # -- lifecycle ------------------------------------------------------------------------------
 
@@ -240,7 +241,7 @@ class SyncPlugin(Plugin):
     async def _details(self, type_: str, id_: str) -> dict:
         media = self.hub.plugins.get("media")
         if media is None or getattr(media, "metadata", None) is None:
-            raise ValueError("the Media plugin is needed to look this title up")
+            raise ValueError(_("The Media plugin is needed to look this title up"))
         return await media.metadata.details(type_, id_)
 
     async def resolve(self, type_: str, id_: str) -> tuple[str, dict | None]:
@@ -253,7 +254,7 @@ class SyncPlugin(Plugin):
         item = await self._details(type_, id_)
         imdb = item.get("imdb_id")
         if not imdb or not IMDB_RE.match(imdb):
-            raise ValueError("this title has no IMDb id, so it can't be shared")
+            raise ValueError(_("This title has no IMDb id, so it can't be shared"))
         return imdb, item
 
     @staticmethod
@@ -318,7 +319,7 @@ class SyncPlugin(Plugin):
         r = self.hub.plugins.get("recipes")
         book = getattr(r, "book", None)
         if book is None:
-            raise ValueError("the Recipes plugin isn't running")
+            raise ValueError(_("The Recipes plugin isn't running"))
         return book
 
     def _file(self, sub: str, name: str) -> Path | None:
@@ -330,7 +331,7 @@ class SyncPlugin(Plugin):
     def recipe_view(self, slug: str) -> dict:
         rec = self.db.recipe(slug)
         if rec is None:
-            raise KeyError("recipe not found")
+            raise KeyError(_("Recipe not found"))
         return {"slug": slug, "title": rec["title"], "author": rec["author"], "servings": rec["servings"],
                 "time_min": rec["time_min"], "tags": rec["tags"], "source": rec["source"],
                 "image": f"/api/p/sync/image/{rec['image']}" if rec["image"] else None,
@@ -342,7 +343,7 @@ class SyncPlugin(Plugin):
         try:
             v = book.view(int(recipe_id))
         except (TypeError, ValueError):
-            raise KeyError("recipe not found")
+            raise KeyError(_("Recipe not found"))
         title = recipes_md.one_line(v["title"])
         slug = recipes_md.pick_slug(title, self.user, self.db.recipe_index())
         total = v.get("total_min") or ((v.get("prep_min") or 0) + (v.get("cook_min") or 0)) or None
@@ -368,7 +369,7 @@ class SyncPlugin(Plugin):
     def add_tip(self, slug: str, text: str) -> dict:
         self._need()
         if self.db.recipe(slug) is None:
-            raise KeyError("recipe not found")
+            raise KeyError(_("Recipe not found"))
         tip = recipes_md.check_tip(self.user, text)
         self.db.queue("tip", {"slug": slug, **tip})
         self.kick()
@@ -377,7 +378,7 @@ class SyncPlugin(Plugin):
     def import_recipe(self, slug: str) -> dict:
         rec = self.db.recipe(slug)
         if rec is None:
-            raise KeyError("recipe not found")
+            raise KeyError(_("Recipe not found"))
         book = self._book()
         image = ""
         src = self._file("recipes", rec["image"]) if rec["image"] else None

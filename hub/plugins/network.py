@@ -18,6 +18,7 @@ import time
 from aiohttp import web
 
 from ..core import Plugin
+from ..i18n import _
 
 SERVICE_TYPES = [
     "_hap._tcp", "_airplay._tcp", "_raop._tcp", "_companion-link._tcp", "_smb._tcp",
@@ -155,7 +156,7 @@ class NetworkPlugin(Plugin):
             d["configured"] = bool(d.get("suggested_plugin")) and \
                 d["suggested_plugin"] in self.hub.plugins
             if gw and d.get("mac", "").replace(":", "") == gw:
-                d.update(name=d.get("name") or "Ariston boiler", kind="boiler",
+                d.update(name=d.get("name") or _("Ariston boiler"), kind="boiler",
                          manufacturer="Ariston", suggested_plugin="ariston", configured=True)
         return web.json_response(sorted(self.devices.values(),
                                         key=lambda d: (not d.get("online"), d.get("name") or "")))

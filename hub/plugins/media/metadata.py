@@ -17,6 +17,7 @@ import logging
 import time
 from datetime import date
 from urllib.parse import quote
+from ...i18n import _
 
 log = logging.getLogger("hub.media.metadata")
 
@@ -81,7 +82,7 @@ class Metadata:
         ix = self.plugin.indexers
         async with ix._get(url, params=params, headers=headers) as r:
             if r.status == 401:
-                raise PermissionError("TMDB rejected the API key")
+                raise PermissionError(_("TMDB rejected the API key"))
             r.raise_for_status()
             data = await r.json(content_type=None)
         if len(self.mem) > 600:
@@ -143,14 +144,14 @@ class Metadata:
         """Rows for the Discover page."""
         if self.provider == "tmdb":
             specs = [
-                ("trending", "Di tendenza questa settimana", "/trending/all/week", None, {}),
-                ("now_playing", "Al cinema", "/movie/now_playing", "movie", {"region": self.region}),
-                ("upcoming", "In arrivo", "/movie/upcoming", "movie", {"region": self.region}),
-                ("tv_popular", "Serie popolari", "/tv/popular", "series", {}),
-                ("on_the_air", "Nuovi episodi", "/tv/on_the_air", "series", {}),
-                ("movie_popular", "Film popolari", "/movie/popular", "movie", {}),
-                ("top_movies", "Film più votati", "/movie/top_rated", "movie", {}),
-                ("top_tv", "Serie più votate", "/tv/top_rated", "series", {}),
+                ("trending", _("Trending this week"), "/trending/all/week", None, {}),
+                ("now_playing", _("In cinemas"), "/movie/now_playing", "movie", {"region": self.region}),
+                ("upcoming", _("Coming soon"), "/movie/upcoming", "movie", {"region": self.region}),
+                ("tv_popular", _("Popular series"), "/tv/popular", "series", {}),
+                ("on_the_air", _("New episodes"), "/tv/on_the_air", "series", {}),
+                ("movie_popular", _("Popular movies"), "/movie/popular", "movie", {}),
+                ("top_movies", _("Top rated movies"), "/movie/top_rated", "movie", {}),
+                ("top_tv", _("Top rated series"), "/tv/top_rated", "series", {}),
             ]
             out = []
             for key, title, path, t, params in specs:
@@ -166,14 +167,14 @@ class Metadata:
                 out.append({"key": key, "title": title, "items": items})
             return out
         specs = [
-            ("movie_popular", "Popular movies", "movie", "/catalog/movie/top.json"),
-            ("tv_popular", "Popular series", "series", "/catalog/series/top.json"),
-            ("new_movies", f"Movies of {date.today().year}", "movie",
+            ("movie_popular", _("Popular movies"), "movie", "/catalog/movie/top.json"),
+            ("tv_popular", _("Popular series"), "series", "/catalog/series/top.json"),
+            ("new_movies", _("Movies of {year}", year=date.today().year), "movie",
              f"/catalog/movie/year/genre={date.today().year}.json"),
-            ("new_series", f"Series of {date.today().year}", "series",
+            ("new_series", _("Series of {year}", year=date.today().year), "series",
              f"/catalog/series/year/genre={date.today().year}.json"),
-            ("top_movies", "Top rated movies", "movie", "/catalog/movie/imdbRating.json"),
-            ("top_tv", "Top rated series", "series", "/catalog/series/imdbRating.json"),
+            ("top_movies", _("Top rated movies"), "movie", "/catalog/movie/imdbRating.json"),
+            ("top_tv", _("Top rated series"), "series", "/catalog/series/imdbRating.json"),
         ]
         out = []
         for key, title, t, path in specs:
@@ -202,7 +203,7 @@ class Metadata:
         page = max(1, page)
         if self.provider == "tmdb":
             if not str(genre).isdigit():
-                raise ValueError("unknown genre")
+                raise ValueError(_("unknown genre"))
             data = await self._tmdb(f"/discover/{'movie' if type_ == 'movie' else 'tv'}", ttl=3 * 3600,
                                     with_genres=genre, sort_by="popularity.desc", page=page,
                                     include_adult="false", **{"vote_count.gte": 20})

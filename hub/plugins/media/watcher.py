@@ -16,6 +16,7 @@ import json
 import logging
 import time
 from datetime import date
+from ...i18n import _
 
 log = logging.getLogger("hub.media.watcher")
 
@@ -74,7 +75,7 @@ class Watcher:
     def update(self, key: str, **fields) -> dict:
         row = self.get(key)
         if row is None:
-            raise KeyError(f"{key} is not in the watchlist")
+            raise KeyError(_("{key} is not in the watchlist", key=key))
         if "auto_download" in fields:
             self.store.execute("UPDATE media_watchlist SET auto_download=? WHERE key=?",
                                (int(bool(fields["auto_download"])), key))
@@ -120,7 +121,7 @@ class Watcher:
                 await self._check_series(row)
         except Exception as err:
             log.warning("watchlist check %s failed: %s", row["title"], err)
-            self._status(key, row["status"] or "error", f"check failed: {err}")
+            self._status(key, row["status"] or "error", _("check failed: {err}", err=err))
         self._publish()
 
     async def _notify_once(self, row, tag: str, title: str, body: str):
@@ -137,23 +138,23 @@ class Watcher:
         item = await p.metadata.details("movie", row["id"])
         p.library.flag(item)
         if item["in_library"]:
-            self._status(row["key"], "in_library", "In your library")
+            self._status(row["key"], "in_library", _("In your library"))
             return
         if p.downloads.active_for(row["key"]):
-            self._status(row["key"], "downloading", "Downloading")
+            self._status(row["key"], "downloading", _("Downloading"))
             return
         today = date.today().isoformat()
         rel = item.get("release_date")
         if rel and rel > today:
-            self._status(row["key"], "upcoming", f"In cinemas {rel}")
+            self._status(row["key"], "upcoming", _("In cinemas {date}", date=rel))
             return
         if rel:
-            await self._notify_once(row, "released", f"Out now: {item['title']}",
-                                    f"Released {rel}. I'll keep looking for a good copy.")
+            await self._notify_once(row, "released", _("Out now: {title}", title=item["title"]),
+                                    _("Released {date}. I'll keep looking for a good copy.", date=rel))
         best, english = await self._best(item)
         if best is None:
             dr = item.get("digital_release")
-            note = f"Digital release {dr}" if dr and dr > today else "Waiting for a release"
+            note = _("Digital release {date}", date=dr) if dr and dr > today else _("Waiting for a release")
             self._status(row["key"], "waiting", note)
             return
         await self._found(row, item, best, english)
@@ -183,16 +184,17 @@ class Watcher:
     async def _found(self, row, item, best, english: bool, season=None, episode=None):
         what = item["title"] + (f" S{season:02d}" + (f"E{episode:02d}" if episode else "")
                                 if season is not None else "")
-        lang = "🇬🇧 English" if english or best["language"] != "it" else "🇮🇹 Italian"
-        body = f"{lang} · {best['quality']} · {best['size'] / 1e9:.1f} GB · {best['seeders']} seeders"
+        lang = _("🇬🇧 English") if english or best["language"] != "it" else _("🇮🇹 Italian")
+        body = _("{lang} · {quality} · {gb} GB · {n} seeders", lang=lang, quality=best["quality"],
+                 gb=f"{best['size'] / 1e9:.1f}", n=best["seeders"])
         if row["auto_download"]:
             await self.plugin.downloads.add(item, best, season, episode)
-            await self._notify_once(row, f"dl:{best['hash']}", f"Downloading {what}", body)
-            self._status(row["key"], "downloading", f"Downloading {what}")
+            await self._notify_once(row, f"dl:{best['hash']}", _("Downloading {what}", what=what), body)
+            self._status(row["key"], "downloading", _("Downloading {what}", what=what))
         else:
-            await self._notify_once(row, f"found:{season}:{episode}", f"Available: {what}",
-                                    body + " - tap to download")
-            self._status(row["key"], "found", f"{what}: {best['quality']} ({lang})")
+            await self._notify_once(row, f"found:{season}:{episode}", _("Available: {what}", what=what),
+                                    body + _(" - tap to download"))
+            self._status(row["key"], "found", _("{what}: {quality} ({lang})", what=what, quality=best["quality"], lang=lang))
 
     async def _check_series(self, row):
         p = self.plugin
@@ -218,8 +220,9 @@ class Watcher:
                     complete_seasons.add(n)
         nxt = item.get("next_episode")
         if not missing:
-            note = (f"Next: S{nxt['season']:02d}E{nxt['episode']:02d} on {nxt['air_date']}"
-                    if nxt else "Up to date")
+            note = (_("Next: S{season:02d}E{episode:02d} on {date}", season=nxt["season"],
+                       episode=nxt["episode"], date=nxt["air_date"])
+                    if nxt else _("Up to date"))
             self._status(row["key"], "downloading" if busy else "up_to_date", note)
             return
         searches = 0
@@ -242,7 +245,7 @@ class Watcher:
                     found_any = True
         if not found_any:
             total = sum(len(v) for v in missing.values())
-            self._status(row["key"], "waiting", f"{total} aired episode(s) missing, none on trackers yet")
+            self._status(row["key"], "waiting", _("{n} aired episode(s) missing, none on trackers yet", n=total))
 
     def on_imported(self, dl: dict) -> None:
         if dl["key"] in self.keys():

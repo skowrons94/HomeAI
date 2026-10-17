@@ -1,6 +1,6 @@
 // Home: every entity grouped by room, rendered from its kind (see hub/core.py).
 import { attentionBanner } from "./attention.js";
-import { api, h, icon, sheet, bus, store, callEntity, act, debounce, fmt, toast } from "../app.js";
+import { api, h, icon, sheet, bus, store, callEntity, act, debounce, fmt, toast, t, savePrefs, locale } from "../app.js";
 
 const KIND_ORDER = ["climate", "water_heater", "media_player", "tv", "speaker", "light", "switch", "sensor"];
 
@@ -19,22 +19,38 @@ export default {
         if (!rooms.has(r)) rooms.set(r, []);
         rooms.get(r).push(e);
       }
+      // the person's own order first (Customize), then Settings > Rooms, then the rest
+      const hp = store.prefs?.home || {}, mine = hp.order || [], hidden = new Set(hp.hidden || []);
       const order = [...store.rooms, "Other", "This hub"];
-      const names = [...rooms.keys()].sort((a, b) =>
-        ((order.indexOf(a) + 1) || 99) - ((order.indexOf(b) + 1) || 99) || a.localeCompare(b));
+      const rank = (r) => (mine.includes(r) ? mine.indexOf(r) : 1000 + ((order.indexOf(r) + 1) || 99));
+      const names = [...rooms.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+      const save = (o, hid) => savePrefs({ home: { ...hp, order: o, hidden: [...hid] } }, { rerender: false }).then(draw);
+      const move = (i, d) => { const o = [...names]; [o[i], o[i + d]] = [o[i + d], o[i]]; save(o, hidden); };
+      const toggle = (r) => { hidden.has(r) ? hidden.delete(r) : hidden.add(r); save(names, hidden); };
       grids.replaceChildren(
-        ...names.map((room) => [
-          h("div.section", h("h2", room), h("span.muted.small", `${rooms.get(room).length}`)),
-          h("div.grid", rooms.get(room).map((e) => { const t = tile(e); tiles.set(e.id, t); return t; })),
+        ...names.filter((r) => editing || !hidden.has(r)).map((room) => [
+          h(`div.section${hidden.has(room) ? ".off" : ""}`, h("h2", t(room)), h("span.muted.small", `${rooms.get(room).length}`),
+            editing && [h("div.spacer"),
+              h("button.icon.ghost", { title: t("Move up"), disabled: names.indexOf(room) === 0, onclick: () => move(names.indexOf(room), -1) }, icon("up")),
+              h("button.icon.ghost", { title: t("Move down"), disabled: names.indexOf(room) === names.length - 1, onclick: () => move(names.indexOf(room), 1) }, icon("down")),
+              h(`button.icon${hidden.has(room) ? "" : ".primary"}`, { title: hidden.has(room) ? t("Show") : t("Hide"), onclick: () => toggle(room) },
+                icon(hidden.has(room) ? "plus" : "check"))]),
+          !(editing && hidden.has(room)) && h("div.grid", rooms.get(room).map((e) => { const tl = tile(e); tiles.set(e.id, tl); return tl; })),
         ]).flat(),
-        ...(visible.length ? [] : [h("div.empty", "No devices yet. Enable plugins in config.toml — see Settings.")]),
+        ...(visible.length ? [] : [h("div.empty", t("No devices yet. Enable plugins in config.toml — see Settings."))]),
       );
       summary.replaceChildren(...summaryChips());
     };
 
     const summary = h("div.row.wrap");
+    let editing = false;
+    const editBtn = h("button.icon.ghost", { title: t("Customize"), onclick: () => {
+      editing = !editing;
+      editBtn.classList.toggle("primary", editing);
+      draw();
+    } }, icon("edit"));
     root.append(
-      h("header.page", h("div.stack", { style: { gap: "6px" } }, h("h1", greeting()), summary)),
+      h("header.page", h("div.stack", { style: { gap: "6px" } }, h("h1", greeting()), summary), h("div.spacer"), editBtn),
       attentionBanner(),
       grids,
     );
@@ -64,8 +80,12 @@ export default {
 
 function greeting() {
   const hr = new Date().getHours();
-  return hr < 5 ? "Buonanotte" : hr < 13 ? "Buongiorno" : hr < 18 ? "Buon pomeriggio" : "Buonasera";
+  return hr < 5 ? t("Good night") : hr < 13 ? t("Good morning") : hr < 18 ? t("Good afternoon") : t("Good evening");
 }
+
+const modeName = (m) => ({ off: t("Off"), heat: t("Heat"), auto: t("Auto"), cool: t("Cool") }[m] || m);
+const stateName = (s) => ({ playing: t("playing"), paused: t("paused"), idle: t("Idle"), stopped: t("stopped"),
+                            standby: t("Standby"), buffering: t("buffering") }[s] || s);
 
 function summaryChips() {
   const ents = [...store.entities.values()];
@@ -76,11 +96,11 @@ function summaryChips() {
   const heating = ents.find((e) => e.kind === "climate");
   const avg = (a, k) => a.reduce((s, e) => s + e.state[k], 0) / a.length;
   return [
-    temps.length && h("span.chip", icon("thermo"), `${avg(temps, "temperature").toFixed(1)}°`),
+    temps.length && h("span.chip", icon("thermo"), `${fmt.num(avg(temps, "temperature"), 1)}°`),
     hums.length && h("span.chip", icon("drop"), `${Math.round(avg(hums, "humidity"))}%`),
     heating && h(`span.chip${heating.state.heating ? ".warn" : ""}`, icon("flame"),
-                 heating.state.mode === "off" ? "Heating off" : `${fmt.temp(heating.state.target_temperature)}° ${heating.state.mode}`),
-    h("span.chip", icon("bulb"), lightsOn ? `${lightsOn} on` : "Lights off"),
+                 heating.state.mode === "off" ? t("Heating off") : `${fmt.temp(heating.state.target_temperature)}° ${modeName(heating.state.mode)}`),
+    h("span.chip", icon("bulb"), lightsOn ? t("{n} on", { n: lightsOn }) : t("Lights off")),
   ].filter(Boolean);
 }
 
@@ -92,7 +112,7 @@ function tile(e) {
   const el = maker ? maker(e) : genericTile(e);
   el.dataset.room = groupOf(e);
   if (!e.available) el.classList.add("unavailable");
-  el.append(h("button.icon.ghost.more", { title: "Edit", onclick: (ev) => { ev.stopPropagation(); editEntity(e); } },
+  el.append(h("button.icon.ghost.more", { title: t("Edit"), onclick: (ev) => { ev.stopPropagation(); editEntity(e); } },
               icon("more")));
   // don't re-render a tile while the user drags one of its sliders
   el.addEventListener("pointerdown", (ev) => { if (ev.target.type === "range") el.dataset.busy = "1"; });
@@ -102,7 +122,7 @@ function tile(e) {
 
 const top = (e, ico, sub) => h("div.top", h("div.ico", icon(ico)),
   h("div", { style: { minWidth: 0, paddingRight: "22px" } }, h("div.name.ellipsis", e.name),
-    h("div.sub.ellipsis", e.available ? sub : "Unavailable")));
+    h("div.sub.ellipsis", e.available ? sub : t("Unavailable"))));
 
 function climateTile(e) {
   const st = e.state, a = e.attrs, water = e.kind === "water_heater";
@@ -117,18 +137,18 @@ function climateTile(e) {
   const modes = a.modes || [];
   return h(`div.card.tile.heat.span2${st.heating ? ".active" : ""}`,
     top(e, water ? "shower" : "flame",
-        st.heating ? "Heating now" : st.mode === "off" ? "Off" : st.mode === "auto" ? "Schedule" : "Idle"),
+        st.heating ? t("Heating now") : st.mode === "off" ? t("Off") : st.mode === "auto" ? t("Schedule") : t("Idle")),
     h("div.row",
       h("div.big", fmt.temp(st.current_temperature), h("small", "°C")),
       h("div.spacer"),
       h("div.stepper",
-        h("button.icon", { onclick: () => step(-1), "aria-label": "Lower" }, icon("minus")),
+        h("button.icon", { onclick: () => step(-1), "aria-label": t("Lower") }, icon("minus")),
         val,
-        h("button.icon", { onclick: () => step(1), "aria-label": "Raise" }, icon("plus")))),
+        h("button.icon", { onclick: () => step(1), "aria-label": t("Raise") }, icon("plus")))),
     modes.length > 1 && h("div.seg", { style: { alignSelf: "flex-start" } },
       modes.map((m) => h(`button${st.mode === m ? ".active" : ""}`,
         { onclick: (ev) => act(() => callEntity(e.id, "set_mode", { mode: m }), ev.currentTarget) },
-        { off: "Off", heat: water ? "On" : "Manual", auto: "Auto" }[m] || m))));
+        { off: t("Off"), heat: water ? t("On") : t("Manual"), auto: t("Auto") }[m] || m))));
 }
 
 // -- generic sensors: any numeric state, units from attrs.units --------------------
@@ -137,10 +157,13 @@ const groupOf = (e) => e.room || e.attrs.group || "Other";
 const KEY_COLORS = { temperature: "#ff7a45", humidity: "#33a4d8", download: "#30b85a", upload: "#0a84ff",
                      latency: "#f2a516", used: "#a970ff", free: "#33a4d8", usage: "#ff7a45" };
 const colorOf = (k) => KEY_COLORS[k] || "#ff7a45";
-const labelOf = (k) => (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, " ");
+const labelOf = (k) => ({ temperature: t("Temperature"), humidity: t("Humidity"), battery: t("Battery"), usage: t("Usage"),
+  load: t("Load"), used: t("Used"), free: t("Free"), download: t("Download"), upload: t("Upload"), signal: t("Signal"),
+  quality: t("Link quality"), latency: t("Latency") }[k]
+  || (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, " "));
 const unitOf = (e, k) => (e.attrs.units || {})[k]
   ?? ({ temperature: "°", humidity: "%", battery: "%" }[k] || "");
-const fmtNum = (v) => (Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10).toLocaleString();
+const fmtNum = (v) => (Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10).toLocaleString(locale());
 
 function sensorKeys(e) {  // values worth showing/charting, most important first
   const keys = e.attrs.history
@@ -189,8 +212,8 @@ function lampColor(st) {
     return `hsl(${st.hue} ${Math.max(35, st.saturation)}% 60%)`;
   }
   if (st.color_temp) {  // 2200 K amber .. 4000+ K cool white
-    const t = Math.max(0, Math.min(1, (st.color_temp - 2200) / 1800));
-    const mix = (a, b) => Math.round(a + (b - a) * t);
+    const k = Math.max(0, Math.min(1, (st.color_temp - 2200) / 1800));
+    const mix = (a, b) => Math.round(a + (b - a) * k);
     return `rgb(${mix(255, 236)} ${mix(176, 240)} ${mix(92, 255)})`;
   }
   return "";
@@ -202,7 +225,7 @@ function lightTile(e) {
   const el = h(`div.card.tile${st.on ? ".active" : ""}`,
     { style: { cursor: "pointer" },
       onclick: (ev) => { if (ev.target.type !== "range") act(() => callEntity(e.id, st.on ? "turn_off" : "turn_on")); } },
-    top(e, "bulb", st.on ? (st.brightness !== undefined ? `${st.brightness}%` : "On") : "Off"));
+    top(e, "bulb", st.on ? (st.brightness !== undefined ? `${st.brightness}%` : t("On")) : t("Off")));
   const color = st.on && lampColor(st);
   if (color) el.querySelector(".ico").style.background = color;
   if (st.brightness !== undefined || tunable) {
@@ -211,7 +234,7 @@ function lightTile(e) {
         style: { flex: 1, minWidth: 0 },
         onclick: (ev) => ev.stopPropagation(),
         onchange: (ev) => act(() => callEntity(e.id, "turn_on", { brightness: +ev.target.value })) }),
-      tunable && h("button.icon", { title: "Colour", "aria-label": "Colour and white",
+      tunable && h("button.icon", { title: t("Colour"), "aria-label": t("Colour and white"),
         onclick: (ev) => { ev.stopPropagation(); lightSheet(e); } }, icon("bulb"))));
   }
   return el;
@@ -237,28 +260,28 @@ function lightSheet(e) {
       h("button", { onclick: async (ev) => {
         st.on = !st.on; paint();
         await act(() => callEntity(e.id, st.on ? "turn_on" : "turn_off"), ev.currentTarget);
-        ev.currentTarget.textContent = st.on ? "Turn off" : "Turn on";
-      } }, st.on ? "Turn off" : "Turn on")),
-    st.brightness !== undefined && slider("Brightness", { min: 1, max: 100, value: st.brightness ?? 100 },
+        ev.currentTarget.textContent = st.on ? t("Turn off") : t("Turn on");
+      } }, st.on ? t("Turn off") : t("Turn on"))),
+    st.brightness !== undefined && slider(t("Brightness"), { min: 1, max: 100, value: st.brightness ?? 100 },
       (v) => { st.brightness = v; st.on = true; paint(); send({ brightness: v }); }),
     st.color_temp !== undefined && h("div.stack", { style: { gap: "6px" } },
-      slider("White", { min: lo, max: hi, step: 50, value: st.color_temp, class: "ct-range" },
+      slider(t("White"), { min: lo, max: hi, step: 50, value: st.color_temp, class: "ct-range" },
         (v) => { st.color_temp = v; st.color_mode = "temperature"; st.on = true; paint(); send({ color_temp: v }); }),
-      h("div.row.wrap", { style: { gap: "6px" } }, [["Warm", lo], ["Neutral", Math.round((lo + hi) / 2 / 50) * 50], ["Cool", hi]]
+      h("div.row.wrap", { style: { gap: "6px" } }, [[t("Warm"), lo], [t("Neutral"), Math.round((lo + hi) / 2 / 50) * 50], [t("Cool"), hi]]
         .map(([name, k]) => h("button", { onclick: () => {
           st.color_temp = k; st.color_mode = "temperature"; st.on = true; paint();
           body.querySelector(".ct-range").value = k; send({ color_temp: k });
         } }, name)))),
     e.attrs.color && h("div.stack", { style: { gap: "8px" } },
-      h("div.small.muted", "Colour"),
+      h("div.small.muted", t("Colour")),
       h("div.swatches", SWATCHES.map((hue) => h("button.swatch", {
-        style: { background: `hsl(${hue} 85% 55%)` }, "aria-label": `Hue ${hue}`,
+        style: { background: `hsl(${hue} 85% 55%)` }, "aria-label": t("Hue {n}", { n: hue }),
         onclick: () => {
           st.hue = hue; st.saturation = Math.max(st.saturation ?? 0, 60); st.color_mode = "color"; st.on = true;
           body.querySelector(".sat-range").value = st.saturation; paint();
           send({ hue, saturation: st.saturation });
         } }))),
-      slider("Saturation", { min: 0, max: 100, value: st.saturation ?? 100, class: "sat-range" },
+      slider(t("Saturation"), { min: 0, max: 100, value: st.saturation ?? 100, class: "sat-range" },
         (v) => { st.saturation = v; st.color_mode = "color"; st.on = true; paint(); send({ hue: st.hue ?? 0, saturation: v }); })),
   );
   paint();
@@ -268,19 +291,19 @@ function lightSheet(e) {
 function switchTile(e) {
   return h(`div.card.tile${e.state.on ? ".active" : ""}`,
     { style: { cursor: "pointer" }, onclick: () => act(() => callEntity(e.id, e.state.on ? "turn_off" : "turn_on")) },
-    top(e, "plug", e.state.on ? "On" : "Off"));
+    top(e, "plug", e.state.on ? t("On") : t("Off")));
 }
 
 function powerBtn(e) {
   return h(`button.icon${e.state.on ? ".on" : ""}`,
-    { title: "Power", onclick: (ev) => act(() => callEntity(e.id, e.state.on ? "turn_off" : "turn_on"), ev.currentTarget) },
+    { title: t("Power"), onclick: (ev) => act(() => callEntity(e.id, e.state.on ? "turn_off" : "turn_on"), ev.currentTarget) },
     icon("power"));
 }
 
 function speakerTile(e) {
   const st = e.state, sources = e.attrs.sources || [];
   return h(`div.card.tile.span2${st.on ? ".active" : ""}`,
-    top(e, "speaker", st.on ? `${st.source || ""}${st.playing ? " · playing" : ""}` : "Standby"),
+    top(e, "speaker", st.on ? `${st.source || ""}${st.playing ? ` · ${t("playing")}` : ""}` : t("Standby")),
     h("div.row",
       powerBtn(e),
       h("button.icon", { onclick: () => act(() => callEntity(e.id, "mute", { value: !st.muted })) },
@@ -303,7 +326,7 @@ function mediaTile(e) {
   const st = e.state, playing = st.state === "playing";
   const pos = st.duration ? Math.min(100, (st.position || 0) / st.duration * 100) : null;
   return h(`div.card.tile.span2${st.on ? ".active" : ""}`,
-    top(e, "appletv", !st.on ? "Off" : st.app || (st.state || "Idle")),
+    top(e, "appletv", !st.on ? t("Off") : st.app || stateName(st.state || "idle")),
     st.title ? h("div.media-tile",
       st.artwork ? h("img.art", { src: st.artwork, alt: "" }) : h("div.art"),
       h("div.stack", { style: { gap: "4px", minWidth: 0, flex: 1 } },
@@ -313,7 +336,7 @@ function mediaTile(e) {
       : null,
     h("div.row",
       powerBtn(e),
-      h("button.icon", { title: "Remote", onclick: () => remoteSheet(e) }, icon("remote")),
+      h("button.icon", { title: t("Remote"), onclick: () => remoteSheet(e) }, icon("remote")),
       e.actions.includes("launch_app") && h("button", { onclick: (ev) => act(() => callEntity(e.id, "launch_app", { app: "Infuse" }), ev.currentTarget) }, "Infuse"),
       h("div.spacer"),
       h("button.icon.ghost", { onclick: () => act(() => callEntity(e.id, "previous")) }, icon("prev")),
@@ -324,10 +347,10 @@ function mediaTile(e) {
 function tvTile(e) {
   const st = e.state;
   return h(`div.card.tile${st.on ? ".active" : ""}`,
-    top(e, "tv", st.on ? (st.source || "On") : "Off"),
+    top(e, "tv", st.on ? (st.source || t("On")) : t("Off")),
     h("div.row", powerBtn(e),
-      e.actions.includes("remote") && h("button.icon", { title: "Remote", onclick: () => remoteSheet(e) }, icon("remote")),
-      e.attrs.experimental && h("span.chip.warn.tiny", "beta")));
+      e.actions.includes("remote") && h("button.icon", { title: t("Remote"), onclick: () => remoteSheet(e) }, icon("remote")),
+      e.attrs.experimental && h("span.chip.warn.tiny", t("beta"))));
 }
 
 function genericTile(e) {
@@ -353,20 +376,20 @@ function remoteSheet(e) {
 
 function editEntity(e) {
   const name = h("input", { value: e.name });
-  const room = h("input", { value: e.room, list: "rooms-list", placeholder: "Room" });
+  const room = h("input", { value: e.room, list: "rooms-list", placeholder: t("Room") });
   const rooms = h("datalist#rooms-list", [...new Set([...store.rooms,
     ...[...store.entities.values()].map((x) => x.room).filter(Boolean)])].map((r) => h("option", { value: r })));
   const hidden = h("input", { type: "checkbox", checked: !!e.attrs.hidden });
-  const s = sheet(`Edit ${e.name}`, [
-    h("label.field", "Name", name),
-    h("label.field", "Room", room, rooms),
-    h("label.row.small", hidden, "Hide from Home"),
+  const s = sheet(t("Edit {name}", { name: e.name }), [
+    h("label.field", t("Name"), name),
+    h("label.field", t("Room"), room, rooms),
+    h("label.row.small", hidden, t("Hide from Home")),
     h("div.small.muted", `${e.id} · ${e.plugin} · ${e.kind}`),
     h("button.primary.lg", { onclick: async (ev) => {
       await act(() => api(`entities/${encodeURIComponent(e.id)}`,
         { method: "PATCH", body: { name: name.value.trim(), room: room.value.trim(), hidden: hidden.checked } }), ev.currentTarget);
-      s.close(); toast("Saved");
-    } }, "Save"),
+      s.close(); toast(t("Saved"));
+    } }, t("Save")),
   ]);
 }
 
@@ -382,11 +405,11 @@ async function sensorDetail(e) {
       requestAnimationFrame(() => drawChart(c, pts, colorOf(k), unitOf(e, k)));
       return h("div.card", h("div.row", h("h3", labelOf(k)),
         h("span.muted.small", `${fmtNum(e.state[k])} ${unitOf(e, k)}`), h("div.spacer"),
-        h("a.small", { href: `#/history/${encodeURIComponent(e.id)}:${k}`, onclick: () => s.close() }, "Open in History")), c);
+        h("a.small", { href: `#/history/${encodeURIComponent(e.id)}:${k}`, onclick: () => s.close() }, t("Open in History"))), c);
     }));
     body.replaceChildren(
       h("div.seg", [24, 168, 720].map((hr) => h(`button${hr === hours ? ".active" : ""}`,
-        { onclick: () => { hours = hr; draw(); } }, hr === 24 ? "24 h" : hr === 168 ? "7 days" : "30 days"))),
+        { onclick: () => { hours = hr; draw(); } }, hr === 24 ? t("24 h") : hr === 168 ? t("7 days") : t("30 days")))),
       ...charts,
       h("div.small.muted", Object.entries(e.attrs)
         .filter(([k, v]) => !["hidden", "measures", "units", "history", "primary", "group", "icon"].includes(k)
@@ -434,9 +457,8 @@ function drawChart(canvas, pts, color, unit, spark = false) {
   ctx.fillText(`${y0.toFixed(1)}${unit}`, 0, hgt - padB);
   const span = x1 - x0;
   for (let i = 0; i <= 4; i++) {
-    const t = x0 + span * i / 4, d = new Date(t * 1000);
-    const label = span > 2 * 86400 ? d.toLocaleDateString([], { day: "numeric", month: "short" })
-                                   : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    ctx.fillText(label, Math.min(X(t), w - 40), hgt - 3);
+    const tx = x0 + span * i / 4, d = new Date(tx * 1000);
+    const label = span > 2 * 86400 ? fmt.date(d, { weekday: false }) : fmt.time(d);
+    ctx.fillText(label, Math.min(X(tx), w - 40), hgt - 3);
   }
 }

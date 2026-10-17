@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from . import i18n
+
 log = logging.getLogger("hub")
 
 Action = Callable[..., Awaitable[Any]]
@@ -150,6 +152,7 @@ class Hub:
         self.data_dir = root / "data"
         self.data_dir.mkdir(exist_ok=True)
         self.store = Store(self.data_dir / "hub.db")
+        i18n.set_language(config.get("language"))
         self._apply_history_config()
         self.notify = Notifier(self, config.get("notify", {}))
         self.homekit = HomeKit(self, config.get("homekit", {}), self.data_dir)
@@ -385,7 +388,9 @@ class Hub:
         """Apply a core settings section that doesn't need a restart."""
         from .notify import Notifier
 
-        if section == "notify":
+        if section == "general":
+            i18n.set_language(self.config.get("language"))
+        elif section == "notify":
             self.notify = Notifier(self, self.config.get("notify", {}))
         elif section == "history":
             self._apply_history_config()
@@ -398,7 +403,7 @@ class Hub:
             settings = {"type": "settings", "plugin": name}
             if p.error:
                 items.append({"id": f"{name}.error", "level": "error",
-                              "title": f"{title} isn't working", "detail": p.error,
+                              "title": i18n._("{title} isn't working", title=title), "detail": p.error,
                               "action": settings})
                 continue
             try:
@@ -407,7 +412,7 @@ class Hub:
                 st = {}
             if st.get("setup") and not st.get("configured"):
                 items.append({"id": f"{name}.setup", "level": "warning",
-                              "title": f"Pair {title}", "detail": st.get("setup_hint", ""),
+                              "title": i18n._("Pair {title}", title=title), "detail": st.get("setup_hint", ""),
                               "action": {"type": "setup", "plugin": name}})
             try:
                 for it in p.attention() or []:
@@ -420,13 +425,13 @@ class Hub:
                 log.exception("plugin %s attention() failed", name)
         hk = self.homekit.info()
         if hk.get("running") and not hk.get("paired"):
-            items.append({"id": "homekit.pair", "level": "info", "title": "Add Casa to Apple Home",
-                          "detail": "Scan the setup code with the Home app.",
+            items.append({"id": "homekit.pair", "level": "info", "title": i18n._("Add Casa to Apple Home"),
+                          "detail": i18n._("Scan the setup code with the Home app."),
                           "action": {"type": "homekit"}})
         if self.notify.channels == ["app"]:
             items.append({"id": "notify.phone", "level": "info",
-                          "title": "Get notifications on your phone",
-                          "detail": "Free with the ntfy app: downloads, favourites found, alerts.",
+                          "title": i18n._("Get notifications on your phone"),
+                          "detail": i18n._("Free with the ntfy app: downloads, favourites found, alerts."),
                           "action": {"type": "core", "section": "notify"}})
         dismissed = set(self.store.get("attention.dismissed", []))
         for it in items:

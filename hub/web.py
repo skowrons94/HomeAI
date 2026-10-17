@@ -33,7 +33,7 @@ from pathlib import Path
 from aiohttp import web
 from yarl import URL
 
-from . import settings
+from . import i18n, settings
 
 log = logging.getLogger("hub.web")
 COOKIE = "casa_session"
@@ -66,6 +66,9 @@ class WebServer:
         r.add_get("/", self.index)
         r.add_post("/api/login", self.login)
         r.add_get("/api/state", self.state)
+        r.add_get("/api/i18n", self.i18n)
+        r.add_get("/api/prefs", self.prefs)
+        r.add_put("/api/prefs", self.prefs_save)
         r.add_post("/api/entities/{id}/{action}", self.action)
         r.add_patch("/api/entities/{id}", self.patch_entity)
         r.add_get("/api/history", self.history_series)
@@ -151,7 +154,7 @@ class WebServer:
     @web.middleware
     async def _auth(self, request, handler):
         if (self.password and request.path.startswith("/api/")
-                and request.path != "/api/login"
+                and request.path not in ("/api/login", "/api/i18n")
                 and not hmac.compare_digest(request.cookies.get(COOKIE, ""), self.token)):
             return _json({"error": "login required"}, 401)
         return await handler(request)
@@ -196,10 +199,32 @@ class WebServer:
             "unread": hub.store.query(
                 "SELECT COUNT(*) AS n FROM notifications WHERE read=0")[0]["n"],
             "rooms": hub.config.get("rooms", []),
+            "language": i18n.language(),
+            "people": [str(p) for p in hub.config.get("people", []) if str(p).strip()],
             "name": hub.config.get("name", "Casa"),
             "onboarding": not hub.onboarded,
             "attention": sum(1 for i in hub.attention() if i["level"] != "info"),
         })
+
+    async def i18n(self, request):
+        """Translations for the web app (no login needed: the login screen uses them too)."""
+        return _json({"language": i18n.language(), "texts": i18n.texts()})
+
+    def _prefs_key(self, request) -> str:
+        person = request.query.get("person", "")
+        people = [str(p) for p in self.hub.config.get("people", [])]
+        return f"ui.prefs.{person if person in people else '_'}"
+
+    async def prefs(self, request):
+        """Per-person layout: tab bar order, Home sections order/hidden ({} = defaults)."""
+        return _json(self.hub.store.get(self._prefs_key(request)) or {})
+
+    async def prefs_save(self, request):
+        body = await request.json()
+        if not isinstance(body, dict) or len(json.dumps(body)) > 20_000:
+            raise ValueError("invalid preferences")
+        self.hub.store.set(self._prefs_key(request), body)
+        return _json(body)
 
     async def action(self, request):
         params = await request.json() if request.can_read_body else {}

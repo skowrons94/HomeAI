@@ -12,6 +12,7 @@ import re
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
+from ...i18n import _
 
 log = logging.getLogger("hub.sync.feed")
 
@@ -47,7 +48,7 @@ def scan_text(text: str, what: str = "text") -> str:
         raise ValueError(f"{what} must be text")
     for label, rx in _FORBIDDEN:
         if rx.search(text):
-            raise ValueError(f"{what} can't contain {label}: it would be shared with the other houses")
+            raise ValueError(_("{what} can't contain {label}: it would be shared with the other houses", what=_(what), label=_(label)))
     return text
 
 

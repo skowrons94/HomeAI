@@ -34,6 +34,7 @@ from datetime import date
 from aiohttp import web
 
 from ...core import Plugin
+from ...i18n import _
 from .downloads import Downloads
 from .indexers import Indexers, Query, magnet
 from .library import Library
@@ -186,22 +187,24 @@ class MediaPlugin(Plugin):
         """Cheap: only cached state, no network."""
         out = []
         if not self.metadata.key:
-            out.append({"id": "tmdb", "level": "info", "title": "Add a free TMDB key",
-                        "detail": "Italian titles and plots, upcoming releases and genres",
+            out.append({"id": "tmdb", "level": "info", "title": _("Add a free TMDB key"),
+                        "detail": _("Italian titles and plots, upcoming releases and genres"),
                         "action": {"type": "settings", "plugin": "media"}})
         if self.downloads.ok is False:
-            out.append({"id": "transmission", "level": "warning", "title": "Downloads aren't working",
-                        "detail": self.downloads.error or "Transmission is unreachable",
+            out.append({"id": "transmission", "level": "warning", "title": _("Downloads aren't working"),
+                        "detail": self.downloads.error or _("Transmission is unreachable"),
                         "action": {"type": "settings", "plugin": "media"}})
         lib = self.library
         dirs = [("movies", lib.movies_dir), ("series", lib.series_dir)]
         unset = [n for n, d in dirs if not d]
         missing = [n for n, d in dirs if d and not os.path.isdir(d)]
         if unset or missing:
-            detail = (f"{' and '.join(missing)} folder not found - is the NAS mounted?" if missing
-                      else f"{' and '.join(unset)} folder not set")
+            names = {"movies": _("movies"), "series": _("series")}
+            detail = (_("{what} folder not found - is the NAS mounted?",
+                        what=_(" and ").join(names[n] for n in missing)) if missing
+                      else _("{what} folder not set", what=_(" and ").join(names[n] for n in unset)))
             storage = "storage" in getattr(self.hub, "plugins", {})
-            out.append({"id": "library", "level": "warning", "title": "Media library not available",
+            out.append({"id": "library", "level": "warning", "title": _("Media library not available"),
                         "detail": detail,
                         "action": {"type": "settings", "plugin": "storage" if missing and storage else "media"}})
         return out
@@ -280,7 +283,7 @@ class MediaPlugin(Plugin):
         t = _kind(request)
         genre = request.query.get("genre", "")
         if not genre:
-            return _json({"error": "genre required"}, 400)
+            return _json({"error": _("genre required")}, 400)
         try:
             page = int(request.query.get("page", 1))
         except ValueError:
@@ -342,11 +345,11 @@ class MediaPlugin(Plugin):
         rel = self._releases.get((body.get("hash") or "").lower(), (0, None))[1]
         if rel is None:
             if body.get("hash"):
-                raise ValueError("release expired - search again")
+                raise ValueError(_("release expired - search again"))
             res = await self.find_releases(item, season, episode)
             rel = res["best"]
             if rel is None:
-                return _json({"error": "no acceptable release found"}, 404)
+                return _json({"error": _("no acceptable release found")}, 404)
         result = await self.downloads.add(item, rel, season, episode)
         return _json({"ok": True, **result, "release": rel})
 
@@ -386,7 +389,7 @@ class MediaPlugin(Plugin):
         path = request.query.get("path", "")
         subs = self.subtitles
         if not subs.allowed(path):
-            return _json({"error": "path is outside the library"}, 400)
+            return _json({"error": _("path is outside the library")}, 400)
         states = [subs.state(p) or {"path": p, "status": "none"} for p in subs.videos_in(path)]
         return _json({"language": subs.lang, "states": states})
 
@@ -394,12 +397,12 @@ class MediaPlugin(Plugin):
         b = await request.json()
         path, subs = b.get("path", ""), self.subtitles
         if not subs.allowed(path):
-            return _json({"error": "path is outside the library"}, 400)
+            return _json({"error": _("path is outside the library")}, 400)
         if not subs.enabled:
-            return _json({"error": "subtitles are disabled in settings"}, 400)
+            return _json({"error": _("subtitles are disabled in settings")}, 400)
         videos = subs.videos_in(path)
         if len(videos) > 3:  # a whole show would burn the daily download quota at once
-            return _json({"error": "pick a single movie or episode"}, 400)
+            return _json({"error": _("pick a single movie or episode")}, 400)
         for p in videos:
             pr = parse(os.path.basename(p))
             subs.spawn(Video(p, title=b.get("title") or pr.head or "", year=b.get("year") or pr.year,

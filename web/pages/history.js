@@ -1,14 +1,14 @@
 // History: browse the recorded values of any sensor (GET /api/history, /api/history/{entity}).
 // Route: #/history/<entity>:<key>,<entity>:<key>/<range>   range = 24h | 7d | 30d | 1y
-import { api, h, icon, store, ensureCss, debounce } from "../app.js";
+import { api, h, icon, store, ensureCss, debounce, fmt, t, locale } from "../app.js";
 
 const COLORS = ["#ff7a45", "#33a4d8", "#30b85a", "#b36bff"];
 const MAX_SEL = 4;
 const RANGES = { "24h": 24, "7d": 168, "30d": 720, "1y": 8760 };
-const KEY_LABEL = { temperature: "Temperature", humidity: "Humidity", battery: "Battery", usage: "Usage",
-                    load: "Load", used: "Used", free: "Free", download: "Download", upload: "Upload",
-                    signal: "Signal", quality: "Link quality", latency: "Latency" };
-const pretty = (k) => KEY_LABEL[k] || k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+const keyLabel = (k) => ({ temperature: t("Temperature"), humidity: t("Humidity"), battery: t("Battery"), usage: t("Usage"),
+                           load: t("Load"), used: t("Used"), free: t("Free"), download: t("Download"), upload: t("Upload"),
+                           signal: t("Signal"), quality: t("Link quality"), latency: t("Latency") }[k]);
+const pretty = (k) => keyLabel(k) || k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 const sid = (s) => `${s.entity}:${s.key}`;
 
 export default {
@@ -23,11 +23,11 @@ export default {
     const chartsBox = h("div.hist-charts");
     const list = h("div.hist-list");
     const rangeBox = h("div.row.wrap.hist-range");
-    const q = h("input", { type: "search", placeholder: "Search sensors…",
+    const q = h("input", { type: "search", placeholder: t("Search sensors…"),
                            oninput: debounce((e) => { filter = e.target.value.toLowerCase(); drawList(); }, 120) });
 
     root.append(
-      h("header.page", h("h1", "History")),
+      h("header.page", h("h1", t("History"))),
       h("div.hist-layout",
         h("div.hist-main", rangeBox, chartsBox),
         h("div.hist-side", h("div.hist-search", q), list)));
@@ -43,13 +43,13 @@ export default {
       const btn = (id, label) => h(`button${range === id ? ".active" : ""}`,
         { onclick: () => { range = id; drawRange(); saveHash(); loadAll(); } }, label);
       rangeBox.replaceChildren(...[
-        h("div.seg", btn("24h", "24 h"), btn("7d", "7 days"), btn("30d", "30 days"), btn("1y", "1 year"),
-          btn("custom", "Custom")),
+        h("div.seg", btn("24h", t("24 h")), btn("7d", t("7 days")), btn("30d", t("30 days")), btn("1y", t("1 year")),
+          btn("custom", t("Custom"))),
         range === "custom" ? h("div.row.hist-custom",
-          h("input", { type: "datetime-local", value: custom.from, "aria-label": "From",
+          h("input", { type: "datetime-local", value: custom.from, "aria-label": t("From"),
                        onchange: (e) => { custom.from = e.target.value; loadAll(); } }),
           h("span.muted", "→"),
-          h("input", { type: "datetime-local", value: custom.to, "aria-label": "To",
+          h("input", { type: "datetime-local", value: custom.to, "aria-label": t("To"),
                        onchange: (e) => { custom.to = e.target.value; loadAll(); } })) : null].filter(Boolean));
     }
 
@@ -79,7 +79,7 @@ export default {
       charts.length = 0;
       if (!selected.length) {
         chartsBox.replaceChildren(h("div.empty.hist-hint", icon("chart"),
-          h("div", "Pick up to ", MAX_SEL, " values from the list to chart them.")));
+          h("div", t("Pick up to {n} values from the list to chart them.", { n: MAX_SEL }))));
         return;
       }
       let { from, to } = span();
@@ -99,9 +99,9 @@ export default {
         const card = h("div.card.hist-card",
           h("div.row.wrap.hist-legend", items.map((it) => h("span.hist-key", { style: { "--c": it.color } },
             h("i"), h("b", it.s.name), h("span.muted", pretty(it.s.key)),
-            h("a.hist-x", { href: "javascript:void 0", title: "Remove", onclick: () => toggle(it.id) }, "×")))),
+            h("a.hist-x", { href: "javascript:void 0", title: t("Remove"), onclick: () => toggle(it.id) }, "×")))),
           canvas,
-          items.every((it) => it.pts.length < 2) ? h("div.hist-nodata", "Not enough data in this range yet.") : null);
+          items.every((it) => it.pts.length < 2) ? h("div.hist-nodata", t("Not enough data in this range yet.")) : null);
         charts.push({ canvas, items, unit, from, to });
         return card;
       });
@@ -122,7 +122,7 @@ export default {
       const rows = series.filter((s) => !filter ||
         [s.name, s.room, s.entity, s.key, pretty(s.key)].join(" ").toLowerCase().includes(filter));
       if (!rows.length) {
-        list.replaceChildren(h("div.empty", series.length ? "No match." : "No history recorded yet."));
+        list.replaceChildren(h("div.empty", series.length ? t("No match.") : t("No history recorded yet.")));
         return;
       }
       const byRoom = new Map();
@@ -135,7 +135,7 @@ export default {
       }
       const rooms = [...byRoom].sort((a, b) => (a[0] === "Other") - (b[0] === "Other") || a[0].localeCompare(b[0]));
       list.replaceChildren(...rooms.map(([room, ents]) => h("div.hist-group",
-        h("div.hist-room", room),
+        h("div.hist-room", t(room)),
         h("div.list", [...ents].sort((a, b) => a[1][0].name.localeCompare(b[1][0].name)).map(([, ss]) =>
           h("div.hist-ent", h("div.hist-entname", ss[0].name),
             h("div.row.wrap.hist-chips", ss.map((s) => {
@@ -200,16 +200,16 @@ function timeTicks(from, to, max) {
 
 function timeLabel(t, step, span) {
   const d = new Date(t * 1000);
-  if (step >= 86400) return d.toLocaleDateString([], span > 400 * 86400 || step >= 30 * 86400 ?
+  if (step >= 86400) return d.toLocaleDateString(locale(), span > 400 * 86400 || step >= 30 * 86400 ?
     { month: "short", year: "2-digit" } : { day: "numeric", month: "short" });
-  if (d.getHours() === 0 && d.getMinutes() === 0) return d.toLocaleDateString([], { day: "numeric", month: "short" });
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (d.getHours() === 0 && d.getMinutes() === 0) return d.toLocaleDateString(locale(), { day: "numeric", month: "short" });
+  return fmt.time(d);
 }
 
 function fullTime(t, span) {
   const d = new Date(t * 1000);
-  return span > 3 * 86400 ? d.toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
-                          : d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  return span > 3 * 86400 ? d.toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+                          : d.toLocaleString(locale(), { weekday: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 class Chart {
