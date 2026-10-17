@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Install Casa on a Raspberry Pi (Raspberry Pi OS Bookworm / Debian 12+, 64-bit).
+#
+#   git clone / copy this folder to the Pi, e.g. ~/casa, then:
+#   ./deploy/install-pi.sh
+#
+# What it does (idempotent, safe to re-run):
+#   1. apt: python venv, BlueZ, Transmission, cifs-utils
+#   2. Python venv + requirements
+#   3. NAS mount at /mnt/nas (QNAP "Multimedia" share, SMB) via /etc/fstab
+#   4. Transmission: RPC on localhost only, downloads on the NAS
+#   5. systemd service "casa" (starts at boot, restarts on failure)
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+USER_NAME="$(id -un)"
+NAS_HOST="${NAS_HOST:-NAS.local}"
+NAS_SHARE="${NAS_SHARE:-Multimedia}"
+MOUNT="${MOUNT:-/mnt/nas}"
+
+say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+
+say "Installing system packages"
+sudo apt-get update -qq
+sudo apt-get install -y -qq python3-venv python3-dev bluez transmission-daemon cifs-utils \
+  libffi-dev libssl-dev
+
+say "Creating Python environment"
+python3 -m venv "$DIR/.venv"
+"$DIR/.venv/bin/pip" install -q --upgrade pip wheel
+"$DIR/.venv/bin/pip" install -q -r "$DIR/requirements.txt"
+# Bluetooth (Govee) through BlueZ/D-Bus needs the bluetooth group
+sudo usermod -aG bluetooth "$USER_NAME"
+
+say "NAS mount ($NAS_HOST/$NAS_SHARE -> $MOUNT)"
+CRED=/etc/casa-nas.cred
+if [ ! -f "$CRED" ]; then
+  read -rp "NAS username (empty = guest): " NAS_USER
+  if [ -n "$NAS_USER" ]; then
+    read -rsp "NAS password: " NAS_PASS; echo
+    printf 'username=%s\npassword=%s\n' "$NAS_USER" "$NAS_PASS" | sudo tee "$CRED" >/dev/null
+  else
+    printf 'username=guest\npassword=\n' | sudo tee "$CRED" >/dev/null
+  fi
+  sudo chmod 600 "$CRED"
+fi
+sudo mkdir -p "$MOUNT"
+# Transmission runs as debian-transmission: give that group write access too.
+# vers=2.0 because the TS-419P II firmware is old; raise to 3.0 if your NAS allows it.
+FSTAB="//$NAS_HOST/$NAS_SHARE $MOUNT cifs credentials=$CRED,uid=$USER_NAME,gid=debian-transmission,file_mode=0775,dir_mode=0775,vers=2.0,iocharset=utf8,_netdev,x-systemd.automount,nofail 0 0"
+if ! grep -q " $MOUNT cifs" /etc/fstab; then
+  echo "$FSTAB" | sudo tee -a /etc/fstab >/dev/null
+fi
+sudo systemctl daemon-reload
+sudo mount "$MOUNT" 2>/dev/null || true
+ls "$MOUNT" >/dev/null && echo "NAS mounted: $(ls "$MOUNT" | tr '\n' ' ')" \
+  || echo "!! NAS not mounted yet - check $CRED and the share name, then: sudo mount $MOUNT"
+sudo usermod -aG debian-transmission "$USER_NAME"
+mkdir -p "$MOUNT/downloads/incomplete" 2>/dev/null || true
+
+say "Configuring Transmission"
+sudo systemctl stop transmission-daemon
+SETTINGS=/etc/transmission-daemon/settings.json
+sudo python3 - "$SETTINGS" "$MOUNT/downloads/incomplete" <<'PY'
+import json, sys
+path, dl = sys.argv[1], sys.argv[2]
+s = json.load(open(path))
+s.update({
+    "download-dir": dl,
+    "incomplete-dir-enabled": False,
+    "rpc-enabled": True,
+    "rpc-bind-address": "127.0.0.1",      # only Casa talks to it
+    "rpc-authentication-required": False,
+    "rpc-whitelist-enabled": True,
+    "rpc-whitelist": "127.0.0.1",
+    "umask": 2,                           # group-writable, so Casa can move files
+    "ratio-limit-enabled": True,
+    "ratio-limit": 1.0,
+    "speed-limit-up-enabled": False,
+    "cache-size-mb": 16,                  # keep RAM use low on the Pi
+    "peer-limit-global": 120,
+})
+json.dump(s, open(path, "w"), indent=4)
+PY
+sudo systemctl enable --now transmission-daemon
+
+say "Configuration"
+if [ ! -f "$DIR/config.toml" ]; then
+  cp "$DIR/config.example.toml" "$DIR/config.toml"
+  chmod 600 "$DIR/config.toml"
+  echo "Created config.toml - edit it (Ariston login, TMDB key, ...) then: sudo systemctl restart casa"
+fi
+
+say "Installing systemd service"
+sudo tee /etc/systemd/system/casa.service >/dev/null <<UNIT
+[Unit]
+Description=Casa home hub
+After=network-online.target bluetooth.target transmission-daemon.service
+Wants=network-online.target
+
+[Service]
+User=$USER_NAME
+WorkingDirectory=$DIR
+ExecStart=$DIR/.venv/bin/python -m hub
+Restart=on-failure
+RestartSec=5
+# be gentle with the SD card and other services
+Nice=5
+MemoryMax=400M
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable --now casa
+
+IP="$(hostname -I | awk '{print $1}')"
+say "Done"
+echo "Web UI:     http://$IP:8080   (or http://$(hostname).local:8080)"
+echo "Logs:       journalctl -u casa -f"
+echo "HomeKit:    setup code + QR in the web UI under Settings"
+echo "VPN (opt.): ./deploy/vpn-wireguard.sh /path/to/provider-wg.conf"

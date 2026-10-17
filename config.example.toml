@@ -1,0 +1,101 @@
+# Casa home hub configuration. Copy to config.toml and edit; restart the hub after changes.
+# Every [plugins.<name>] table enables that plugin; add `enabled = false` to switch one off.
+name = "Casa"
+rooms = ["Soggiorno", "Cucina", "Camera", "Bagno", "Studio"]
+
+[web]
+port = 8080
+# password = ""          # set one if the UI should ask for a password
+
+[homekit]
+name = "Casa"
+port = 51826
+
+[notify]
+# Free push notifications: install the "ntfy" app, subscribe to a topic with a
+# hard-to-guess name and put the same URL here.
+# ntfy_url = "https://ntfy.sh/casa-change-me-123"
+# telegram_token = ""
+# telegram_chat_id = ""
+
+# Ariston NET boiler (cloud). Exposed to HomeKit as thermostats.
+[plugins.ariston]
+username = "your-ariston-net-email@example.com"
+password = "your-ariston-net-password"
+gateway = ""                 # empty = first boiler on the account
+poll_interval = 120          # seconds, >= 60
+expose_hot_water = true
+zone_names = { "1" = "Heating" }
+
+# KEF LSX / LS50 Wireless (first generation), TCP port 50001.
+[plugins.kef]
+host = "192.168.1.43"
+name = "KEF LSX"
+room = "Soggiorno"
+# poll_interval = 10
+
+# Govee Bluetooth thermo-hygrometers. Sensors are added when first heard.
+[plugins.govee]
+auto_add = true
+homekit = true
+# adapter = "hci0"
+# sensors = { "A4:C1:38:12:34:56" = { name = "Bagno", room = "Bagno" } }
+
+# Apple TV: pair from the web UI (Settings → Apple TV), a PIN shows on the TV.
+[plugins.appletv]
+name = "Apple TV"
+room = "Soggiorno"
+# host = "192.168.1.102"
+# identifier = ""            # set automatically by pairing
+
+# Hisense VIDAA TV: Wake-on-LAN + on/off status. Remote keys are EXPERIMENTAL
+# and need the RemoteNOW client certificate/key files.
+[plugins.hisense]
+host = "192.168.1.136"
+mac = "aa:bb:cc:dd:ee:ff"
+name = "TV Soggiorno"
+room = "Soggiorno"
+# certfile = "data/hisense/rcm_certchain_pem.cer"
+# keyfile = "data/hisense/rcm_pem_privkey.pkcs8"
+
+# IKEA DIRIGERA hub: pair from the web UI (press the button on the hub).
+[plugins.dirigera]
+host = ""                    # empty = discover with mDNS
+homekit = false              # DIRIGERA can join Apple Home itself via Matter
+
+# Everything the hub sees on the network (mDNS + ARP).
+[plugins.network]
+arp = true
+
+[plugins.media]
+# Movie/series metadata. Free key: themoviedb.org -> Settings -> API (v3 key or v4 token).
+# Empty = Cinemeta (no key, English only) so it works out of the box.
+tmdb_api_key = ""
+language = "it-IT"
+languages = ["it", "en"]      # audio priority: Italian first, then English
+quality = "1080p"             # preferred; 2160p also accepted when allow_4k
+allow_4k = true
+max_movie_gb = 20
+max_episode_gb = 4
+# NAS library (mounted on the Pi, see README). Mac test alternative:
+# movies_dir = "/Volumes/Multimedia/movies"
+movies_dir = "/mnt/nas/movies"
+series_dir = "/mnt/nas/series"
+download_dir = "/mnt/nas/downloads/incomplete"   # where Transmission writes
+post_process = "move"         # move | copy (keep seeding to seed_ratio) | none
+seed_ratio = 0
+auto_download = false         # default for new favourites
+italian_grace_days = 3        # wait this long for an Italian release before taking English
+# indexers = ["torrentio", "knaben", "apibay", "eztv", "yts", "ilcorsaronero", "1337x"]
+# mirrors = { yts = ["https://yts.gg"] }
+
+[plugins.media.transmission]
+url = "http://127.0.0.1:9091/transmission/rpc"
+# username = ""
+# password = ""
+
+[plugins.media.proxy]
+# Route tracker/metadata traffic through a proxy to reach DNS-blocked trackers
+# (ilCorSaRoNeRo, 1337x, YTS mirrors). socks5h = DNS resolved by the proxy.
+# url = "socks5h://user:pass@host:1080"   or   "http://host:3128"
+url = ""
