@@ -25,11 +25,14 @@ export async function api(path, { method, body, raw } = {}) {
   return data;
 }
 
-/** h("div.card.row", {onclick}, child, [children], "text") */
+/** h("div#id.card.row", {onclick}, child, [children], "text") */
 export function h(tag, props, ...children) {
-  const [name, ...classes] = tag.split(".");
+  const [head, ...classes] = tag.split(".");
+  // Safari rejects "div#x" in createElement (newer Chrome accepts it), so split the id off
+  const [name, id] = head.split("#");
   const el = name === "svg" ? document.createElementNS("http://www.w3.org/2000/svg", "svg")
                             : document.createElement(name || "div");
+  if (id) el.id = id;
   if (classes.length) el.setAttribute("class", classes.join(" "));
   if (props && (typeof props !== "object" || props instanceof Node || Array.isArray(props))) {
     children.unshift(props); props = null;
