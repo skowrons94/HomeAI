@@ -224,6 +224,7 @@ async function renderDetail(root, type, id, on) {
     type === "movie" && !it.in_library && h("button.primary", { onclick: (e) => quickDownload(it, {}, e.currentTarget) },
       icon("download"), "Download best"),
     type === "movie" && h("button", { onclick: () => openReleases(it, {}) }, icon("search"), "Find releases"),
+    type === "movie" && it.in_library && it.library_path && subsButton(it),
     it.trailer && h("a.btn", { href: it.trailer, target: "_blank", rel: "noopener" }, icon("play"), "Trailer"));
 
   const dlBox = h("div");
@@ -240,6 +241,31 @@ async function renderDetail(root, type, id, on) {
 
   if (hasPlugin("sync")) sharedBlock(it, type).then((el) => el && actions.after(el)).catch(() => {});
   if (type === "series") body.append(await seasonsView(it, on));
+}
+
+// Subtitles in the first audio language: search/check/re-sync on demand, state shown as a chip.
+function subsButton(it) {
+  const lang = status?.profile?.languages?.[0] || "it";
+  const name = { it: "Italian", en: "English", es: "Spanish", fr: "French", de: "German", pt: "Portuguese" }[lang] || lang.toUpperCase();
+  const chip = h("span.chip");
+  const btn = h("button", { onclick: () => act(async () => {
+    await P("subtitles", { body: { path: it.library_path, title: it.title, year: it.year, imdb_id: it.imdb_id } });
+    toast(`Looking for ${name} subtitles…`);
+    await poll();
+  }, btn) }, `${name} subtitles`);
+  const LABEL = { found: "found", in_sync: "found", adapted: "found · timing adjusted", unverified: "found · unverified",
+                  not_found: "not found", error: "error", skipped: "not needed", searching: "searching…" };
+  async function poll(n = 0) {
+    const r = await P(`subtitles?path=${enc(it.library_path)}`);
+    const st = r.states.map((s) => s.status).filter((s) => s !== "none");
+    const key = st.includes("searching") ? "searching" : ["error", "not_found", "unverified", "adapted", "in_sync", "found", "skipped"].find((k) => st.includes(k));
+    chip.textContent = key ? `${LABEL[key]}${st.length > 1 ? ` (${st.length})` : ""}` : "";
+    chip.className = `chip ${key === "searching" ? "accent" : ["not_found", "error", "unverified"].includes(key) ? "warn" : key ? "ok" : ""}`;
+    chip.title = r.states.map((s) => s.message || s.release || "").filter(Boolean).join("\n");
+    if (key === "searching" && n < 120) setTimeout(() => poll(n + 1).catch(() => {}), 3000);
+  }
+  poll().catch(() => {});
+  return h("span.row", { style: { gap: "6px" } }, btn, chip);
 }
 
 // "Shared feed" (hub/plugins/sync): my watched/rating state + what friends said. Hidden if the plugin errors.

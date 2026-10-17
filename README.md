@@ -116,6 +116,12 @@ The History page lets you pick up to 4 values and view them over 24h, 7d, 30d, 1
   notifies you when a release appears (or a new episode airs). With *auto-download* on it also
   downloads it. If only an English release exists it waits `italian_grace_days` for an Italian one.
 
+- **Subtitles**: when an import has no audio in your first language (normally Italian) and no
+  subtitle of that language next to it, Casa searches OpenSubtitles and SubDL, checks the
+  language and timing (against a sidecar/embedded subtitle or speech sampled from the audio with
+  `ffmpeg`), re-syncs it if needed and saves `<video>.it.srt` for Infuse. It needs a free OpenSubtitles
+  API key (plus your account, for a higher daily download limit) or a SubDL key in Settings → Media. The detail page has an "Italian subtitles" button to run it by hand.
+
 ### More trackers: proxy or VPN
 
 Some trackers (YTS, ilCorSaRoNeRo, 1337x) are blocked by the ISP's DNS. Two ways to reach them:

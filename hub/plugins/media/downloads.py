@@ -234,6 +234,12 @@ class Downloads:
                 url=f"#/media/{row['type']}/{row['data'].get('id')}",
                 image=row["data"].get("poster") or "", tag="tv")
             self.plugin.watcher.on_imported(row)
+            try:
+                subs = getattr(self.plugin, "subtitles", None)
+                if subs:
+                    subs.on_imported(row, targets)
+            except Exception:
+                log.exception("subtitle hook failed")
             self.store.delete(f"media.import.{h}")
         except Exception as err:
             log.exception("import of %s failed", row["name"] if row else h)

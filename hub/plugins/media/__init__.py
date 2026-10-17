@@ -38,7 +38,8 @@ from .downloads import Downloads
 from .indexers import Indexers, Query, magnet
 from .library import Library
 from .metadata import Metadata
-from .ranking import Profile, Want, rank
+from .ranking import Profile, Want, parse, rank
+from .subtitles import Subtitles, Video
 from .transmission import Transmission
 from .watcher import Watcher
 
@@ -90,6 +91,17 @@ SCHEMA = [
        default="http://127.0.0.1:9091/transmission/rpc"),
     _f("transmission.username", "Transmission user", advanced=True),
     _f("transmission.password", "Transmission password", "password", advanced=True),
+    _f("subtitles.enabled", "Fetch subtitles", "bool", default=True,
+       help="After an import without audio in your first language, find a subtitle online, "
+            "check it and fix its timing."),
+    _f("subtitles.opensubtitles_api_key", "OpenSubtitles API key", "password",
+       help="Needed to fetch subtitles (or a SubDL key). Free: create a consumer on opensubtitles.com.",
+       link={"url": "https://www.opensubtitles.com/en/consumers", "label": "Get a free API key"}),
+    _f("subtitles.opensubtitles_username", "OpenSubtitles user", advanced=True,
+       help="A free account raises the daily download limit."),
+    _f("subtitles.opensubtitles_password", "OpenSubtitles password", "password", advanced=True),
+    _f("subtitles.subdl_api_key", "SubDL API key", "password", advanced=True,
+       link={"url": "https://subdl.com/panel/api", "label": "Get a free API key"}),
     _f("proxy.url", "Proxy / VPN", advanced=True, placeholder="socks5h://user:pass@host:1080",
        help="For DNS-blocked trackers. socks5h resolves DNS on the proxy; http://host:3128 also works. "
             "Point it at your VPN's proxy."),
@@ -119,11 +131,13 @@ class MediaPlugin(Plugin):
         self.library = Library(self, c)
         self.downloads = Downloads(self, c)
         self.watcher = Watcher(self, c)
+        self.subtitles = Subtitles(self, c)
         self._releases: dict[str, tuple[float, dict]] = {}  # hash -> release, for one-click
 
     async def start(self):
         await self.indexers.open()  # raises with a clear message if the proxy can't work
         await self.transmission.open()
+        await self.subtitles.open()
         hub = self.hub
         if self.transmission.enabled:
             if self.config.get("download_dir"):
@@ -133,6 +147,7 @@ class MediaPlugin(Plugin):
         hub.every(3600, self.indexers.probe, "indexer probe")
         hub.every(6 * 3600, self._scan, "library scan", initial_delay=5)
         hub.every(15 * 60, self.watcher.tick, "watchlist", initial_delay=90)
+        hub.every(6 * 3600, self.subtitles.retry, "subtitle retry", initial_delay=600)
 
     async def _sync_download_dir(self, path: str):
         """Best effort: make Transmission's default download folder match our setting."""
@@ -145,6 +160,7 @@ class MediaPlugin(Plugin):
     async def stop(self):
         await self.indexers.close()
         await self.transmission.close()
+        await self.subtitles.close()
 
     async def _scan(self):
         await self.library.scan()
@@ -161,6 +177,7 @@ class MediaPlugin(Plugin):
             "library": self.library.stats(),
             "watchlist": len(self.watcher.keys()),
             "active_downloads": len(self.downloads.rows(True)),
+            "subtitles": self.subtitles.status(),
             "profile": {"languages": self.profile.languages, "quality": self.profile.quality,
                         "allow_4k": self.profile.allow_4k},
         }
@@ -241,6 +258,8 @@ class MediaPlugin(Plugin):
             web.get("/downloads", lambda r: _json(self.downloads.rows())),
             web.post("/downloads/{hash}/{action}", self.r_dl_action),
             web.get("/library", self.r_library),
+            web.get("/subtitles", self.r_subs_get),
+            web.post("/subtitles", self.r_subs_post),
             web.post("/library/scan", self.r_scan),
             web.get("/indexers", lambda r: _json(self._indexer_info())),
             web.post("/indexers/test", self.r_indexers_test),
@@ -281,8 +300,12 @@ class MediaPlugin(Plugin):
         key = f"{t}:{item['id']}"
         item["watch"] = self.watcher.get(key)
         item["downloads"] = self.downloads.active_for(key)
+        if t == "movie":
+            m = self.library.find_movie(item.get("titles") or [item["title"]], item.get("year"))
+            item["library_path"] = m["path"] if m else None
         if t == "series":
             show = self.library.find_show(item.get("titles") or [item["title"]])
+            item["library_path"] = show["path"] if show else None
             have = self.library.episodes(show)
             for s in item.get("seasons", []):
                 s["in_library"] = sum(1 for (sn, _) in have if sn == s["season"])
@@ -358,6 +381,31 @@ class MediaPlugin(Plugin):
         stats = await self.library.scan()
         self.hub.spawn(self.library.resolve_posters(), "posters")
         return _json(stats)
+
+    async def r_subs_get(self, request):
+        path = request.query.get("path", "")
+        subs = self.subtitles
+        if not subs.allowed(path):
+            return _json({"error": "path is outside the library"}, 400)
+        states = [subs.state(p) or {"path": p, "status": "none"} for p in subs.videos_in(path)]
+        return _json({"language": subs.lang, "states": states})
+
+    async def r_subs_post(self, request):
+        b = await request.json()
+        path, subs = b.get("path", ""), self.subtitles
+        if not subs.allowed(path):
+            return _json({"error": "path is outside the library"}, 400)
+        if not subs.enabled:
+            return _json({"error": "subtitles are disabled in settings"}, 400)
+        videos = subs.videos_in(path)
+        if len(videos) > 3:  # a whole show would burn the daily download quota at once
+            return _json({"error": "pick a single movie or episode"}, 400)
+        for p in videos:
+            pr = parse(os.path.basename(p))
+            subs.spawn(Video(p, title=b.get("title") or pr.head or "", year=b.get("year") or pr.year,
+                             imdb_id=b.get("imdb_id") or "", season=pr.season, episode=pr.episode,
+                             release=os.path.splitext(os.path.basename(p))[0]), manual=True)
+        return _json({"started": len(videos)})
 
     def _indexer_info(self):
         return {"proxy": _mask(self.indexers.proxy), "enabled": self.indexers.enabled,
