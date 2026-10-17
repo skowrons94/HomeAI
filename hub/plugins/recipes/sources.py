@@ -458,7 +458,9 @@ async def search(http, q: str, sources: list[str], lang: str = "it") -> dict:
     by = await tidy(http, by, q)
     merged = merge(by, sorted(by, key=rank), limit=MAX_RESULTS * 2)
     # best matches first; the language/round-robin order breaks ties
-    merged = sorted(merged, key=lambda it: -it.get("score", 0))[:MAX_RESULTS]
+    merged = sorted(merged, key=lambda it: -it.get("score", 0))
+    seen: set[str] = set()  # the same dish from two sites: keep the first (best source)
+    merged = [it for it in merged if not (_fold(it["title"]) in seen or seen.add(_fold(it["title"])))][:MAX_RESULTS]
     out = {"results": merged, "errors": errors}
     if out["results"] or not errors:
         _cache[key] = (time.time(), out)
