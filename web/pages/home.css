@@ -1,0 +1,89 @@
+/* Home ("Casa"): simple view blocks, compact device tiles, edit overlays. */
+
+/* -- at a glance -- */
+.glance { display: flex; align-items: center; gap: 10px; padding: 12px 14px; }
+.glance button { background: none; padding: 4px 2px; border-radius: 10px; }
+.g-temp { gap: 8px; font-size: 15px; }
+.g-temp b { font-size: 26px; font-weight: 750; letter-spacing: -0.03em; }
+.g-temp svg.i { color: #ff7a45; }
+.g-temp span { display: inline-flex; align-items: center; gap: 2px; font-weight: 600; }
+.g-temp span svg.i { color: var(--cool); width: 16px; height: 16px; }
+.g-status { gap: 7px; font-size: 13px; color: var(--muted); }
+.g-status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); }
+.g-status.warn .dot { background: var(--warn); }
+.g-status.bad .dot { background: var(--bad); }
+.g-status.warn, .g-status.bad { color: var(--text); }
+
+/* -- rows: heating, TV/speakers -- */
+.card.rows { padding: 4px 0; margin-top: 12px; }
+.hrow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; min-height: 58px; flex-wrap: wrap;
+        position: relative; }
+.hrow + .hrow { border-top: 1px solid var(--line); }
+.h-main { flex: 1 1 140px; min-width: 0; display: flex; align-items: center; gap: 12px; justify-content: flex-start;
+          background: none; padding: 0; border-radius: 0; font-weight: 400; text-align: left; white-space: normal; }
+.h-main:active { transform: none; opacity: .7; }
+.h-main .ico { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: none;
+               background: var(--surface-2); color: var(--muted); }
+.hrow.on .ico, .tile.compact.active .ico { background: var(--on); color: #1b1300; }
+.hrow.hot .ico { background: #ff7a45; color: #fff; }
+.h-txt { min-width: 0; display: flex; flex-direction: column; }
+.h-txt .name { font-weight: 650; }
+.h-txt .name.wrap { hyphens: auto; -webkit-hyphens: auto; overflow-wrap: anywhere; line-height: 1.2; }
+.h-txt .sub { color: var(--muted); font-size: 13px; }
+.stepper.sm { gap: 4px; }
+.stepper.sm button { padding: 6px; }
+.stepper.sm .c-target { min-width: 44px; text-align: center; font-size: 16px; }
+input.vol { flex: 1 1 120px; min-width: 90px; max-width: 220px; }
+.hrow.unavailable, .lchip.unavailable { opacity: .5; }
+
+/* -- light chips: tap = on/off, hold = brightness/colour -- */
+.lchips { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.lchip { position: relative; justify-content: flex-start; gap: 10px; padding: 10px 12px; border-radius: 14px;
+         background: var(--surface); box-shadow: var(--shadow); font-weight: 600; min-height: 52px;
+         -webkit-touch-callout: none; user-select: none; touch-action: manipulation; }
+.lchip.lit { background: color-mix(in srgb, var(--on) 22%, var(--surface)); color: var(--text); }
+.ldot { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--surface-2);
+        box-shadow: inset 0 0 0 1.5px var(--line); }
+.lchip.lit .ldot { background: var(--on); box-shadow: 0 0 10px var(--on); }
+.l-txt { display: flex; flex-direction: column; min-width: 0; text-align: left; line-height: 1.2; }
+.l-txt small { color: var(--muted); font-weight: 500; font-size: 12px; }
+@media (max-width: 760px) { .lchips { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* -- now playing -- */
+.playing { display: flex; align-items: center; gap: 12px; }
+.playing .art { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; flex: none;
+                background: var(--surface-2); display: grid; place-items: center; color: var(--muted); }
+.p-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+
+/* -- shortcuts -- */
+.shortcuts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 22px; }
+.sc { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 6px; border-radius: var(--radius);
+      background: var(--surface); box-shadow: var(--shadow); color: var(--text); font-weight: 600; font-size: 13px;
+      text-align: center; }
+.sc:active { transform: scale(.97); }
+.sc-ico { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center;
+          background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+@media (max-width: 760px) { .shortcuts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* -- full view: compact device tiles, folded system sensors -- */
+.tile.compact { min-height: 0; gap: 8px; }
+.tile.compact .c-main { display: flex; align-items: center; gap: 8px; padding-right: 26px; }
+.tile.compact .h-main { flex: 1; }
+details.sys { margin: 26px 0 12px; }
+details.sys summary { display: flex; align-items: baseline; gap: 10px; cursor: pointer; list-style: none; }
+details.sys summary::-webkit-details-marker { display: none; }
+details.sys summary h2 { font-size: 19px; }
+details.sys summary::after { content: "›"; color: var(--muted); font-size: 20px; transition: transform .15s; }
+details.sys[open] summary::after { transform: rotate(90deg); }
+details.sys[open] summary { margin-bottom: 12px; }
+
+/* -- edit mode (✎): overlay with move / size / hide -- */
+.editing { position: relative; }
+.t-edit { position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center;
+          gap: 6px; flex-wrap: wrap; align-content: center; border-radius: inherit; padding: 6px 8px;
+          background: color-mix(in srgb, var(--surface) 90%, transparent); }
+.t-edit .t-name { flex: 1 1 100%; text-align: center; font-size: 13px; }
+.hrow .t-edit .t-name, .card.rows .t-edit .t-name { flex: 1 1 auto; text-align: left; }
+.t-edit button.icon { padding: 6px; }
+.t-edit button.icon { background: var(--surface); box-shadow: var(--shadow); }
+.tile.editing .more { display: none; }

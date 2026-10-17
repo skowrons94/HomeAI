@@ -116,10 +116,11 @@ async function newRecipe() {
 // ---------------------------------------------------------------- my recipes
 
 async function renderMine(el) {
-  const state = { fav: false, tag: "", q: "" };
+  const state = { fav: false, tag: "", q: "", edit: false };
   const list = h("div"), filters = h("div.r-filters");
   const q = h("input", { type: "search", placeholder: t("Filter your recipes…") });
-  fill(el, h("div.r-search", h("div.r-input", icon("search"), q)), filters, list);
+  const editBtn = h("button.r-editbtn", { onclick: () => { state.edit = !state.edit; refresh(); } });
+  fill(el, h("div.r-search", h("div.r-input", icon("search"), q), editBtn), filters, list);
   const tags = await P("tags");
   const paintFilters = () => fill(filters,
     h(`button.chipbtn${state.fav ? ".active" : ""}`, { onclick: () => { state.fav = !state.fav; refresh(); } }, icon("heart"), t("Favourites")),
@@ -127,11 +128,25 @@ async function renderMine(el) {
       { onclick: () => { state.tag = state.tag === x.tag ? "" : x.tag; refresh(); } }, x.tag)));
   async function refresh() {
     paintFilters();
+    fill(editBtn, icon(state.edit ? "check" : "edit"), state.edit ? t("Done editing") : t("Edit"));
+    editBtn.classList.toggle("active", state.edit);
     const items = await P(`recipes?fav=${state.fav ? 1 : 0}&tag=${enc(state.tag)}&q=${enc(state.q)}`);
     fill(list, items.length
-      ? h("div.r-grid", items.map((r) => card({ ...r, meta: [kcalText(r), fmtMin(r.total_min)].filter(Boolean).join(" · ") || r.site },
-        () => go(`#/recipes/recipe/${r.id}`),
-        [r.fav && h("span.r-badge.fav", icon("heart")), r.edited && h("span.r-badge.ed", icon("edit"))])))
+      ? h(`div.r-grid${state.edit ? ".editing" : ""}`, items.map((r) => {
+        const c = card({ ...r, meta: [kcalText(r), fmtMin(r.total_min)].filter(Boolean).join(" · ") || r.site },
+          () => { if (!state.edit) go(`#/recipes/recipe/${r.id}`); },
+          [r.fav && h("span.r-badge.fav", icon("heart")), r.edited && h("span.r-badge.ed", icon("edit")),
+            state.edit && h("button.danger.r-cardel", { "aria-label": t("Delete"), onclick: (e) => {
+              e.stopPropagation();
+              if (!confirm(t("Delete this recipe from your hub?") + "\n\n" + r.title)) return;
+              act(async () => {
+                await P(`recipe/${r.id}`, { method: "DELETE" });
+                c.remove(); toast(t("Recipe deleted"));
+                if (!list.querySelector(".r-card")) refresh();
+              }, e.currentTarget);
+            } }, icon("trash"), t("Delete"))]);
+        return c;
+      }))
       : h("div.empty", state.fav || state.tag || state.q ? t("Nothing found.") : t("No saved recipes yet. Search or import your first one!")));
   }
   q.addEventListener("input", debounce(() => { state.q = q.value; refresh(); }, 250));
@@ -213,6 +228,20 @@ function paintDetail(view, rec, ctx) {
     h("div.row.wrap.small.muted", { style: { gap: "8px" } },
       kcalChip, meta && h("span", meta), rec.edited && h("span.chip.warn", t("edited")),
       rec.source_url && h("a", { href: rec.source_url, target: "_blank", rel: "noopener" }, icon("link"), " ", rec.site || t("Source"))),
+    h("div.row.wrap.r-actions", { style: { gap: "8px" } },
+      h("button", { onclick: () => editMode(view, rec, ctx) }, icon("edit"), t("Edit")),
+      hasPlugin("sync") && h("button", { onclick: (e) => act(async () => {
+        const r = await api("p/sync/recipes/share", { body: { recipe_id: rec.id } });
+        const el = h("div.toast", `${t("Recipe shared.")} `, h("a", { href: `#/social/recipe/${encodeURIComponent(r.slug)}` }, t("View")));
+        document.getElementById("toasts").append(el);
+        setTimeout(() => el.remove(), 7000);
+      }, e.currentTarget) }, icon("users"), t("Share with friends")),
+      rec.has_original && rec.edited && h("button", { onclick: () => confirm(t("Go back to the original version? Your edits to title, ingredients and method will be lost.")) && act(async () => {
+        await P(`recipe/${id}/reset`, { body: {} }); ctx.servings = 0; await ctx.reload(); ctx.paint();
+      }) }, icon("refresh"), t("Reset to original")),
+      h("button.danger.r-del", { onclick: () => confirm(t("Delete this recipe from your hub?")) && act(async () => {
+        await P(`recipe/${id}`, { method: "DELETE" }); toast(t("Recipe deleted")); go("#/recipes/mine");
+      }) }, icon("trash"), t("Delete"))),
     h("div.row.wrap", { style: { gap: "14px" } }, stars, h("div.spacer"),
       h("button", { onclick: () => logPortion(rec) }, icon("utensils"), t("Log a portion"))),
     h("div.r-cols",
@@ -224,22 +253,7 @@ function paintDetail(view, rec, ctx) {
         }, e.currentTarget) }, icon("cart"), t("Add to shopping list"))),
       h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("Method")), steps.length ? steps : h("div.muted", "–"))),
     h("div.card.stack", { style: { gap: "8px" } }, h("h2", t("Personal notes")), notes,
-      h("label.field", t("Tags (comma separated)").split(" (")[0], tagInput)),
-    h("div.row.wrap", { style: { gap: "8px" } },
-      h("button", { onclick: () => editMode(view, rec, ctx) }, icon("edit"), t("Edit")),
-      hasPlugin("sync") && h("button", { onclick: (e) => act(async () => {
-        const r = await api("p/sync/recipes/share", { body: { recipe_id: rec.id } });
-        const el = h("div.toast", `${t("Recipe shared.")} `, h("a", { href: `#/social/recipe/${encodeURIComponent(r.slug)}` }, t("View")));
-        document.getElementById("toasts").append(el);
-        setTimeout(() => el.remove(), 7000);
-      }, e.currentTarget) }, icon("users"), t("Share with friends")),
-      rec.has_original && rec.edited && h("button", { onclick: () => confirm(t("Go back to the original version? Your edits to title, ingredients and method will be lost.")) && act(async () => {
-        await P(`recipe/${id}/reset`, { body: {} }); ctx.servings = 0; await ctx.reload(); ctx.paint();
-      }) }, icon("refresh"), t("Reset to original")),
-      h("div.spacer"),
-      h("button.danger", { onclick: () => confirm(t("Delete this recipe from your hub?")) && act(async () => {
-        await P(`recipe/${id}`, { method: "DELETE" }); go("#/recipes/mine");
-      }) }, icon("trash"), t("Delete"))));
+      h("label.field", t("Tags (comma separated)").split(" (")[0], tagInput)));
 }
 
 function editMode(view, rec, ctx) {

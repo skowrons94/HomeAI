@@ -137,5 +137,7 @@
   "a local path": "un percorso locale",
   "a magnet link": "un link magnet",
   "a torrent file": "un file torrent",
-  "a URL": "un URL"
+  "a URL": "un URL",
+  "Recipe deleted": "Ricetta eliminata",
+  "Done editing": "Fine"
 }

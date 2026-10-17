@@ -1,49 +1,185 @@
-// Home: every entity grouped by room, rendered from its kind (see hub/core.py).
+// Home ("Casa"): two views, chosen per person (✎ → Vista, or Altro):
+//   simple - the house at a glance: temperature + status, heating rows, light chips, what's
+//            playing, thin TV/speaker rows, shortcuts. The hub's own sensors stay out of sight.
+//   full   - every entity as a tile, grouped by room; the hub's own sensors folded in "Sistema".
+// Sections of both views can be reordered/hidden with ✎, saved per person (store.prefs.home).
 import { attentionBanner } from "./attention.js";
-import { api, h, icon, sheet, bus, store, callEntity, act, debounce, fmt, toast, t, savePrefs, locale } from "../app.js";
+import { api, h, icon, sheet, bus, store, callEntity, act, debounce, fmt, toast, t, savePrefs, locale,
+         ensureCss, go, hasPlugin } from "../app.js";
 
 const KIND_ORDER = ["climate", "water_heater", "media_player", "tv", "speaker", "light", "switch", "sensor"];
+const SYS = "__system";  // full view: the hub's own sensors (system plugin)
+const SIMPLE = ["glance", "climate", "lights", "playing", "devices", "shortcuts"];
+const SIMPLE_TITLE = () => ({ glance: t("At a glance"), climate: t("Heating"), lights: t("Lights"),
+  playing: t("Now playing"), devices: t("TV and speakers"), shortcuts: t("Shortcuts") });
+const HEADED = new Set(["lights", "playing", "devices"]);  // simple blocks with a visible title
 
 export default {
   async render(root) {
-    const tiles = new Map(); // entity id -> tile element
-    const grids = h("div");
+    ensureCss(`/static/pages/home.css?v=${window.CASA_V}`);
+    const tiles = new Map(); // full view: entity id -> tile element
+    const body = h("div");
+    const summary = h("div.row.wrap");
+    let editing = false;
+    const hp = () => store.prefs?.home || {};
+    const view = () => (hp().view === "full" ? "full" : "simple");
 
-    const draw = () => {
-      tiles.clear();
+    /** Ordered, hideable sections; `key` keeps each view's own order ("simple" / "full"). */
+    const sections = (ids, key) => {
+      const p = hp()[key] || {}, mine = p.order || [], hidden = new Set(p.hidden || []);
+      const rank = (id) => (mine.includes(id) ? mine.indexOf(id) : 1000 + ids.indexOf(id));
+      const sorted = [...ids].sort((a, b) => rank(a) - rank(b));
+      const save = (o, hid) => savePrefs({ home: { ...hp(), [key]: { order: o, hidden: [...hid] } } },
+                                         { rerender: false }).then(draw);
+      const move = (id, d) => { const o = [...sorted], i = o.indexOf(id); [o[i], o[i + d]] = [o[i + d], o[i]]; save(o, hidden); };
+      const head = (id, title, extra) => h(`div.section${hidden.has(id) ? ".off" : ""}`, h("h2", title), extra,
+        editing && [h("div.spacer"),
+          h("button.icon.ghost", { title: t("Move up"), disabled: sorted[0] === id, onclick: () => move(id, -1) }, icon("up")),
+          h("button.icon.ghost", { title: t("Move down"), disabled: sorted.at(-1) === id, onclick: () => move(id, 1) }, icon("down")),
+          h(`button.icon${hidden.has(id) ? "" : ".primary"}`, { title: hidden.has(id) ? t("Show") : t("Hide"),
+            onclick: () => { hidden.has(id) ? hidden.delete(id) : hidden.add(id); save(sorted, hidden); } },
+            icon(hidden.has(id) ? "plus" : "check"))]);
+      return { list: sorted.filter((id) => editing || !hidden.has(id)), hidden, head };
+    };
+
+    // tiles: order and size per person (prefs.home.tiles), hiding for everybody (entity "hidden")
+    const tp = () => hp().tiles || {};
+    const saveTiles = (patch) => savePrefs({ home: { ...hp(), tiles: { ...tp(), ...patch } } },
+                                           { rerender: false }).then(draw);
+    const hide = (e, hidden) => act(() => api(`entities/${encodeURIComponent(e.id)}`, { method: "PATCH", body: { hidden } }))
+      .then(() => hidden && toast(t("Hidden for everybody: {name}", { name: e.name })));
+    /** Edit-mode overlay on a tile/chip/row: move (◀ ▶), wide/narrow, hide for everybody. */
+    const decorate = (el, e, { earlier, later, wide } = {}) => {
+      el.classList.add("editing");
+      const stop = (ev) => ev.stopPropagation();
+      el.append(h("div.t-edit", { onclick: stop, onpointerdown: stop, onpointerup: stop },
+        h("b.t-name.ellipsis", e.name),
+        (earlier !== undefined || later !== undefined) && [
+          h("button.icon", { title: t("Move earlier"), disabled: !earlier, onclick: earlier }, icon("left")),
+          h("button.icon", { title: t("Move later"), disabled: !later, onclick: later }, icon("right"))],
+        wide !== undefined && h("button.icon", { title: wide ? t("Make narrow") : t("Make wide"),
+          onclick: () => saveTiles({ size: { ...(tp().size || {}), [e.id]: wide ? "normal" : "wide" } }) },
+          icon(wide ? "shrink" : "expand")),
+        h("button.icon.danger", { title: t("Hide for everybody"), onclick: () => hide(e, true) }, icon("eyeoff"))));
+      return el;
+    };
+    /** Edit mode: what's hidden for everybody, one tap to bring it back. */
+    const hiddenList = () => {
+      const hid = [...store.entities.values()].filter((e) => e.attrs.hidden).sort(byRoom);
+      return hid.length ? [h("div.section", h("h2", t("Hidden for everybody")), h("span.muted.small", `${hid.length}`)),
+        h("div.list", hid.map((e) => h("div.item", h("span.spacer.ellipsis", e.name), e.room && h("span.muted.small", e.room),
+          h("button.small", { onclick: () => hide(e, false) }, icon("eye"), t("Show")))))] : null;
+    };
+
+    const viewSwitch = () => h("div.card.row", { style: { marginBottom: "6px" } },
+      h("b", t("Home view")), h("div.spacer"),
+      h("div.seg", [["simple", t("Simple")], ["full", t("Complete")]].map(([v, l]) =>
+        h(`button${view() === v ? ".active" : ""}`, { onclick: () =>
+          savePrefs({ home: { ...hp(), view: v } }, { rerender: false }).then(draw) }, l))));
+
+    const drawFull = () => {
       const visible = [...store.entities.values()].filter((e) => !e.attrs.hidden);
       const rooms = new Map();
       for (const e of visible.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind)
                                              || a.name.localeCompare(b.name))) {
-        const r = groupOf(e);
+        const r = e.plugin === "system" ? SYS : groupOf(e);
         if (!rooms.has(r)) rooms.set(r, []);
         rooms.get(r).push(e);
       }
-      // the person's own order first (Customize), then Settings > Rooms, then the rest
-      const hp = store.prefs?.home || {}, mine = hp.order || [], hidden = new Set(hp.hidden || []);
-      const order = [...store.rooms, "Other", "This hub"];
-      const rank = (r) => (mine.includes(r) ? mine.indexOf(r) : 1000 + ((order.indexOf(r) + 1) || 99));
-      const names = [...rooms.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
-      const save = (o, hid) => savePrefs({ home: { ...hp, order: o, hidden: [...hid] } }, { rerender: false }).then(draw);
-      const move = (i, d) => { const o = [...names]; [o[i], o[i + d]] = [o[i + d], o[i]]; save(o, hidden); };
-      const toggle = (r) => { hidden.has(r) ? hidden.delete(r) : hidden.add(r); save(names, hidden); };
-      grids.replaceChildren(
-        ...names.filter((r) => editing || !hidden.has(r)).map((room) => [
-          h(`div.section${hidden.has(room) ? ".off" : ""}`, h("h2", t(room)), h("span.muted.small", `${rooms.get(room).length}`),
-            editing && [h("div.spacer"),
-              h("button.icon.ghost", { title: t("Move up"), disabled: names.indexOf(room) === 0, onclick: () => move(names.indexOf(room), -1) }, icon("up")),
-              h("button.icon.ghost", { title: t("Move down"), disabled: names.indexOf(room) === names.length - 1, onclick: () => move(names.indexOf(room), 1) }, icon("down")),
-              h(`button.icon${hidden.has(room) ? "" : ".primary"}`, { title: hidden.has(room) ? t("Show") : t("Hide"), onclick: () => toggle(room) },
-                icon(hidden.has(room) ? "plus" : "check"))]),
-          !(editing && hidden.has(room)) && h("div.grid", rooms.get(room).map((e) => { const tl = tile(e); tiles.set(e.id, tl); return tl; })),
-        ]).flat(),
-        ...(visible.length ? [] : [h("div.empty", t("No devices yet. Enable plugins in config.toml — see Settings."))]),
-      );
+      const order = [...store.rooms, "Other", SYS];
+      const names = [...rooms.keys()].sort((a, b) =>
+        ((order.indexOf(a) + 1) || 99) - ((order.indexOf(b) + 1) || 99) || a.localeCompare(b));
+      const { list, hidden, head } = sections(names, "full");
+      const mine = tp().order || [], size = tp().size || {};
+      const rankT = (e) => { const i = mine.indexOf(e.id); return i < 0 ? 1e6 : i; };
+      for (const r of rooms.values()) r.sort((a, b) => rankT(a) - rankT(b));  // stable: kind/name otherwise
+      const tileOrder = list.flatMap((r) => rooms.get(r).map((e) => e.id));
+      const grid = (room) => h("div.grid", rooms.get(room).map((e, i, arr) => {
+        const tl = tile(e);
+        if (size[e.id] === "wide") tl.classList.add("span2");
+        if (size[e.id] === "normal") tl.classList.remove("span2");
+        if (editing) {  // move only inside its room
+          const swap = (other) => () => {
+            const o = [...tileOrder], x = o.indexOf(e.id), y = o.indexOf(other.id);
+            [o[x], o[y]] = [o[y], o[x]];
+            saveTiles({ order: o });
+          };
+          decorate(tl, e, { earlier: i > 0 && swap(arr[i - 1]), later: i < arr.length - 1 && swap(arr[i + 1]),
+                            wide: tl.classList.contains("span2") });
+        }
+        tiles.set(e.id, tl);
+        return tl;
+      }));
+      body.replaceChildren(...[
+        editing && viewSwitch(),
+        ...list.map((room) => {
+          if (room === SYS && !editing) {  // folded: one line unless opened
+            return h("details.sys", h("summary", h("h2", t("System")), h("span.muted.small", houseStatus().text)), grid(room));
+          }
+          return [head(room, room === SYS ? t("System") : t(room), h("span.muted.small", `${rooms.get(room).length}`)),
+                  !(editing && hidden.has(room)) && grid(room)];
+        }).flat(),
+        !visible.length && h("div.empty", t("No devices yet. Enable plugins in config.toml — see Settings.")),
+        editing && hiddenList(),
+      ].flat().filter(Boolean));
       summary.replaceChildren(...summaryChips());
     };
 
-    const summary = h("div.row.wrap");
-    let editing = false;
+    const drawSimple = () => {
+      const ents = [...store.entities.values()].filter((e) => !e.attrs.hidden);
+      const mine = tp().order || [];
+      const rankT = (e) => { const i = mine.indexOf(e.id); return i < 0 ? 1e6 : i; };
+      const sorted = (a, b) => rankT(a) - rankT(b) || byRoom(a, b);
+      const all = [...ents].sort(sorted).map((e) => e.id);
+      const by = (...kinds) => ents.filter((e) => kinds.includes(e.kind)).sort(sorted);
+      // edit mode: each chip/row can move inside its block or be hidden for everybody
+      const ed = (arr, mk) => arr.map((e, i) => {
+        const el = mk(e);
+        if (!editing) return el;
+        const swap = (other) => () => {
+          const o = [...all], x = o.indexOf(e.id), y = o.indexOf(other.id);
+          [o[x], o[y]] = [o[y], o[x]];
+          saveTiles({ order: o });
+        };
+        return decorate(el, e, { earlier: i > 0 && swap(arr[i - 1]), later: i < arr.length - 1 && swap(arr[i + 1]) });
+      });
+      const lights = by("light"), on = lights.filter((l) => l.state.on);
+      const blocks = {
+        glance: glanceCard(ents),
+        climate: rowsCard(ed(by("climate", "water_heater"), climateRow)),
+        lights: lights.length ? h("div.lchips", ed(lights, lightChip)) : null,
+        playing: playingCard(ents),
+        devices: rowsCard(ed(by("tv", "media_player", "speaker", "switch"), deviceRow)),
+        shortcuts: shortcuts(),
+      };
+      const extra = {
+        lights: [h("span.muted.small", on.length ? t("{n} on", { n: on.length }) : t("all off")),
+                 on.length > 0 && [h("div.spacer"), h("button.small", { onclick: (ev) => act(() =>
+                   Promise.all(on.map((l) => callEntity(l.id, "turn_off"))), ev.currentTarget) }, icon("power"), t("Turn all off"))]],
+      };
+      const { list, hidden, head } = sections(SIMPLE.filter((id) => blocks[id]), "simple");
+      body.replaceChildren(...[
+        editing && viewSwitch(),
+        ...list.map((id) => [
+          (editing || HEADED.has(id)) && head(id, SIMPLE_TITLE()[id], editing ? null : extra[id]),
+          !(editing && hidden.has(id)) && blocks[id],
+        ]).flat(),
+        editing && hiddenList(),
+      ].flat().filter(Boolean));
+      summary.replaceChildren();
+    };
+
+    const draw = () => { tiles.clear(); view() === "full" ? drawFull() : drawSimple(); };
+
+    // simple view redraws as a whole (small); never while the user is touching it
+    let touchedUntil = 0, pending = null;
+    body.addEventListener("pointerdown", () => { touchedUntil = Date.now() + 2500; });
+    const redraw = () => {
+      clearTimeout(pending);
+      const wait = touchedUntil - Date.now();
+      pending = setTimeout(wait > 0 ? redraw : draw, wait > 0 ? wait : 250);
+    };
+
     const editBtn = h("button.icon.ghost", { title: t("Customize"), onclick: () => {
       editing = !editing;
       editBtn.classList.toggle("primary", editing);
@@ -52,28 +188,32 @@ export default {
     root.append(
       h("header.page", h("div.stack", { style: { gap: "6px" } }, h("h1", greeting()), summary), h("div.spacer"), editBtn),
       attentionBanner(),
-      grids,
+      body,
     );
     draw();
 
     const onEntity = (ev) => {
+      if (view() === "simple") return redraw();
       const e = ev.detail, old = tiles.get(e.id);
       if (!old || old.dataset.busy) return;
-      if (old.dataset.room !== groupOf(e) || !!e.attrs.hidden) return draw();
+      const r = e.plugin === "system" ? SYS : groupOf(e);
+      if (old.dataset.room !== r || !!e.attrs.hidden) return draw();
       const fresh = tile(e);
       old.replaceWith(fresh);
       tiles.set(e.id, fresh);
       summary.replaceChildren(...summaryChips());
     };
     const onState = () => draw();
-    const onRemoved = () => draw();
     bus.addEventListener("entity", onEntity);
     bus.addEventListener("state", onState);
-    bus.addEventListener("entity_removed", onRemoved);
+    bus.addEventListener("entity_removed", onState);
+    bus.addEventListener("attentionchange", redraw);
     return () => {
+      clearTimeout(pending);
       bus.removeEventListener("entity", onEntity);
       bus.removeEventListener("state", onState);
-      bus.removeEventListener("entity_removed", onRemoved);
+      bus.removeEventListener("entity_removed", onState);
+      bus.removeEventListener("attentionchange", redraw);
     };
   },
 };
@@ -102,6 +242,164 @@ function summaryChips() {
                  heating.state.mode === "off" ? t("Heating off") : `${fmt.temp(heating.state.target_temperature)}° ${modeName(heating.state.mode)}`),
     h("span.chip", icon("bulb"), lightsOn ? t("{n} on", { n: lightsOn }) : t("Lights off")),
   ].filter(Boolean);
+}
+
+// ------------------------------------------------------------------ simple view
+
+const byRoom = (a, b) => {
+  const r = (e) => { const i = store.rooms.indexOf(e.room); return i < 0 ? 99 : i; };
+  return r(a) - r(b) || a.name.localeCompare(b.name);
+};
+const roomSensors = (ents) => ents.filter((e) => e.kind === "sensor" && e.plugin !== "system" && !e.attrs.hidden);
+const avg = (a, k) => a.reduce((s, e) => s + e.state[k], 0) / a.length;
+
+/** One line for the whole house: what needs fixing, internet, disk - or "all good". */
+function houseStatus() {
+  const ents = [...store.entities.values()];
+  const sys = (pred) => ents.find((e) => e.plugin === "system" && pred(e));
+  if (store.attention) return { level: "warn", text: t("{n} to fix", { n: store.attention }), go: "#/settings" };
+  if (sys((e) => e.state.online === false)) return { level: "bad", text: t("No internet"), go: "#/history" };
+  if (sys((e) => e.state.total && e.state.free !== undefined && e.state.free / e.state.total < 0.05))
+    return { level: "warn", text: t("Disk almost full"), go: "#/history" };
+  return { level: "ok", text: t("All good"), go: null };
+}
+
+function glanceCard(ents) {
+  const temps = roomSensors(ents).filter((e) => typeof e.state.temperature === "number");
+  const hums = roomSensors(ents).filter((e) => typeof e.state.humidity === "number");
+  const st = houseStatus();
+  return h("div.card.glance",
+    temps.length > 0 && h("button.g-temp", { onclick: () => thermoSheet(temps) },
+      icon("thermo"), h("b", `${fmt.num(avg(temps, "temperature"), 1)}°`),
+      hums.length > 0 && h("span.muted", icon("drop"), `${Math.round(avg(hums, "humidity"))}%`)),
+    h("div.spacer"),
+    h(`button.g-status.${st.level}`, { onclick: () => st.go && go(st.go) }, h("span.dot"), st.text));
+}
+
+function thermoSheet(temps) {
+  sheet(t("Temperatures"), h("div.list", temps.map((e) => h("div.item", { style: { cursor: "pointer" }, onclick: () => sensorDetail(e) },
+    icon("thermo"), h("div.stack.spacer", { style: { gap: "2px" } }, h("span", e.name), e.room && h("span.muted.small", e.room)),
+    h("b", `${fmt.num(e.state.temperature, 1)}°`),
+    e.state.humidity !== undefined && h("span.muted", `${Math.round(e.state.humidity)}%`)))));
+}
+
+const rowsCard = (rows) => (rows.length ? h("div.card.rows", rows) : null);
+
+/** iOS-style on/off switch that doesn't trigger the row it sits in. */
+function toggle(on, onchange, disabled = false) {
+  const input = h("input", { type: "checkbox", checked: !!on, disabled, onchange: (ev) => onchange(ev.target.checked) });
+  return h("label.sw", { onclick: (ev) => ev.stopPropagation() }, input, h("span"));
+}
+
+/** Heating / hot water: name + now, −/+ target, on/off. Tap the name for every option. */
+function climateRow(e) {
+  const st = e.state, a = e.attrs, water = e.kind === "water_heater", modes = a.modes || [];
+  let target = st.target_temperature;
+  const val = h("b.c-target", `${fmt.temp(target)}°`);
+  const send = debounce(() => act(() => callEntity(e.id, "set_temperature", { value: target })), 900);
+  const step = (d) => {
+    target = Math.min(a.max, Math.max(a.min, Math.round(((target ?? a.min) + d * a.step) * 10) / 10));
+    val.textContent = `${fmt.temp(target)}°`;
+    send();
+  };
+  const onMode = modes.includes("auto") ? "auto" : modes.find((m) => m !== "off");
+  const now = st.heating ? t("Heating now") : st.mode === "off" ? t("Off") : st.mode === "auto" ? t("Schedule") : t("Idle");
+  return h(`div.hrow${st.heating ? ".hot" : ""}${e.available ? "" : ".unavailable"}`,
+    h("button.h-main", { onclick: () => sheet(e.name, climateTile(e)) },
+      h("div.ico", icon(water ? "shower" : "flame")),
+      h("div.h-txt", h("div.name.wrap", e.name), h("div.sub.ellipsis", `${fmt.temp(st.current_temperature)}° · ${now}`))),
+    h("div.stepper.sm",
+      h("button.icon", { onclick: () => step(-1), "aria-label": t("Lower") }, icon("minus")), val,
+      h("button.icon", { onclick: () => step(1), "aria-label": t("Raise") }, icon("plus"))),
+    modes.includes("off") && onMode && toggle(st.mode !== "off",
+      (on) => act(() => callEntity(e.id, "set_mode", { mode: on ? onMode : "off" })), !e.available));
+}
+
+/** Tap = on/off, hold = brightness and colour. */
+function lightChip(e) {
+  const st = e.state, color = st.on && lampColor(st);
+  const el = h(`button.lchip${st.on ? ".lit" : ""}${e.available ? "" : ".unavailable"}`,
+    h("span.ldot", { style: color ? { background: color } : null }),
+    h("span.l-txt", h("span.ellipsis", e.name),
+      h("small.ellipsis", st.on && st.brightness !== undefined ? `${st.brightness}%` : (e.room !== e.name && e.room) || "")));
+  longPress(el, () => lightSheet(e), () => act(() => callEntity(e.id, st.on ? "turn_off" : "turn_on")));
+  return el;
+}
+
+function longPress(el, onLong, onTap, ms = 450) {
+  let timer = null, long = false, moved = false, x = 0, y = 0;
+  el.addEventListener("pointerdown", (ev) => {
+    long = moved = false; x = ev.clientX; y = ev.clientY;
+    timer = setTimeout(() => { long = true; navigator.vibrate?.(10); onLong(); }, ms);
+  });
+  el.addEventListener("pointermove", (ev) => {
+    if (Math.abs(ev.clientX - x) + Math.abs(ev.clientY - y) > 10) { moved = true; clearTimeout(timer); }
+  });
+  el.addEventListener("pointerup", () => { clearTimeout(timer); if (!long && !moved) onTap(); });
+  el.addEventListener("pointercancel", () => clearTimeout(timer));
+  el.addEventListener("contextmenu", (ev) => ev.preventDefault());
+  el.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onTap(); } });
+}
+
+/** What's playing right now (Apple TV with a title, or a speaker that plays) - else nothing. */
+function playingCard(ents) {
+  const e = ents.find((x) => x.kind === "media_player" && x.state.on && x.state.title && ["playing", "paused"].includes(x.state.state))
+         || ents.find((x) => x.kind === "speaker" && x.state.on && x.state.playing);
+  if (!e) return null;
+  const st = e.state, playing = st.state === "playing" || st.playing;
+  const pos = st.duration ? Math.min(100, (st.position || 0) / st.duration * 100) : null;
+  const can = (a) => e.kind === "media_player" || e.actions.includes(a);
+  return h("div.card.playing",
+    st.artwork ? h("img.art", { src: st.artwork, alt: "" }) : h("div.art", icon(e.kind === "speaker" ? "speaker" : "appletv")),
+    h("div.p-txt", h("b.ellipsis", st.title || st.source || e.name),
+      h("div.small.muted.ellipsis", [st.artist || st.app, e.name].filter(Boolean).join(" · ")),
+      pos !== null && h("div.progress", h("div", { style: { width: `${pos}%` } }))),
+    h("div.row", { style: { gap: "2px" } },
+      can("previous") && h("button.icon.ghost", { "aria-label": t("Previous"), onclick: () => act(() => callEntity(e.id, "previous")) }, icon("prev")),
+      can("play_pause") && h("button.icon", { "aria-label": t("Play/pause"), onclick: () => act(() => callEntity(e.id, "play_pause")) }, icon(playing ? "pause" : "play")),
+      can("next") && h("button.icon.ghost", { "aria-label": t("Next"), onclick: () => act(() => callEntity(e.id, "next")) }, icon("next"))));
+}
+
+const DEVICE_ICON = { tv: "tv", media_player: "appletv", speaker: "speaker", switch: "plug" };
+
+function deviceSub(e) {
+  const st = e.state;
+  if (!e.available) return t("Unavailable");
+  if (e.kind === "speaker") return st.on ? [st.source, st.playing && t("playing")].filter(Boolean).join(" · ") || t("On") : t("Standby");
+  if (e.kind === "media_player") return !st.on ? t("Off") : st.app || stateName(st.state || "idle");
+  if (e.kind === "tv") return st.on ? (st.source || t("On")) : t("Off");
+  return st.on ? t("On") : t("Off");
+}
+
+/** Thin row: name + state, (volume), on/off. Tap the name for remote / all controls. */
+function deviceRow(e) {
+  const st = e.state;
+  return h(`div.hrow${st.on ? ".on" : ""}${e.available ? "" : ".unavailable"}`,
+    h("button.h-main", { onclick: () => deviceSheet(e) },
+      h("div.ico", icon(DEVICE_ICON[e.kind] || "sensor")),
+      h("div.h-txt", h("div.name.ellipsis", e.name), h("div.sub.ellipsis", deviceSub(e)))),
+    e.kind === "speaker" && st.on && volume(e),
+    toggle(st.on, (on) => act(() => callEntity(e.id, on ? "turn_on" : "turn_off")), !e.available));
+}
+
+const volume = (e) => h("input.vol", { type: "range", min: 0, max: e.attrs.max_volume || 100, value: e.state.volume ?? 0,
+  "aria-label": t("Volume"), onchange: (ev) => act(() => callEntity(e.id, "set_volume", { value: +ev.target.value })) });
+
+function deviceSheet(e) {
+  if (e.kind === "tv" && e.actions.includes("remote")) return remoteSheet(e);
+  const full = { speaker: speakerFull, media_player: mediaFull }[e.kind];
+  sheet(e.name, full ? full(e) : tile(e));
+}
+
+function shortcuts() {
+  const items = [
+    hasPlugin("media") && ["film", t("Movies"), "#/media"],
+    hasPlugin("media") && ["heart", t("Favourites"), "#/media/watchlist"],
+    hasPlugin("recipes") && ["utensils", t("Recipes"), "#/recipes/mine"],
+    hasPlugin("recipes") && ["cart", t("Shopping list"), "#/recipes/shopping"],
+  ].filter(Boolean);
+  return items.length ? h("div.shortcuts", items.map(([ico, label, hash]) =>
+    h("a.sc", { href: hash }, h("span.sc-ico", icon(ico)), h("span", label)))) : null;
 }
 
 // ------------------------------------------------------------------ tiles
@@ -300,7 +598,8 @@ function powerBtn(e) {
     icon("power"));
 }
 
-function speakerTile(e) {
+/** All speaker controls (the tile's sheet). */
+function speakerFull(e) {
   const st = e.state, sources = e.attrs.sources || [];
   return h(`div.card.tile.span2${st.on ? ".active" : ""}`,
     top(e, "speaker", st.on ? `${st.source || ""}${st.playing ? ` · ${t("playing")}` : ""}` : t("Standby")),
@@ -322,7 +621,8 @@ function speakerTile(e) {
       e.actions.includes("next") && h("button.icon.ghost", { onclick: () => act(() => callEntity(e.id, "next")) }, icon("next"))));
 }
 
-function mediaTile(e) {
+/** Apple TV with cover, progress and transport (while playing, or in its sheet). */
+function mediaFull(e) {
   const st = e.state, playing = st.state === "playing";
   const pos = st.duration ? Math.min(100, (st.position || 0) / st.duration * 100) : null;
   return h(`div.card.tile.span2${st.on ? ".active" : ""}`,
@@ -344,14 +644,29 @@ function mediaTile(e) {
       h("button.icon.ghost", { onclick: () => act(() => callEntity(e.id, "next")) }, icon("next"))));
 }
 
-function tvTile(e) {
-  const st = e.state;
-  return h(`div.card.tile${st.on ? ".active" : ""}`,
-    top(e, "tv", st.on ? (st.source || t("On")) : t("Off")),
-    h("div.row", powerBtn(e),
-      e.actions.includes("remote") && h("button.icon", { title: t("Remote"), onclick: () => remoteSheet(e) }, icon("remote")),
-      e.attrs.experimental && h("span.chip.warn.tiny", t("beta"))));
+// TV, Apple TV (idle), speaker: one compact line - name, state, on/off; tap for remote or
+// every control. The Apple TV grows into the cover card only while something plays.
+function compactTile(e, extra) {
+  return h(`div.card.tile.compact.span2${e.state.on ? ".active" : ""}`,
+    h("div.c-main",
+      h("button.h-main", { onclick: () => deviceSheet(e) },
+        h("div.ico", icon(DEVICE_ICON[e.kind] || "sensor")),
+        h("div.h-txt", h("div.name.ellipsis", e.name), h("div.sub.ellipsis", deviceSub(e)))),
+      toggle(e.state.on, (on) => act(() => callEntity(e.id, on ? "turn_on" : "turn_off")), !e.available)),
+    extra);
 }
+
+const tvTile = (e) => compactTile(e, e.attrs.experimental && h("span.chip.warn.tiny", t("beta")));
+
+function mediaTile(e) {
+  const st = e.state;
+  return st.on && st.title && ["playing", "paused"].includes(st.state) ? mediaFull(e) : compactTile(e);
+}
+
+const speakerTile = (e) => compactTile(e, e.state.on && h("div.row", { style: { gap: "6px" } },
+  h("button.icon.ghost", { "aria-label": t("Mute"), onclick: () => act(() => callEntity(e.id, "mute", { value: !e.state.muted })) },
+    icon(e.state.muted ? "mute" : "volume")),
+  volume(e)));
 
 function genericTile(e) {
   return h("div.card.tile", top(e, "sensor", e.kind),

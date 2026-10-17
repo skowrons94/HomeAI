@@ -89,3 +89,13 @@ button.star.on svg { fill: var(--on); }
 
 .r-body { margin-top: 14px; }
 .r-body > .r-search:first-child { margin-top: 0; }
+
+/* edit / delete */
+.r-editbtn { flex: 0 0 auto; min-height: 40px; padding: 0 14px; white-space: nowrap; }
+.r-editbtn.active { background: var(--accent); color: #fff; }
+.r-actions button { min-height: 40px; }
+.r-actions .r-del { margin-left: auto; }
+.r-grid.editing .r-card { cursor: default; }
+.r-grid.editing .r-card:hover .img { transform: none; }
+.r-cardel { position: absolute; right: 8px; bottom: 8px; min-height: 36px; padding: 0 12px; gap: 6px;
+  background: var(--bad); color: #fff; box-shadow: var(--shadow); }

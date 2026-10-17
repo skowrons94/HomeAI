@@ -212,7 +212,7 @@ class Hub:
             e.name = ov["name"]
         if "room" in ov and ov["room"] is not None:
             e.room = ov["room"]
-        if "hidden" in ov:
+        if ov.get("hidden") is not None:
             if ov["hidden"]:
                 e.attrs["hidden"] = True
             else:
