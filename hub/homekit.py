@@ -22,6 +22,7 @@ from pyhap import util as hap_util
 from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
 from pyhap.const import CATEGORY_LIGHTBULB, CATEGORY_SENSOR, CATEGORY_SWITCH
+from zeroconf import InterfaceChoice
 
 log = logging.getLogger("hub.homekit")
 
@@ -137,6 +138,7 @@ class HomeKit:
             persist_file=str(self.state_file),
             pincode=pairing["pincode"].encode(),
             loop=asyncio.get_running_loop(),
+            interface_choice=InterfaceChoice.Default,  # not VPN / docker interfaces
         )
         # HAP-python makes a new setup id at every start; keep it stable so a
         # printed QR code stays valid
