@@ -49,8 +49,12 @@ def map_device(dev: dict) -> tuple[str, dict, dict] | None:
             lo, hi = sorted((a.get("colorTemperatureMin", 4000), a.get("colorTemperatureMax", 2200)))
             attrs["color_temp_range"] = (lo, hi)
         if "colorHue" in caps:
-            state["hue"] = a.get("colorHue")
-            state["saturation"] = a.get("colorSaturation")
+            # hub convention: hue 0-360, saturation 0-100 (IKEA uses 0-1)
+            state["hue"] = round(a.get("colorHue") or 0) % 360
+            state["saturation"] = round((a.get("colorSaturation") or 0) * 100)
+            attrs["color"] = True
+            if a.get("colorMode"):
+                state["color_mode"] = a["colorMode"]  # "color" | "temperature"
         return "light", state, attrs
     if dtype == "outlet":
         state = {"on": bool(a.get("isOn"))}
@@ -194,7 +198,7 @@ class DirigeraPlugin(Plugin):
                            "turn_off": lambda eid=eid: self.turn_off(eid)}
             e = self.hub.add_entity(Entity(
                 id=eid, name=a.get("customName") or a.get("model") or "IKEA device",
-                kind=kind, plugin=self.name, room=(dev.get("room") or {}).get("name", ""),
+                kind=kind, plugin=self.name, room=((dev.get("room") or {}).get("name") or "").strip(),
                 state=state, attrs=attrs, available=avail, actions=actions,
             ))
             if self.config.get("homekit", False):
@@ -226,9 +230,18 @@ class DirigeraPlugin(Plugin):
         dev = self.devices[eid]
         await self._request("PATCH", f"/devices/{dev['id']}", json=[{"attributes": attributes}])
 
-    async def turn_on(self, eid: str, brightness=None, color_temp=None):
+    async def turn_on(self, eid: str, brightness=None, color_temp=None, hue=None,
+                      saturation=None):
         await self._patch(eid, {"isOn": True})
         update = {"on": True}
+        if hue is not None or saturation is not None:
+            st = self.hub.entities[eid].state
+            update["hue"] = round(float(st.get("hue", 0) if hue is None else hue)) % 360
+            update["saturation"] = max(0, min(100, round(float(
+                st.get("saturation", 100) if saturation is None else saturation))))
+            await self._patch(eid, {"colorHue": update["hue"],
+                                    "colorSaturation": update["saturation"] / 100})
+            update["color_mode"] = "color"
         if brightness is not None:
             update["brightness"] = max(1, min(100, int(brightness)))
             await self._patch(eid, {"lightLevel": update["brightness"]})
@@ -236,6 +249,8 @@ class DirigeraPlugin(Plugin):
             lo, hi = self.hub.entities[eid].attrs.get("color_temp_range", (2200, 4000))
             update["color_temp"] = max(lo, min(hi, int(color_temp)))
             await self._patch(eid, {"colorTemperature": update["color_temp"]})
+            if "hue" in self.hub.entities[eid].state:
+                update["color_mode"] = "temperature"
         self.hub.update(eid, **update)
 
     async def turn_off(self, eid: str):

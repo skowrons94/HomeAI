@@ -230,3 +230,13 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 
 .qr svg { width: 180px; height: 180px; background: #fff; border-radius: 12px; padding: 6px; }
 .qr path { fill: #000; }
+
+/* light sheet */
+.lamp-preview { width: 56px; height: 56px; border-radius: 50%; box-shadow: 0 0 24px currentColor;
+                transition: background .2s, opacity .2s; }
+.light-sheet .ct-range { accent-color: #ffd28a; }
+.light-sheet input.ct-range { background: linear-gradient(90deg, #ffb05c, #fff4e0, #e8f0ff);
+                              border-radius: 99px; height: 10px; }
+.swatches { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+.swatch { aspect-ratio: 1; border-radius: 50%; padding: 0; min-width: 0;
+          box-shadow: inset 0 0 0 2px rgb(255 255 255 / .25); }

@@ -254,7 +254,13 @@ class LightAccessory(_EntityAccessory):
             chars.append("Brightness")
         if "color_temp" in e.state:
             chars.append("ColorTemperature")
+        if "hue" in e.state:
+            chars += ["Hue", "Saturation"]
         s = self.add_preload_service("Lightbulb", chars=chars)
+        self.c_hue = self.c_sat = None
+        if "hue" in e.state:
+            self.c_hue = s.configure_char("Hue", setter_callback=self._set_hue)
+            self.c_sat = s.configure_char("Saturation", setter_callback=self._set_sat)
         self.c_on = s.configure_char("On", setter_callback=self._set_on)
         self.c_bri = (s.configure_char("Brightness", setter_callback=self._set_bri)
                       if "brightness" in e.state else None)
@@ -276,9 +282,18 @@ class LightAccessory(_EntityAccessory):
             p = self.c_ct.properties
             self.c_ct.set_value(max(p["minValue"], min(p["maxValue"],
                                                        int(1e6 / e.state["color_temp"]))))
+        if self.c_hue is not None and e.state.get("hue") is not None:
+            self.c_hue.set_value(float(e.state["hue"]) % 360)
+            self.c_sat.set_value(max(0.0, min(100.0, float(e.state.get("saturation") or 0))))
 
     def _set_on(self, v):
         self.call("turn_on" if v else "turn_off")
+
+    def _set_hue(self, v):
+        self.call("turn_on", hue=float(v))
+
+    def _set_sat(self, v):
+        self.call("turn_on", saturation=float(v))
 
     def _set_bri(self, v):
         self.call("turn_on", brightness=int(v))

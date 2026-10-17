@@ -7,8 +7,9 @@ callables) that the web UI and HomeKit invoke.
 State conventions per ``kind`` (so the UI and HomeKit can render any plugin):
 
   sensor        temperature (°C), humidity (%), battery (%)
-  light         on, brightness (0-100), color_temp (K)
-                actions: turn_on(brightness?, color_temp?), turn_off
+  light         on, brightness (0-100), color_temp (K), hue (0-360), saturation (0-100)
+                attrs: color_temp_range (warm K, cool K), color (True if hue works)
+                actions: turn_on(brightness?, color_temp?, hue?, saturation?), turn_off
   switch        on                       actions: turn_on, turn_off
   climate       current_temperature, target_temperature, mode, heating
                 attrs: min, max, step, modes   actions: set_temperature(value), set_mode(mode)

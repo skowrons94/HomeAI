@@ -181,17 +181,88 @@ function sensorTile(e) {
   return el;
 }
 
+// -- lights ----------------------------------------------------------------------
+
+/** CSS colour a lamp is shining with (for the tile icon and the sheet). */
+function lampColor(st) {
+  if (st.hue !== undefined && st.color_mode !== "temperature" && (st.saturation ?? 0) > 3) {
+    return `hsl(${st.hue} ${Math.max(35, st.saturation)}% 60%)`;
+  }
+  if (st.color_temp) {  // 2200 K amber .. 4000+ K cool white
+    const t = Math.max(0, Math.min(1, (st.color_temp - 2200) / 1800));
+    const mix = (a, b) => Math.round(a + (b - a) * t);
+    return `rgb(${mix(255, 236)} ${mix(176, 240)} ${mix(92, 255)})`;
+  }
+  return "";
+}
+
 function lightTile(e) {
   const st = e.state;
+  const tunable = st.color_temp !== undefined || e.attrs.color;
   const el = h(`div.card.tile${st.on ? ".active" : ""}`,
     { style: { cursor: "pointer" },
       onclick: (ev) => { if (ev.target.type !== "range") act(() => callEntity(e.id, st.on ? "turn_off" : "turn_on")); } },
     top(e, "bulb", st.on ? (st.brightness !== undefined ? `${st.brightness}%` : "On") : "Off"));
-  if (st.brightness !== undefined) {
-    el.append(h("input", { type: "range", min: 1, max: 100, value: st.brightness ?? 100,
-      onchange: (ev) => act(() => callEntity(e.id, "turn_on", { brightness: +ev.target.value })) }));
+  const color = st.on && lampColor(st);
+  if (color) el.querySelector(".ico").style.background = color;
+  if (st.brightness !== undefined || tunable) {
+    el.append(h("div.row", { style: { gap: "8px" } },
+      st.brightness !== undefined && h("input", { type: "range", min: 1, max: 100, value: st.brightness ?? 100,
+        style: { flex: 1, minWidth: 0 },
+        onclick: (ev) => ev.stopPropagation(),
+        onchange: (ev) => act(() => callEntity(e.id, "turn_on", { brightness: +ev.target.value })) }),
+      tunable && h("button.icon", { title: "Colour", "aria-label": "Colour and white",
+        onclick: (ev) => { ev.stopPropagation(); lightSheet(e); } }, icon("bulb"))));
   }
   return el;
+}
+
+const SWATCHES = [0, 25, 45, 60, 100, 140, 175, 200, 225, 255, 285, 315];
+
+function lightSheet(e) {
+  const st = { ...e.state };
+  const body = h("div.stack.light-sheet");
+  const s = sheet(e.name, body);
+  const send = debounce((params) => callEntity(e.id, "turn_on", params).catch((err) => toast(err.message, true)), 250);
+  const preview = h("div.lamp-preview");
+  const paint = () => {
+    preview.style.background = lampColor({ ...st, on: true }) || "var(--on)";
+    preview.style.opacity = st.on ? 0.35 + 0.65 * ((st.brightness ?? 100) / 100) : 0.15;
+  };
+  const slider = (label, attrs, onInput) => h("label.field", label,
+    h("input", { type: "range", ...attrs, oninput: (ev) => onInput(+ev.target.value) }));
+  const [lo, hi] = e.attrs.color_temp_range || [2200, 4000];
+  body.append(
+    h("div.row", preview, h("div.spacer"),
+      h("button", { onclick: async (ev) => {
+        st.on = !st.on; paint();
+        await act(() => callEntity(e.id, st.on ? "turn_on" : "turn_off"), ev.currentTarget);
+        ev.currentTarget.textContent = st.on ? "Turn off" : "Turn on";
+      } }, st.on ? "Turn off" : "Turn on")),
+    st.brightness !== undefined && slider("Brightness", { min: 1, max: 100, value: st.brightness ?? 100 },
+      (v) => { st.brightness = v; st.on = true; paint(); send({ brightness: v }); }),
+    st.color_temp !== undefined && h("div.stack", { style: { gap: "6px" } },
+      slider("White", { min: lo, max: hi, step: 50, value: st.color_temp, class: "ct-range" },
+        (v) => { st.color_temp = v; st.color_mode = "temperature"; st.on = true; paint(); send({ color_temp: v }); }),
+      h("div.row.wrap", { style: { gap: "6px" } }, [["Warm", lo], ["Neutral", Math.round((lo + hi) / 2 / 50) * 50], ["Cool", hi]]
+        .map(([name, k]) => h("button", { onclick: () => {
+          st.color_temp = k; st.color_mode = "temperature"; st.on = true; paint();
+          body.querySelector(".ct-range").value = k; send({ color_temp: k });
+        } }, name)))),
+    e.attrs.color && h("div.stack", { style: { gap: "8px" } },
+      h("div.small.muted", "Colour"),
+      h("div.swatches", SWATCHES.map((hue) => h("button.swatch", {
+        style: { background: `hsl(${hue} 85% 55%)` }, "aria-label": `Hue ${hue}`,
+        onclick: () => {
+          st.hue = hue; st.saturation = Math.max(st.saturation ?? 0, 60); st.color_mode = "color"; st.on = true;
+          body.querySelector(".sat-range").value = st.saturation; paint();
+          send({ hue, saturation: st.saturation });
+        } }))),
+      slider("Saturation", { min: 0, max: 100, value: st.saturation ?? 100, class: "sat-range" },
+        (v) => { st.saturation = v; st.color_mode = "color"; st.on = true; paint(); send({ hue: st.hue ?? 0, saturation: v }); })),
+  );
+  paint();
+  return s;
 }
 
 function switchTile(e) {
