@@ -57,11 +57,13 @@ cd ~/Desktop/home
 Bluetooth doesn't work from a terminal on macOS until the terminal is granted Bluetooth access; on
 the Pi it works out of the box.
 
-## Install on the Raspberry Pi 4
+## Install on a Raspberry Pi
 
-Raspberry Pi OS Lite 64-bit (Bookworm). Copy this folder to the Pi (e.g. `~/casa`), then:
+Any 64-bit Debian 12 based OS (Raspberry Pi OS Lite, DietPi). A Pi 3 B+ with 1 GB is enough
+(Casa uses ~70 MB); a Pi 4 is comfortable.
 
 ```sh
+git clone https://github.com/skowrons94/HomeAI.git ~/casa
 cd ~/casa && ./deploy/install-pi.sh
 ```
 
@@ -69,7 +71,12 @@ This installs Python deps, BlueZ and Transmission, and the `casa-mount` helper, 
 mount the NAS. The helper is root-owned, and a sudo rule allows only that helper. The installer also
 points Transmission's downloads at the NAS and installs the `casa` systemd service. By default it adds
 a boot-time mount of the NAS `Multimedia` share at `/mnt/nas` (it asks for the NAS user). To manage
-the NAS only from the app, skip that mount: `NAS_FSTAB=0 ./deploy/install-pi.sh`.
+the NAS only from the app, skip that mount: `NAS_FSTAB=0 ./deploy/install-pi.sh`. If your NAS
+is already mounted (your own fstab lines), point the installer at it instead:
+`NAS_FSTAB=0 MOUNT=/mnt/media DOWNLOAD_DIR=/mnt/download/incomplete ./deploy/install-pi.sh`.
+
+**Updating**: `~/casa/deploy/update.sh` (or from your computer `ssh <pi> '~/casa/deploy/update.sh'`)
+pulls the latest version and restarts Casa; settings and the HomeKit pairing are kept.
 
 Open `http://<pi-ip>:8080`.
 

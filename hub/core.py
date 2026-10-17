@@ -393,13 +393,15 @@ class Hub:
 
     async def start(self) -> None:
         import aiohttp
+        from zeroconf import InterfaceChoice
         from zeroconf.asyncio import AsyncZeroconf
 
         self.http = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
             headers={"User-Agent": "Mozilla/5.0 (X11; Linux aarch64) Casa/1.0"},
         )
-        self.zeroconf = AsyncZeroconf()
+        # default-route interfaces only: VPN / docker interfaces just produce errors
+        self.zeroconf = AsyncZeroconf(interfaces=InterfaceChoice.Default)
         for name in (self.config.get("plugins") or {}):
             if not self.cfg.plugin_enabled(name):
                 continue
