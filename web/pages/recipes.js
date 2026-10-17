@@ -94,14 +94,22 @@ function intro(out, input, submit) {
 function showResults(out, res, q) {
   const warn = Object.keys(res.errors || {}).length
     ? h("div.r-banner", "⚠️", h("div", `${t("Some sources didn't answer")}: ${Object.entries(res.errors).map(([k, v]) => `${k} (${v})`).join(", ")}`)) : null;
-  fill(out, warn, res.results.length
-    ? h("div.r-grid", res.results.map((r) => {
-      const c = card({ image: r.image, title: r.title, meta: `${FLAG[r.lang] || ""} ${r.subtitle || r.site}` },
+  let which = "all";
+  const grid = h("div.r-grid");
+  const chips = h("div.r-chips");
+  const draw = () => {
+    const list = res.results.filter((r) => which === "all" || (which === "it" ? r.cuisine === "italian" : r.cuisine !== "italian"));
+    fill(grid, ...(list.length ? list.map((r) => {
+      const c = card({ image: r.image, title: r.title, meta: `${FLAG[r.lang] || ""} ${r.source || r.subtitle || r.site}` },
         () => importRecipe(r.mealdb ? { mealdb: r.mealdb } : { url: r.url }, c),
         r.saved ? h("span.r-badge", icon("check")) : null);
       return c;
-    }))
-    : emptyState("search", `${t("Nothing found.")} “${q}”`));
+    }) : [emptyState("search", `${t("Nothing found.")} “${q}”`)]));
+    fill(chips, ...[["all", t("All sources")], ["it", t("Italian sites")], ["world", t("World cuisines")]].map(([k, label]) =>
+      h(`button.chipbtn${which === k ? ".active" : ""}`, { type: "button", onclick: () => { which = k; draw(); } }, label)));
+  };
+  draw();
+  fill(out, warn, res.results.length ? chips : null, res.results.length ? grid : emptyState("search", `${t("Nothing found.")} “${q}”`));
 }
 
 async function importRecipe(body, busyEl) {

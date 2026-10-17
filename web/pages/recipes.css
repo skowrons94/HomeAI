@@ -138,3 +138,5 @@ button.star { min-width: 44px; min-height: 44px; }
 .r-editbar { position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; justify-content: flex-end; padding: 8px 0;
   background: var(--bg); }
 .r-editbar button { min-height: 44px; flex: 1; max-width: 160px; }
+
+.r-chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 12px; }

@@ -240,6 +240,47 @@ def test_mealdb_and_gz_parsers():
     assert len(res) == 1 and res[0]["image"].endswith("360x300.jpg")
 
 
+def test_wp_mapping_merge_and_failures():
+    import asyncio
+    site = sources.WP_BY_ID["misya"]
+    data = [{"link": "https://www.misya.info/ricetta/ragu.htm", "title": {"rendered": "Rag&ugrave; di <b>tofu</b>"},
+             "_embedded": {"wp:featuredmedia": [{"source_url": "https://x/full.jpg",
+                                                  "media_details": {"sizes": {"medium_large": {"source_url": "https://x/ml.jpg"}}}}]}},
+            {"link": "", "title": {"rendered": "no link"}}, "junk"]
+    res = sources.wp_results(data, site)
+    assert len(res) == 1 and res[0]["title"] == "Ragù di tofu" and res[0]["image"] == "https://x/ml.jpg"
+    assert res[0]["source"] == "Misya" and res[0]["lang"] == "it" and res[0]["cuisine"] == "italian"
+    assert sources.wp_results({"code": "rest_disabled"}, site) == []
+
+    mk = lambda u: {"title": u, "url": u}
+    by = {"a": [mk("https://a/1"), mk("https://a/2")], "b": [mk("https://a/1/"), mk("https://b/1")], "c": []}
+    assert [r["url"] for r in sources.merge(by, ["a", "b", "c"])] == ["https://a/1", "https://b/1", "https://a/2"]
+    many = {"a": [mk(f"https://a/{i}") for i in range(50)]}
+    assert len(sources.merge(many, ["a"])) == sources.MAX_RESULTS
+
+    async def good(*a):
+        return [{"title": "T", "url": "https://ok/1"}]
+
+    async def bad(*a):
+        raise RuntimeError("boom")
+
+    async def slow(*a):
+        await asyncio.sleep(30)
+
+    old = (sources.wp_search, sources.gz_search, sources.mealdb_search, sources.SOURCE_TIMEOUT, sources.TOTAL_TIMEOUT)
+    sources.wp_search, sources.gz_search, sources.mealdb_search = (
+        lambda http, site, q: bad() if site["id"] == "misya" else good(), lambda http, q: slow(), lambda http, q: good())
+    sources.SOURCE_TIMEOUT = sources.TOTAL_TIMEOUT = 0.2
+    sources._cache.clear()
+    try:
+        out = asyncio.run(sources.search(None, "x", ["giallozafferano", "misya", "benedetta", "themealdb", "nope"], "it"))
+    finally:
+        sources.wp_search, sources.gz_search, sources.mealdb_search, sources.SOURCE_TIMEOUT, sources.TOTAL_TIMEOUT = old
+        sources._cache.clear()
+    assert set(out["errors"]) == {"giallozafferano", "misya"}, out["errors"]
+    assert out["results"][0]["url"] == "https://ok/1"  # same URL from two sources: deduped
+
+
 def test_check_url():
     for bad in ("ftp://x.com", "http://localhost/x", "http://192.168.1.5/x", "http://127.0.0.1:8080", "nope"):
         try:

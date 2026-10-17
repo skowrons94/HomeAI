@@ -1,4 +1,4 @@
-"""Fetching recipes: any URL (schema.org), TheMealDB search, GialloZafferano search."""
+"""Fetching recipes: any URL (schema.org), TheMealDB, GialloZafferano and WordPress recipe-blog search."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ log = logging.getLogger("hub.recipes")
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/124.0 Safari/537.36 Casa/1.0")
+API_UA = "Casa/1.0 (home recipe hub; recipe search)"  # some CDNs block browser-like UAs on API paths
 MAX_PAGE = 4 * 1024 * 1024
 MAX_IMAGE = 2 * 1024 * 1024
 TIMEOUT = aiohttp.ClientTimeout(total=15, connect=6)
@@ -55,16 +56,20 @@ async def _read(resp: aiohttp.ClientResponse, limit: int) -> bytes:
 
 
 async def fetch_text(http, url: str) -> tuple[str, str]:
-    """GET a page -> (html, final url)."""
+    """GET a page -> (html, final url). Retries once with the plain Casa UA when a CDN rejects the browser-like one."""
     url = check_url(url)
-    async with http.get(url, headers={"User-Agent": UA, "Accept-Language": "it,en;q=0.8",
-                                      "Accept": "text/html,application/json;q=0.9,*/*;q=0.5"},
-                        timeout=TIMEOUT, allow_redirects=True) as r:
-        if r.status >= 400:
-            raise ValueError(_("The site answered HTTP {status}", status=r.status))
-        data = await _read(r, MAX_PAGE)
-        enc = r.charset or "utf-8"
-        return data.decode(enc, errors="replace"), str(r.url)
+    for ua in (UA, API_UA):
+        async with http.get(url, headers={"User-Agent": ua, "Accept-Language": "it,en;q=0.8",
+                                          "Accept": "text/html,application/json;q=0.9,*/*;q=0.5"},
+                            timeout=TIMEOUT, allow_redirects=True) as r:
+            if r.status == 403 and ua is UA:
+                continue
+            if r.status >= 400:
+                raise ValueError(_("The site answered HTTP {status}", status=r.status))
+            data = await _read(r, MAX_PAGE)
+            enc = r.charset or "utf-8"
+            return data.decode(enc, errors="replace"), str(r.url)
+    raise ValueError(_("The site answered HTTP {status}", status=403))
 
 
 async def fetch_image(http, url: str, dest_dir, stem: str) -> str:
@@ -139,7 +144,7 @@ async def mealdb_search(http, q: str) -> list[dict]:
     out = []
     for m in (data.get("meals") or [])[:12]:
         out.append({"title": m["strMeal"], "image": m.get("strMealThumb", ""), "site": "themealdb.com",
-                    "lang": "en", "mealdb": m["idMeal"],
+                    "lang": "en", "cuisine": "world", "source": "TheMealDB", "mealdb": m["idMeal"],
                     "url": f"https://www.themealdb.com/meal/{m['idMeal']}",
                     "subtitle": " · ".join(x for x in (m.get("strArea"), m.get("strCategory")) if x)})
     return out
@@ -171,7 +176,8 @@ def gz_results(page: str) -> list[dict]:
         seen.add(url)
         img = re.search(r"(?:data-src|src)=\"(https?://[^\"]+\.(?:jpg|jpeg|png|webp)[^\"]*)\"", inner)
         out.append({"title": htmllib.unescape(title), "image": img.group(1) if img else "",
-                    "site": "giallozafferano.it", "lang": "it", "url": url, "subtitle": "GialloZafferano"})
+                    "site": "giallozafferano.it", "lang": "it", "cuisine": "italian", "source": "GialloZafferano",
+                    "url": url, "subtitle": "GialloZafferano"})
         if len(out) >= 12:
             break
     return out
@@ -183,37 +189,153 @@ async def gz_search(http, q: str) -> list[dict]:
     return gz_results(page)
 
 
+# ---------------------------------------------------------------------------- WordPress blogs
+
+# Recipe blogs that expose the WordPress REST API. Result pages carry schema.org Recipe data, so
+# importing a chosen result is the ordinary `import_url`. `type` is the REST collection (posts by default).
+WP_SITES = [
+    {"id": "tavolartegusto", "name": "Tavolartegusto", "base": "https://www.tavolartegusto.it", "lang": "it", "cuisine": "italian"},
+    {"id": "benedetta", "name": "Fatto in casa da Benedetta", "base": "https://www.fattoincasadabenedetta.it",
+     "lang": "it", "cuisine": "italian", "type": "recipe"},
+    {"id": "misya", "name": "Misya", "base": "https://www.misya.info", "lang": "it", "cuisine": "italian"},
+    {"id": "ricettedellanonna", "name": "Ricette della Nonna", "base": "https://www.ricettedellanonna.net",
+     "lang": "it", "cuisine": "italian"},
+    {"id": "vincenzosplate", "name": "Vincenzo's Plate", "base": "https://www.vincenzosplate.com", "lang": "en", "cuisine": "italian"},
+    {"id": "recipetineats", "name": "RecipeTin Eats", "base": "https://www.recipetineats.com", "lang": "en", "cuisine": "world"},
+    {"id": "hebbars", "name": "Hebbar's Kitchen", "base": "https://hebbarskitchen.com", "lang": "en", "cuisine": "world"},
+    {"id": "isabeleats", "name": "Isabel Eats", "base": "https://www.isabeleats.com", "lang": "en", "cuisine": "world"},
+    {"id": "mediterraneandish", "name": "The Mediterranean Dish", "base": "https://www.themediterraneandish.com",
+     "lang": "en", "cuisine": "world"},
+]
+WP_BY_ID = {s["id"]: s for s in WP_SITES}
+LEGACY = {"giallozafferano": ("GialloZafferano", "it", "italian"), "themealdb": ("TheMealDB", "en", "world")}
+ALL_SOURCES = ["giallozafferano", "themealdb"] + [s["id"] for s in WP_SITES]
+DEFAULT_SOURCES = list(ALL_SOURCES)
+SOURCE_TIMEOUT = 6
+TOTAL_TIMEOUT = 9
+MAX_RESULTS = 30
+PER_SOURCE = 8
+
+
+def _text(s: str) -> str:
+    return re.sub(r"\s+", " ", htmllib.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
+
+
+def wp_results(data, site: dict) -> list[dict]:
+    """Map a WP REST `posts` listing (with `_embed=wp:featuredmedia`) to result dicts."""
+    out = []
+    for p in data if isinstance(data, list) else []:
+        if not isinstance(p, dict):
+            continue
+        url, title = p.get("link") or "", _text((p.get("title") or {}).get("rendered", ""))
+        if not url.startswith("http") or not title:
+            continue
+        img = ""
+        media = ((p.get("_embedded") or {}).get("wp:featuredmedia") or [None])[0]
+        if isinstance(media, dict):
+            sizes = (media.get("media_details") or {}).get("sizes") or {}
+            for k in ("medium_large", "large", "medium", "full"):
+                if sizes.get(k, {}).get("source_url"):
+                    img = sizes[k]["source_url"]
+                    break
+            img = img or media.get("source_url") or ""
+        out.append({"title": title, "image": img, "site": urlparse(site["base"]).netloc.removeprefix("www."),
+                    "lang": site["lang"], "cuisine": site["cuisine"], "source": site["name"],
+                    "url": url, "subtitle": site["name"]})
+    return out
+
+
+async def wp_search(http, site: dict, q: str) -> list[dict]:
+    url = f"{site['base']}/wp-json/wp/v2/{site.get('type', 'posts')}"
+    async with http.get(url, params={"search": q, "per_page": PER_SOURCE, "_embed": "wp:featuredmedia"},
+                        headers={"User-Agent": API_UA, "Accept": "application/json"}, timeout=TIMEOUT) as r:
+        if r.status >= 400:
+            raise ValueError(f"HTTP {r.status}")
+        data = await r.json(content_type=None)
+    return wp_results(data, site)
+
+
 # ---------------------------------------------------------------------------- merged search
 
 _cache: dict[tuple, tuple[float, list]] = {}
 
 
+def _tag(items: list[dict], name: str, cuisine: str) -> list[dict]:
+    for it in items:
+        it.setdefault("source", name)
+        it.setdefault("cuisine", cuisine)
+    return items
+
+
+def merge(by: dict[str, list[dict]], order: list[str], limit: int = MAX_RESULTS) -> list[dict]:
+    """Round-robin the sources in `order`, drop duplicate URLs, cap at `limit`."""
+    queues = [list(by[n]) for n in order if by.get(n)]
+    out, seen = [], set()
+    while queues and len(out) < limit:
+        for qu in list(queues):
+            while qu:
+                it = qu.pop(0)
+                key = it["url"].split("#")[0].rstrip("/").lower()
+                if key not in seen:
+                    seen.add(key)
+                    out.append(it)
+                    break
+            if not qu:
+                queues.remove(qu)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _job(http, name: str, q: str):
+    if name == "giallozafferano":
+        return gz_search(http, q)
+    if name == "themealdb":
+        return mealdb_search(http, q)
+    return wp_search(http, WP_BY_ID[name], q)
+
+
+def _meta(name: str) -> tuple[str, str, str]:
+    if name in LEGACY:
+        return LEGACY[name]
+    s = WP_BY_ID[name]
+    return s["name"], s["lang"], s["cuisine"]
+
+
+async def _one(coro):
+    return await asyncio.wait_for(coro, SOURCE_TIMEOUT)
+
+
 async def search(http, q: str, sources: list[str], lang: str = "it") -> dict:
     q = q.strip()
+    sources = [s for s in dict.fromkeys(sources) if s in LEGACY or s in WP_BY_ID]  # unknown ids are ignored
     key = (q.lower(), tuple(sources), lang)
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < 600:
         return hit[1]
-    jobs = {}
-    if "giallozafferano" in sources:
-        jobs["giallozafferano"] = gz_search(http, q)
-    if "themealdb" in sources:
-        jobs["themealdb"] = mealdb_search(http, q)
-    res = await asyncio.gather(*jobs.values(), return_exceptions=True)
-    by = {}
-    errors = {}
-    for name, r in zip(jobs, res):
-        if isinstance(r, Exception):
-            errors[name] = str(r) or type(r).__name__
-            log.info("search %s failed: %s", name, errors[name])
+    tasks = {n: asyncio.ensure_future(_one(_job(http, n, q))) for n in sources}
+    if tasks:
+        await asyncio.wait(tasks.values(), timeout=TOTAL_TIMEOUT)
+    by, errors = {}, {}
+    for name, t in tasks.items():
+        if not t.done():
+            t.cancel()
+            errors[name] = "timeout"
+        elif t.cancelled():
+            errors[name] = "cancelled"
+        elif t.exception():
+            e = t.exception()
+            errors[name] = str(e) or type(e).__name__
         else:
-            by[name] = r
-    ordered = []
-    first = ["giallozafferano", "themealdb"] if lang == "it" else ["themealdb", "giallozafferano"]
-    for n in first:
-        ordered += by.get(n, [])
-    out = {"results": ordered, "errors": errors}
-    if ordered or not errors:
+            sname, _l, scuisine = _meta(name)
+            by[name] = _tag(t.result(), sname, scuisine)
+            continue
+        log.info("search %s failed: %s", name, errors[name])
+
+    def rank(n):  # household language first (Italian sources for "it"); otherwise settings order
+        return (0 if _meta(n)[1] == lang else 1, sources.index(n))
+    out = {"results": merge(by, sorted(by, key=rank)), "errors": errors}
+    if out["results"] or not errors:
         _cache[key] = (time.time(), out)
     return out
 

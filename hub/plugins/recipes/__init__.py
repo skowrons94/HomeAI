@@ -4,7 +4,7 @@ book stored locally (works offline), shopping list with substitutions and a dail
     [plugins.recipes]
     daily_kcal_goal = 2000
     default_servings = 2
-    sources = ["themealdb", "giallozafferano"]
+    sources = ["giallozafferano", "misya", "themealdb"]   # default: every source in sources.ALL_SOURCES
     language = "it"                  # it | en
 """
 
@@ -45,8 +45,10 @@ class RecipesPlugin(Plugin):
          "min": 500, "max": 6000, "step": 50, "unit": "kcal"},
         {"key": "default_servings", "label": "Default servings", "type": "number", "default": 2,
          "min": 1, "max": 12, "step": 1, "help": "Recipes open already scaled for this many people."},
-        {"key": "sources", "label": "Search sources", "type": "list", "default": ["themealdb", "giallozafferano"],
-         "advanced": True, "help": "themealdb (English) and giallozafferano (Italian). Any URL can be imported anyway."},
+        {"key": "sources", "label": "Search sources", "type": "list", "default": sources.DEFAULT_SOURCES,
+         "advanced": True, "help": "Sites searched for recipes (giallozafferano, tavolartegusto, benedetta, misya, ricettedellanonna, "
+         "vincenzosplate, themealdb, recipetineats, hebbars, isabeleats, mediterraneandish). "
+         "Remove any you don't like. Any web address can be imported anyway."},
         {"key": "language", "label": "Language", "type": "select", "default": "it",
          "options": [{"value": "it", "label": "Italiano"}, {"value": "en", "label": "English"}]},
     ]
@@ -66,7 +68,7 @@ class RecipesPlugin(Plugin):
     @property
     def sources(self) -> list[str]:
         s = self.config.get("sources")
-        return [x for x in (s if isinstance(s, list) else ["themealdb", "giallozafferano"])]
+        return [x for x in (s if isinstance(s, list) else sources.DEFAULT_SOURCES)]
 
     def status(self):
         n = self.book.store.query("SELECT COUNT(*) AS n FROM recipes_recipe")[0]["n"] if self.book else 0
