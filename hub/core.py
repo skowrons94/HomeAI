@@ -474,6 +474,29 @@ class Hub:
                 log.error("plugin %s can't be loaded: %s", name, err)
         await asyncio.gather(*(self._start_plugin(p) for p in self.plugins.values()))
         await self.homekit.start()
+        self._watch_loop()
+
+    def _watch_loop(self, limit: float = 1.0) -> None:
+        """Log where the event loop is stuck when it stops answering for ``limit``
+        seconds (blocking calls make the whole hub feel frozen)."""
+        import sys
+        import threading
+        import traceback
+
+        loop, tid = asyncio.get_running_loop(), threading.get_ident()
+
+        def run():
+            while not self.shutdown.is_set():
+                answered = threading.Event()
+                loop.call_soon_threadsafe(answered.set)
+                if not answered.wait(limit):
+                    frame = sys._current_frames().get(tid)
+                    stack = "".join(traceback.format_stack(frame)[-8:]) if frame else "?"
+                    log.warning("event loop blocked for more than %.0f s at:\n%s", limit, stack)
+                    answered.wait(60)
+                time.sleep(2)
+
+        threading.Thread(target=run, name="loop-watch", daemon=True).start()
 
     async def stop(self) -> None:
         await self.homekit.stop()

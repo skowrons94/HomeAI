@@ -33,6 +33,8 @@ APPS = {
     "music": "com.apple.TVMusic",
     "settings": "com.apple.TVSettings",
 }
+PRESS_TIMEOUT = 3.0  # a key press normally takes ~50 ms
+STALE_PRESS = 6.0  # seconds after which a queued press is dropped
 KEYS = ("up", "down", "left", "right", "select", "menu", "home", "play_pause",
         "volume_up", "volume_down", "next", "previous", "top_menu")
 PAIR_ORDER = ("AirPlay", "Companion")
@@ -62,6 +64,10 @@ class AppleTVPlugin(Plugin):
         self._pairing = None
         self._pair_queue: list[str] = []
         self._connecting = asyncio.Lock()
+        self._reconnecting = asyncio.Lock()
+        # remote key presses: answered at once, sent in order by one worker, so a
+        # stalled connection never freezes the remote in the app
+        self._presses: asyncio.Queue = asyncio.Queue(maxsize=8)
 
     async def start(self):
         import pyatv  # noqa: F401  (fail early if missing)
@@ -80,7 +86,8 @@ class AppleTVPlugin(Plugin):
                 "remote": self.remote, "launch_app": self.launch_app,
             },
         ))
-        self.hub.every(30, self._ensure_connected, "appletv connect", initial_delay=0)
+        self.hub.every(30, self._watchdog, "appletv watchdog", initial_delay=0)
+        self.hub.spawn(self._press_worker(), "appletv remote")
 
     async def stop(self):
         await self._disconnect()
@@ -134,6 +141,62 @@ class AppleTVPlugin(Plugin):
             except Exception:
                 pass
             await self._update_from(await self.atv.metadata.playing())
+
+    async def _watchdog(self):
+        """Connect if needed; a connection that stopped answering (the Apple TV
+        dropped it while sleeping, Wi-Fi hiccup) is replaced before it's used."""
+        if self.atv is None:
+            await self._ensure_connected()
+            return
+        try:
+            await asyncio.wait_for(self.atv.metadata.playing(), 5)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            self.log.info("Apple TV stopped answering (%s); reconnecting",
+                          str(err) or type(err).__name__)
+            await self._reconnect()
+
+    async def _reconnect(self):
+        if self._reconnecting.locked():  # someone else is already on it: wait for them
+            async with self._reconnecting:
+                return
+        async with self._reconnecting:
+            await self._disconnect()
+            self.hub.update(self.eid, available=False)
+            await asyncio.wait_for(self._ensure_connected(), 15)
+
+    async def _send(self, make, timeout: float | None = None):
+        """Run ``make(atv)`` with a short timeout; on failure reconnect and try once more."""
+        timeout = timeout or PRESS_TIMEOUT
+        for attempt in (1, 2):
+            try:
+                if self.atv is None:
+                    await asyncio.wait_for(self._ensure_connected(), 15)
+                return await asyncio.wait_for(make(self._need()), timeout)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                if attempt == 2 or not self.creds:
+                    raise
+                self.log.info("Apple TV command failed (%s); reconnecting",
+                              str(err) or type(err).__name__)
+                try:
+                    await self._reconnect()
+                except Exception:
+                    pass
+
+    async def _press_worker(self):
+        while True:
+            key, queued = await self._presses.get()
+            if time.monotonic() - queued > STALE_PRESS:
+                continue  # pressed long ago while disconnected: don't replay it now
+            try:
+                await self._send(lambda atv: getattr(atv.remote_control, key)())
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                self.log.warning("remote %s failed: %s", key, str(err) or type(err).__name__)
 
     async def _disconnect(self):
         if self.atv is not None:
@@ -224,21 +287,26 @@ class AppleTVPlugin(Plugin):
         return self.atv
 
     async def turn_on(self):
-        await self._need().power.turn_on()
+        await self._send(lambda atv: atv.power.turn_on(), timeout=8)
         self.hub.update(self.eid, on=True)
 
     async def turn_off(self):
-        await self._need().power.turn_off()
+        await self._send(lambda atv: atv.power.turn_off(), timeout=8)
         self.hub.update(self.eid, on=False, state="off")
 
     async def remote(self, key: str):
         if key not in KEYS:
             raise ValueError(f"unknown key {key}; use one of {KEYS}")
-        await getattr(self._need().remote_control, key)()
+        if not self.creds:
+            self._need()  # raises "pair it in Settings"
+        if self._presses.full():  # a burst while reconnecting: keep the latest presses
+            self._presses.get_nowait()
+        self._presses.put_nowait((key, time.monotonic()))
+        return {"queued": True}
 
     async def launch_app(self, app: str):
         bundle = APPS.get(app.lower(), app)
-        await self._need().apps.launch_app(bundle)
+        await self._send(lambda atv: atv.apps.launch_app(bundle), timeout=8)
 
     # -- pairing (generic setup flow) ---------------------------------------------------------
 
