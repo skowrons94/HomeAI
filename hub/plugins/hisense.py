@@ -43,6 +43,20 @@ def magic_packet(mac: str) -> bytes:
 class HisensePlugin(Plugin):
     name = "hisense"
     title = "Hisense TV"
+    description = "Hisense VIDAA TV: power on with Wake-on-LAN, status and remote keys"
+    icon = "tv"
+    schema = [
+        {"key": "host", "label": "IP address", "type": "text", "required": True, "placeholder": "192.168.1.136"},
+        {"key": "mac", "label": "MAC address", "type": "text", "placeholder": "aa:bb:cc:dd:ee:ff", "help": "Needed for Wake-on-LAN"},
+        {"key": "name", "label": "Name", "type": "text", "default": "Hisense TV"},
+        {"key": "room", "label": "Room", "type": "text"},
+        {"key": "certfile", "label": "Client certificate", "type": "text", "advanced": True, "help": "RemoteNOW certificate chain, for experimental remote keys"},
+        {"key": "keyfile", "label": "Client key", "type": "text", "advanced": True, "help": "RemoteNOW private key, for experimental remote keys"},
+        {"key": "model", "label": "Model", "type": "text", "default": "VIDAA", "advanced": True},
+        {"key": "client_id", "label": "MQTT client id", "type": "text", "default": "CasaHub", "advanced": True},
+        {"key": "username", "label": "MQTT username", "type": "text", "default": "hisenseservice", "advanced": True},
+        {"key": "password", "label": "MQTT password", "type": "password", "default": "multimqttservice", "advanced": True},
+    ]
 
     def __init__(self, hub, config):
         super().__init__(hub, config)

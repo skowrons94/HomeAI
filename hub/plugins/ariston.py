@@ -39,6 +39,17 @@ def _num(value, default):
 class AristonPlugin(Plugin):
     name = "ariston"
     title = "Ariston"
+    description = "Ariston NET boiler: heating zones and domestic hot water"
+    icon = "flame"
+    schema = [
+        {"key": "username", "label": "Ariston NET email", "type": "text", "required": True, "help": "Account e-mail for ariston.net"},
+        {"key": "password", "label": "Ariston NET password", "type": "password", "required": True, "link": {"url": "https://www.ariston-net.remotethermo.com", "label": "Ariston NET"}},
+        {"key": "gateway", "label": "Gateway ID", "type": "text", "placeholder": "empty = first boiler on the account", "advanced": True},
+        {"key": "poll_interval", "label": "Poll interval", "type": "number", "default": 120, "min": 60, "unit": "s", "advanced": True},
+        {"key": "expose_hot_water", "label": "Expose hot water", "type": "bool", "default": True, "help": "Show domestic hot water as a thermostat"},
+        {"key": "hot_water_name", "label": "Hot water name", "type": "text", "default": "Hot Water", "advanced": True},
+        {"key": "room", "label": "Room", "type": "text"},
+    ]
 
     # the cloud needs time to push a change to the boiler and back; ignore
     # polls for a while after a write so the UI doesn't flip back

@@ -1,0 +1,37 @@
+/* History page */
+.hist-layout { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 900px) {
+  .hist-layout { grid-template-columns: minmax(0, 1fr) 340px; align-items: start; }
+  .hist-side { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; }
+}
+.hist-main { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.hist-range { gap: 10px; }
+.hist-range .seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.hist-custom { gap: 8px; }
+.hist-custom input { width: auto; padding: 7px 10px; font-size: 13px; }
+.hist-charts { display: flex; flex-direction: column; gap: 12px; }
+.hist-card { padding: 12px 10px 8px; }
+.hist-canvas { display: block; width: 100%; height: 240px; touch-action: pan-y; cursor: crosshair; }
+@media (min-width: 900px) { .hist-canvas { height: 280px; } }
+.hist-legend { gap: 6px 14px; margin: 0 4px 6px; font-size: 13px; }
+.hist-key { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.hist-key i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; background: var(--c); flex: none; }
+.hist-x { color: var(--muted); text-decoration: none; padding: 0 4px; font-size: 16px; line-height: 1; }
+.hist-nodata { text-align: center; color: var(--muted); font-size: 13px; padding: 4px 0 6px; }
+.hist-hint { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.hist-hint svg { width: 36px; height: 36px; opacity: .5; }
+
+.hist-search { margin-bottom: 10px; }
+.hist-group { margin-bottom: 14px; }
+.hist-room { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+             color: var(--muted); margin: 0 4px 6px; }
+.hist-ent { padding: 10px 12px; border-top: 1px solid var(--line); }
+.hist-ent:first-child { border-top: 0; }
+.hist-entname { font-weight: 650; margin-bottom: 6px; }
+.hist-chips { gap: 6px; }
+.hist-chip { padding: 5px 11px; font-size: 13px; font-weight: 500; gap: 8px;
+             border: 1px solid transparent; }
+.hist-chip b { font-weight: 700; font-variant-numeric: tabular-nums; }
+.hist-chip span { color: var(--muted); }
+.hist-chip.active { background: color-mix(in srgb, var(--c) 18%, transparent); border-color: var(--c); }
+.hist-chip.active span { color: var(--text); }

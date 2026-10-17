@@ -271,7 +271,8 @@ async function sensorDetail(e) {
       const pts = await api(`history/${encodeURIComponent(e.id)}?key=${k}&hours=${hours}`);
       const c = h("canvas", { style: { width: "100%", height: "160px" } });
       requestAnimationFrame(() => drawChart(c, pts, k === "humidity" ? "#33a4d8" : "#ff7a45", k === "humidity" ? "%" : "°"));
-      return h("div.card", h("h3", k === "humidity" ? "Humidity" : "Temperature"), c);
+      return h("div.card", h("div.row", h("h3", k === "humidity" ? "Humidity" : "Temperature"), h("div.spacer"),
+        h("a.small", { href: `#/history/${encodeURIComponent(e.id)}:${k}`, onclick: () => s.close() }, "Open in History")), c);
     }));
     body.replaceChildren(
       h("div.seg", [24, 168, 720].map((hr) => h(`button${hr === hours ? ".active" : ""}`,

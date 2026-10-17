@@ -150,8 +150,15 @@ class Library:
         self.scanning = True
         t0 = time.time()
         try:
+            if not any(d and os.path.isdir(d) for d in (self.movies_dir, self.series_dir)):
+                log.warning("library folders not found (%s, %s): is the NAS mounted?",
+                            self.movies_dir, self.series_dir)
+                return self.stats()  # keep the previous index rather than wiping it
             movies = await asyncio.to_thread(scan_movies, self.movies_dir)
             shows, eps = await asyncio.to_thread(scan_series, self.series_dir)
+        except OSError as err:
+            log.warning("library scan failed: %s", err)
+            return self.stats()
         finally:
             self.scanning = False
         db = self.store
@@ -228,7 +235,16 @@ class Library:
 
     def stats(self) -> dict:
         q = self.store.query
+        missing = [n for n, d in (("movies", self.movies_dir), ("series", self.series_dir))
+                   if d and not os.path.isdir(d)]
+        unset = [n for n, d in (("movies", self.movies_dir), ("series", self.series_dir)) if not d]
+        problem = ""
+        if missing:
+            problem = "library folder not found - mount the NAS in Storage"
+        elif unset:
+            problem = f"{' and '.join(unset)} folder not set - choose it in Media settings"
         return {
+            "problem": problem,
             "movies": q("SELECT COUNT(*) n FROM media_lib_movies")[0]["n"],
             "shows": q("SELECT COUNT(*) n FROM media_lib_shows")[0]["n"],
             "episodes": q("SELECT COUNT(*) n FROM media_lib_episodes")[0]["n"],

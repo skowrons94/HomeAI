@@ -5,3 +5,5 @@ config.toml
 data/
 legacy/
 .DS_Store
+config.toml.bak
+config.toml.tmp

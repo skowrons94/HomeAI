@@ -22,13 +22,19 @@ State conventions per ``kind`` (so the UI and HomeKit can render any plugin):
                 remote(key), launch_app(app)
   tv            on, volume, muted, source
                 actions: turn_on, turn_off, remote(key), set_volume(value), set_source(source)
+
+History: every numeric state key of a ``sensor`` (and the climate keys below
+for other kinds) is stored in SQLite rollups; ``attrs["units"]`` maps a key to
+its unit for charts, ``attrs["history"]`` overrides which keys are recorded.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import importlib
 import logging
+import pkgutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,9 +44,15 @@ log = logging.getLogger("hub")
 
 Action = Callable[..., Awaitable[Any]]
 
-# numeric state keys worth keeping a history of (for charts)
+# numeric state keys worth keeping a history of for non-sensor kinds
 HISTORY_KEYS = ("temperature", "humidity", "current_temperature", "target_temperature")
 HISTORY_EVERY = 300  # seconds between stored samples of an unchanged value
+HISTORY_MIN = 30  # never more than one sample per series in this many seconds
+
+# name of the plugin whose code is running: tasks and HomeKit accessories
+# created while it is set belong to that plugin (asyncio tasks inherit it)
+current_plugin: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_plugin", default=None)
 
 
 @dataclass
@@ -77,6 +89,10 @@ class Plugin:
 
     name = ""
     title = ""
+    description = ""
+    icon = "plug"
+    schema: list[dict] = []  # settings form, see CLAUDE.md
+    ui = False  # True: web/plugins/<name>.js adds a custom panel to its settings sheet
 
     def __init__(self, hub: "Hub", config: dict):
         self.hub = hub
@@ -105,16 +121,25 @@ class Plugin:
 
 
 class Hub:
-    def __init__(self, config: dict, root: Path):
+    def __init__(self, cfg, root: Path):
         from .homekit import HomeKit
         from .notify import Notifier
+        from .settings import Config
         from .store import Store
 
-        self.config = config
+        if not isinstance(cfg, Config):  # tests may pass a plain dict
+            c = Config.__new__(Config)
+            c.path, c.data = root / "config.test.toml", cfg
+            c.save = lambda: None
+            cfg = c
+        self.cfg = cfg
+        self.config = cfg.data
+        config = self.config
         self.root = root
         self.data_dir = root / "data"
         self.data_dir.mkdir(exist_ok=True)
         self.store = Store(self.data_dir / "hub.db")
+        self._apply_history_config()
         self.notify = Notifier(self, config.get("notify", {}))
         self.homekit = HomeKit(self, config.get("homekit", {}), self.data_dir)
         self.entities: dict[str, Entity] = {}
@@ -122,6 +147,9 @@ class Hub:
         self.listeners: list[Callable[[Entity], None]] = []
         self._subscribers: set[asyncio.Queue] = set()
         self._tasks: set[asyncio.Task] = set()
+        self._plugin_tasks: dict[str, set[asyncio.Task]] = {}
+        self.restart_requested = False
+        self.shutdown = asyncio.Event()  # set to stop (or restart) the process
         self._history_last: dict[tuple[str, str], tuple[float, Any]] = {}
         self.zeroconf = None  # shared AsyncZeroconf, created in start()
         self.http = None  # shared aiohttp.ClientSession, created in start()
@@ -196,14 +224,15 @@ class Hub:
 
     def _record_history(self, e: Entity) -> None:
         now = time.time()
-        for key in HISTORY_KEYS:
+        keys = e.attrs.get("history") or (e.state if e.kind == "sensor" else HISTORY_KEYS)
+        for key in keys:
             v = e.state.get(key)
             if not isinstance(v, (int, float)) or isinstance(v, bool):
                 continue
             last = self._history_last.get((e.id, key))
             if last and last[1] == v and now - last[0] < HISTORY_EVERY:
                 continue
-            if last and now - last[0] < 60:  # at most one sample a minute
+            if last and now - last[0] < HISTORY_MIN:
                 continue
             self._history_last[(e.id, key)] = (now, v)
             self.store.add_history(e.id, key, v, now)
@@ -229,9 +258,14 @@ class Hub:
     def spawn(self, coro: Awaitable, name: str = "") -> asyncio.Task:
         task = asyncio.ensure_future(coro)
         self._tasks.add(task)
+        owner = current_plugin.get()
+        if owner:
+            self._plugin_tasks.setdefault(owner, set()).add(task)
 
         def done(t: asyncio.Task):
             self._tasks.discard(t)
+            if owner:
+                self._plugin_tasks.get(owner, set()).discard(t)
             if not t.cancelled() and t.exception():
                 log.error("task %s crashed", name or t, exc_info=t.exception())
 
@@ -256,23 +290,106 @@ class Hub:
 
         return self.spawn(loop(), name)
 
-    # -- lifecycle ------------------------------------------------------------
+    # -- plugins ------------------------------------------------------------------
 
-    def _load_plugins(self) -> None:
-        for name, cfg in (self.config.get("plugins") or {}).items():
-            cfg = cfg if isinstance(cfg, dict) else {}
-            if cfg.get("enabled", True) is False:
-                continue
+    @staticmethod
+    def plugin_class(name: str) -> type[Plugin]:
+        mod = importlib.import_module(f"hub.plugins.{name}")
+        cls = getattr(mod, "PLUGIN", None)
+        if cls is None:
+            raise ImportError(f"plugin {name} has no PLUGIN class")
+        return cls
+
+    def catalog(self) -> list[dict]:
+        """Every plugin that ships with the hub, enabled or not."""
+        from . import plugins
+
+        names = {m.name for m in pkgutil.iter_modules(plugins.__path__)}
+        names |= set(self.config.get("plugins") or {}) | set(self.plugins)
+        out = []
+        for name in names:
+            info = {"name": name, "title": name.title(), "description": "", "icon": "plug",
+                    "schema": [], "enabled": self.cfg.plugin_enabled(name)}
             try:
-                mod = importlib.import_module(f"hub.plugins.{name}")
-            except ImportError as err:
-                log.error("plugin %s can't be loaded: %s", name, err)
-                continue
-            cls = getattr(mod, "PLUGIN", None)
-            if cls is None:
-                log.error("plugin %s has no PLUGIN class", name)
-                continue
-            self.plugins[name] = cls(self, cfg)
+                cls = self.plugin_class(name)
+                info.update(title=cls.title or name.title(), description=cls.description,
+                            icon=cls.icon, schema=cls.schema, ui=cls.ui)
+            except Exception as err:  # missing optional dependency etc.
+                info["error"] = f"can't be loaded: {err}"
+            out.append(info)
+        return sorted(out, key=lambda i: i["title"].lower())
+
+    async def _start_plugin(self, p: Plugin) -> None:
+        current_plugin.set(p.name)  # runs in its own task: doesn't leak to the caller
+        try:
+            await asyncio.wait_for(p.start(), 60)
+            log.info("plugin %s started", p.name)
+        except Exception as err:
+            p.error = str(err) or type(err).__name__
+            log.error("plugin %s failed to start: %s", p.name, p.error,
+                      exc_info=not isinstance(err, (asyncio.TimeoutError, OSError)))
+
+    async def start_plugin(self, name: str) -> Plugin | None:
+        """(Re)start one plugin with its current config."""
+        await self.stop_plugin(name)
+        if not self.cfg.plugin_enabled(name):
+            return None
+        try:
+            p = self.plugin_class(name)(self, self.cfg.plugin(name))
+        except Exception as err:
+            log.error("plugin %s can't be loaded: %s", name, err)
+            return None
+        self.plugins[name] = p
+        await asyncio.ensure_future(self._start_plugin(p))
+        self.publish("plugins", None)
+        return p
+
+    async def stop_plugin(self, name: str, forget_homekit: bool = False) -> None:
+        """Stop a plugin, cancel its tasks and drop its entities. HomeKit
+        accessories stay (they follow entities by id) unless ``forget_homekit``."""
+        p = self.plugins.pop(name, None)
+        if p is None:
+            return
+        try:
+            await asyncio.wait_for(p.stop(), 10)
+        except Exception:
+            log.exception("plugin %s stop failed", name)
+        for t in self._plugin_tasks.pop(name, set()):
+            t.cancel()
+        for eid in [e.id for e in self.entities.values() if e.plugin == name]:
+            self.remove_entity(eid)
+        if forget_homekit:
+            self.homekit.remove_owned(name)
+        log.info("plugin %s stopped", name)
+        self.publish("plugins", None)
+
+    def _apply_history_config(self) -> None:
+        from .store import ROLLUPS
+
+        h = self.config.get("history", {})
+        for (table, _, default), key in zip(ROLLUPS, ("detail_days", "medium_days", "long_days")):
+            self.store.retention[table] = float(h.get(key, default))
+
+    async def apply_core(self, section: str) -> None:
+        """Apply a core settings section that doesn't need a restart."""
+        from .notify import Notifier
+
+        if section == "notify":
+            self.notify = Notifier(self, self.config.get("notify", {}))
+        elif section == "history":
+            self._apply_history_config()
+
+    @property
+    def onboarded(self) -> bool:
+        """False until the first-run guided setup is finished. Installs that
+        already had plugins configured before it existed count as done."""
+        done = self.store.get("onboarding.done")
+        if done is None:
+            done = bool(self.config.get("plugins"))
+            self.store.set("onboarding.done", done)
+        return done
+
+    # -- lifecycle ------------------------------------------------------------
 
     async def start(self) -> None:
         import aiohttp
@@ -283,27 +400,20 @@ class Hub:
             headers={"User-Agent": "Mozilla/5.0 (X11; Linux aarch64) Casa/1.0"},
         )
         self.zeroconf = AsyncZeroconf()
-        self._load_plugins()
-
-        async def start_one(p: Plugin):
+        for name in (self.config.get("plugins") or {}):
+            if not self.cfg.plugin_enabled(name):
+                continue
             try:
-                await asyncio.wait_for(p.start(), 60)
-                log.info("plugin %s started", p.name)
+                self.plugins[name] = self.plugin_class(name)(self, self.cfg.plugin(name))
             except Exception as err:
-                p.error = str(err) or type(err).__name__
-                log.error("plugin %s failed to start: %s", p.name, p.error,
-                          exc_info=not isinstance(err, (asyncio.TimeoutError, OSError)))
-
-        await asyncio.gather(*(start_one(p) for p in self.plugins.values()))
+                log.error("plugin %s can't be loaded: %s", name, err)
+        await asyncio.gather(*(self._start_plugin(p) for p in self.plugins.values()))
         await self.homekit.start()
 
     async def stop(self) -> None:
         await self.homekit.stop()
-        for p in self.plugins.values():
-            try:
-                await asyncio.wait_for(p.stop(), 10)
-            except Exception:
-                log.exception("plugin %s stop failed", p.name)
+        for name in list(self.plugins):
+            await self.stop_plugin(name)
         for t in list(self._tasks):
             t.cancel()
         if self.zeroconf:

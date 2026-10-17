@@ -5,9 +5,10 @@
 #   ./deploy/install-pi.sh
 #
 # What it does (idempotent, safe to re-run):
-#   1. apt: python venv, BlueZ, Transmission, cifs-utils
+#   1. apt: python venv, BlueZ, Transmission, cifs-utils, smbclient
 #   2. Python venv + requirements
-#   3. NAS mount at /mnt/nas (QNAP "Multimedia" share, SMB) via /etc/fstab
+#   3. NAS: root mount helper (lets the app mount/unmount NAS shares) and, unless
+#      NAS_FSTAB=0, a boot-time /etc/fstab mount of the default share at /mnt/nas
 #   4. Transmission: RPC on localhost only, downloads on the NAS
 #   5. systemd service "casa" (starts at boot, restarts on failure)
 set -euo pipefail
@@ -22,7 +23,7 @@ say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 
 say "Installing system packages"
 sudo apt-get update -qq
-sudo apt-get install -y -qq python3-venv python3-dev bluez transmission-daemon cifs-utils \
+sudo apt-get install -y -qq python3-venv python3-dev bluez transmission-daemon cifs-utils smbclient \
   libffi-dev libssl-dev
 
 say "Creating Python environment"
@@ -32,7 +33,20 @@ python3 -m venv "$DIR/.venv"
 # Bluetooth (Govee) through BlueZ/D-Bus needs the bluetooth group
 sudo usermod -aG bluetooth "$USER_NAME"
 
+say "NAS mount helper (casa-mount + sudoers rule)"
+sudo install -m 755 -o root -g root "$DIR/deploy/casa-mount" /usr/local/sbin/casa-mount
+SUDOERS_TMP="$(mktemp)"
+echo "$USER_NAME ALL=(root) NOPASSWD: /usr/local/sbin/casa-mount" > "$SUDOERS_TMP"
+if sudo visudo -cf "$SUDOERS_TMP" >/dev/null; then
+  sudo install -m 440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/casa-mount
+else
+  echo "!! sudoers rule invalid, not installed"
+fi
+rm -f "$SUDOERS_TMP"
+
 say "NAS mount ($NAS_HOST/$NAS_SHARE -> $MOUNT)"
+# NAS_FSTAB=0 skips this: configure the NAS in the app (Settings > Storage & NAS) instead.
+if [ "${NAS_FSTAB:-1}" = 1 ]; then
 CRED=/etc/casa-nas.cred
 if [ ! -f "$CRED" ]; then
   read -rp "NAS username (empty = guest): " NAS_USER
@@ -57,6 +71,10 @@ ls "$MOUNT" >/dev/null && echo "NAS mounted: $(ls "$MOUNT" | tr '\n' ' ')" \
   || echo "!! NAS not mounted yet - check $CRED and the share name, then: sudo mount $MOUNT"
 sudo usermod -aG debian-transmission "$USER_NAME"
 mkdir -p "$MOUNT/downloads/incomplete" 2>/dev/null || true
+else
+  sudo usermod -aG debian-transmission "$USER_NAME"
+  sudo mkdir -p "$MOUNT"
+fi
 
 say "Configuring Transmission"
 sudo systemctl stop transmission-daemon

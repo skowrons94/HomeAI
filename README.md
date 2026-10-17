@@ -7,18 +7,29 @@ One lightweight Python process (aiohttp + HAP-python, ~60 MB RAM) that:
 - finds and downloads **films and series** (Italian first, then English) into the NAS library, with a
   watchlist that notifies you when something you want shows up
 - lists **everything it sees on the network**
+- records the history of every sensor and charts it
 
-Everything is a plugin; enable one by adding its `[plugins.<name>]` section to `config.toml`.
+Everything is configured from the web app. On first launch a **Welcome wizard** guides you through
+your home name and rooms, network discovery (it suggests integrations for the devices it finds),
+each integration's keys and accounts (with links to get them), notifications and Apple Home pairing.
+Any integration can be changed later in Settings; changes apply live, with no restart. *Run setup
+again* in Settings re-opens the wizard.
+
+`config.toml` is still a plain file. The app writes it and keeps a `config.toml.bak` backup.
+`config.example.toml` documents every option.
 
 | Plugin | Talks to | What you get |
 |---|---|---|
 | `ariston` | Ariston NET cloud | Heating zones + hot water (web + HomeKit thermostats) |
-| `govee` | Bluetooth LE (Pi's built-in radio) | Temperature/humidity/battery of Govee H5075-type sensors, history charts, HomeKit sensors |
+| `bluetooth` | Bluetooth LE (Pi's built-in radio) | Sensors from Govee, Xiaomi (pvvx/ATC firmware), BTHome, SwitchBot, Qingping and Inkbird. Nearby list with Add/Ignore in Settings |
 | `kef` | KEF LSX, TCP 50001 | Power, volume, mute, source, play/pause/skip |
 | `appletv` | Apple TV (pyatv) | Now playing with artwork, remote, power, launch Infuse |
 | `hisense` | Hisense VIDAA TV | Power on (Wake-on-LAN), on/off state; remote keys experimental |
 | `dirigera` | IKEA DIRIGERA hub (local API) | Lamps (on/off, dim, colour temperature), outlets, sensors — live |
 | `network` | mDNS + ARP | Every device on the LAN, what it is, which plugin fits |
+| `system` | This hub | CPU, temperature, memory, disk, network download/upload, Wi-Fi signal, internet latency — recorded in History |
+| `storage` | NAS via mDNS | Find the NAS, list its shares, mount it from the app, suggest library folders, free-space sensors |
+| `recipes` | GialloZafferano, TheMealDB, any recipe URL | Search or import recipes (stored locally, with images); favourites, notes, your own edits (with reset); shopping list with substitutions; calories per serving and a daily log against a goal |
 | `media` | TMDB / Cinemeta, Torrentio, Knaben, TPB, EZTV (+ YTS, ilCorSaRoNeRo, 1337x via proxy/VPN), Transmission, NAS | Discover, search, one-click download, watchlist + notifications, library on the NAS |
 
 ## Layout
@@ -26,7 +37,9 @@ Everything is a plugin; enable one by adding its `[plugins.<name>]` section to `
 ```
 hub/            core: entities, plugins, event bus, SQLite store, HomeKit bridge, web API
 hub/plugins/    one file (or package) per integration
+hub/settings.py config.toml read/write and the per-plugin settings schema
 web/            the web app (plain ES modules, no build step)
+web/plugins/    custom settings panels (Bluetooth nearby list, NAS mounting, …)
 deploy/         Raspberry Pi installer, VPN script, macOS launchd installer
 tests/          python tests/test_*.py
 data/           runtime state: hub.db, HomeKit pairing (keep it to keep your Home setup)
@@ -41,7 +54,7 @@ cd ~/Desktop/home
 ./deploy/install-mac.sh            # or: run in the background at login
 ```
 
-Bluetooth (Govee) doesn't work from a terminal on macOS without granting it Bluetooth access; on
+Bluetooth doesn't work from a terminal on macOS until the terminal is granted Bluetooth access; on
 the Pi it works out of the box.
 
 ## Install on the Raspberry Pi 4
@@ -52,13 +65,28 @@ Raspberry Pi OS Lite 64-bit (Bookworm). Copy this folder to the Pi (e.g. `~/casa
 cd ~/casa && ./deploy/install-pi.sh
 ```
 
-This installs Python deps, BlueZ and Transmission, mounts the NAS `Multimedia` share at
-`/mnt/nas` (asks for the NAS user), points Transmission's downloads at the NAS and installs the
-`casa` systemd service. Open `http://<pi-ip>:8080`.
+This installs Python deps, BlueZ and Transmission, and the `casa-mount` helper, which lets the app
+mount the NAS. The helper is root-owned, and a sudo rule allows only that helper. The installer also
+points Transmission's downloads at the NAS and installs the `casa` systemd service. By default it adds
+a boot-time mount of the NAS `Multimedia` share at `/mnt/nas` (it asks for the NAS user). To manage
+the NAS only from the app, skip that mount: `NAS_FSTAB=0 ./deploy/install-pi.sh`.
+
+Open `http://<pi-ip>:8080`.
 
 **Moving the HomeKit bridge from the Mac to the Pi** without re-pairing: stop Casa on the Mac
 (`launchctl unload ~/Library/LaunchAgents/com.casa.hub.plist`) and copy the whole `data/` folder
 to the Pi *before* starting it there. Only one copy may run at a time.
+
+## History
+
+Every sensor value is recorded in SQLite, using Graphite-style rollups: 1-minute detail for 2 days,
+5-minute for 30 days and hourly for 2 years, each with min/max. Retention is editable in
+Settings → History.
+
+We benchmarked it against Graphite's Whisper format. Reads are in the same speed class (under 5 ms for
+any range), there is no extra daemon, and min/max are included.
+
+The History page lets you pick up to 4 values and view them over 24h, 7d, 30d, 1y or a custom range.
 
 ## Media: films and series
 
@@ -71,6 +99,9 @@ to the Pi *before* starting it there. Only one copy may run at a time.
 - **When it finishes** the file is moved into the library with the same naming you already use:
   `movies/Title (Year)/…` and `series/Show/Season N/Show - S01E02 - Title.mkv`. Infuse on the
   Apple TV sees it straight away.
+- **Folders**: the download, movie and series folders are set in Settings → Media with a folder
+  browser. Storage & NAS can mount the NAS and fill them in for you. Transmission's download folder
+  is updated automatically.
 - **Watchlist (♥)**: favourite a film or series. Casa checks the trackers every few hours and
   notifies you when a release appears (or a new episode airs). With *auto-download* on it also
   downloads it. If only an English release exists it waits `italian_grace_days` for an Italian one.
@@ -98,8 +129,9 @@ Some trackers (YTS, ilCorSaRoNeRo, 1337x) are blocked by the ISP's DNS. Two ways
 - **IKEA DIRIGERA**: power it on, Settings → IKEA DIRIGERA → Set up, press the action button on the
   bottom of the hub when asked. Lamps stay out of HomeKit by default (`homekit = false`), because
   DIRIGERA can join Apple Home itself via Matter.
-- **Govee**: sensors appear by themselves within a minute of the Pi hearing them. Rename them and
-  assign rooms with the ⋯ button on a tile.
+- **Bluetooth sensors**: nearby sensors appear in Settings → Bluetooth sensors, where you add or
+  ignore them. Rename them and assign rooms with the ⋯ button on a tile. On macOS the terminal needs
+  Bluetooth access; the Pi works out of the box.
 - **Hisense**: power on uses Wake-on-LAN; enable *Wake on LAN/Wi-Fi* in the TV's network settings.
   The TV is already in Apple Home natively (HomeKit + AirPlay).
 - **Notifications on the phone**: install the free *ntfy* app, subscribe to a topic with a
@@ -113,6 +145,12 @@ from ..core import Entity, Plugin
 
 class MyPlugin(Plugin):
     name = "myplug"
+    title = "My plugin"
+    description = "Controls the lamp"
+    icon = "plug"                     # a name from the icons in web/app.js
+    schema = [                        # the Settings form (and the Welcome wizard) is built from this
+        {"key": "host", "label": "Host", "type": "text", "default": ""},
+    ]
 
     async def start(self):
         self.hub.add_entity(Entity(id="myplug.lamp", name="Lamp", kind="light",
@@ -128,5 +166,9 @@ class MyPlugin(Plugin):
 PLUGIN = MyPlugin
 ```
 
-The UI renders any entity from its `kind` (see the docstring in `hub/core.py` for the state keys
-of each kind), so most plugins need no UI code.
+Once it has `title`, `description`, `icon` and `schema`, the plugin shows up in Settings and in the
+Welcome wizard automatically. The UI renders any entity from its `kind` (see the docstring in
+`hub/core.py` for the state keys of each kind), so most plugins need no UI code.
+
+For the full plugin contract (field types, `required` and `link` fields, custom settings panels,
+pairing steps) see `CLAUDE.md`.

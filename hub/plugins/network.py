@@ -113,6 +113,11 @@ def classify(dev: dict) -> tuple[str, str]:
 class NetworkPlugin(Plugin):
     name = "network"
     title = "Network"
+    description = "Discovers devices on the LAN via mDNS and the ARP table"
+    icon = "network"
+    schema = [
+        {"key": "arp", "label": "Include ARP table", "type": "bool", "default": True, "help": "Also list hosts that do not speak mDNS"},
+    ]
 
     def __init__(self, hub, config):
         super().__init__(hub, config)

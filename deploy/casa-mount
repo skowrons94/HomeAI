@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Root helper for Casa: mount / unmount an SMB share under /mnt or /media.
+# Installed to /usr/local/sbin/casa-mount; the casa user may run it via sudo (no password).
+#
+#   casa-mount mount <host> <share> <mountpoint> <vers>   (username, then password, on stdin)
+#   casa-mount umount <mountpoint>
+#
+# Arguments are validated strictly: this script is the only thing sudo lets the app do.
+set -euo pipefail
+umask 077
+die() { echo "casa-mount: $*" >&2; exit 2; }
+[ "$(id -u)" = 0 ] || die "must run as root"
+
+check_mp() {
+  local mp="$1"
+  # one level directly under root-owned /mnt or /media: nested paths could run
+  # through a symlink the (unprivileged) caller created inside a mounted share
+  [[ "$mp" =~ ^/(mnt|media)/[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]] \
+    || die "mount point must be /mnt/<name> or /media/<name>"
+  [ ! -L "$mp" ] || die "mount point is a symlink"
+}
+
+case "${1:-}" in
+mount)
+  [ $# -eq 5 ] || die "usage: mount <host> <share> <mountpoint> <vers>"
+  host="$2"; share="$3"; mp="$4"; vers="$5"
+  [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,251}$ ]] || die "invalid host"
+  [[ "$share" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._\$-]{0,79}$ ]] || die "invalid share"
+  [[ "$vers" =~ ^(auto|1\.0|2\.0|2\.1|3\.0|3\.1\.1)$ ]] || die "invalid SMB version"
+  check_mp "$mp"
+  IFS= read -r user || user=""
+  IFS= read -r pass || pass=""
+  [[ "$user" =~ ^[^[:cntrl:]:/\\]{0,64}$ ]] || die "invalid username"
+  [[ "$pass" != *[[:cntrl:]]* && ${#pass} -le 128 ]] || die "invalid password"
+  mountpoint -q "$mp" && { echo "already mounted"; exit 0; }
+  mkdir -p "$mp"
+  caller_uid="${SUDO_UID:-0}"
+  grp="$(getent group debian-transmission | cut -d: -f3 || true)"
+  grp="${grp:-${SUDO_GID:-0}}"
+  opts="uid=$caller_uid,gid=$grp,file_mode=0775,dir_mode=0775,iocharset=utf8"
+  [ "$vers" = auto ] || opts="$opts,vers=$vers"
+  if [ -n "$user" ]; then
+    credfile="$(mktemp /run/casa-mount.XXXXXX)"
+    trap 'rm -f "$credfile"' EXIT
+    printf 'username=%s\npassword=%s\n' "$user" "$pass" > "$credfile"
+    opts="$opts,credentials=$credfile"
+  else
+    opts="$opts,guest"
+  fi
+  mount -t cifs "//$host/$share" "$mp" -o "$opts"
+  ;;
+umount)
+  [ $# -eq 2 ] || die "usage: umount <mountpoint>"
+  mp="$2"
+  check_mp "$mp"
+  mountpoint -q "$mp" || exit 0
+  [ "$(findmnt -no FSTYPE "$mp")" = cifs ] || die "not a cifs mount"
+  umount "$mp"
+  ;;
+*) die "usage: mount|umount ..." ;;
+esac

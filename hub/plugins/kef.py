@@ -106,6 +106,16 @@ class KefClient:
 class KefPlugin(Plugin):
     name = "kef"
     title = "KEF"
+    description = "KEF LSX / LS50 Wireless speaker: volume, source and standby"
+    icon = "speaker"
+    schema = [
+        {"key": "host", "label": "IP address", "type": "text", "required": True, "placeholder": "192.168.1.43", "help": "Speaker address on the LAN"},
+        {"key": "name", "label": "Name", "type": "text", "default": "KEF LSX"},
+        {"key": "room", "label": "Room", "type": "text"},
+        {"key": "poll_interval", "label": "Poll interval", "type": "number", "default": 10, "unit": "s", "advanced": True},
+        {"key": "id", "label": "Entity id", "type": "text", "default": "speaker", "advanced": True},
+        {"key": "model", "label": "Model", "type": "text", "default": "LSX", "advanced": True},
+    ]
 
     def __init__(self, hub, config):
         super().__init__(hub, config)

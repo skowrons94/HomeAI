@@ -78,6 +78,12 @@ def eid_for(device_id: str) -> str:
 class DirigeraPlugin(Plugin):
     name = "dirigera"
     title = "IKEA DIRIGERA"
+    description = "IKEA DIRIGERA hub: lights, outlets and sensors over the local API"
+    icon = "bulb"
+    schema = [
+        {"key": "host", "label": "IP address", "type": "text", "help": "Empty = find it with mDNS"},
+        {"key": "homekit", "label": "Expose to Apple Home", "type": "bool", "default": False, "help": "DIRIGERA can join Apple Home itself via Matter"},
+    ]
 
     def __init__(self, hub, config):
         super().__init__(hub, config)

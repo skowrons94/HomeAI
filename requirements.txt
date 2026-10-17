@@ -5,3 +5,5 @@ bleak>=0.22
 pyatv>=0.16
 paho-mqtt>=2.0
 aiohttp-socks>=0.9
+psutil>=5.9
+tomli-w>=1.0

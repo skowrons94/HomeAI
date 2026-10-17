@@ -41,6 +41,14 @@ PAIR_ORDER = ("AirPlay", "Companion")
 class AppleTVPlugin(Plugin):
     name = "appletv"
     title = "Apple TV"
+    description = "Apple TV: now playing, remote control, power and app launch"
+    icon = "appletv"
+    schema = [
+        {"key": "host", "label": "IP address", "type": "text", "advanced": True, "help": "Optional, speeds up connecting"},
+        {"key": "identifier", "label": "Device identifier", "type": "text", "advanced": True, "help": "Set by pairing"},
+        {"key": "name", "label": "Name", "type": "text", "default": "Apple TV"},
+        {"key": "room", "label": "Room", "type": "text"},
+    ]
 
     def __init__(self, hub, config):
         super().__init__(hub, config)

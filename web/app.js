@@ -94,6 +94,13 @@ const ICONS = {
   link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.8 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   trash: '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  chart: '<path d="M3 3v18h18M7 15l4-4 3 3 6-6"/>',
+  utensils: '<path d="M4 2v7a3 3 0 0 0 6 0V2M7 2v20M17 22V2c-2 1.5-3 4-3 7v4h3"/>',
+  cart: '<circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h3l2.7 12.4a1 1 0 0 0 1 .8h9.6a1 1 0 0 0 1-.8L21 7H6"/>',
+  bluetooth: '<path d="m7 7 10 10-5 5V2l5 5L7 17"/>',
+  cpu: '<rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>',
+  storage: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  flag: '<path d="M4 22V4s1.5-1 5-1 5 2 8 2 3-1 3-1v11s-1 1-3 1-5-2-8-2-5 1-5 1"/>',
   homekit: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><rect x="9" y="11" width="6" height="6" rx="1"/>',
 };
 
@@ -173,7 +180,7 @@ export async function refreshState() {
   const s = await api("state");
   store.entities = new Map(s.entities.map((e) => [e.id, e]));
   Object.assign(store, { plugins: s.plugins, homekit: s.homekit, rooms: s.rooms, unread: s.unread,
-                         name: s.name, notify_channels: s.notify_channels });
+                         name: s.name, notify_channels: s.notify_channels, onboarding: s.onboarding });
   document.title = s.name;
   updateBadge();
   bus.dispatchEvent(new CustomEvent("state", { detail: s }));
@@ -238,8 +245,11 @@ function showLogin() {
 const PAGES = [
   { id: "home", title: "Home", icon: "home" },
   { id: "media", title: "Media", icon: "film" },
+  { id: "recipes", title: "Recipes", icon: "utensils" },
+  { id: "history", title: "History", icon: "chart" },
   { id: "network", title: "Network", icon: "network" },
   { id: "settings", title: "Settings", icon: "settings" },
+  { id: "welcome", title: "Welcome", icon: "home", hidden: true },  // first-run setup
 ];
 const loaded = {};
 let cleanup = null;
@@ -267,7 +277,7 @@ export const go = (hash) => { location.hash = hash; };
 function shell() {
   const nav = h("nav.side",
     h("div.brand", "Casa"),
-    PAGES.map((p) => h("a.tab", { href: `#/${p.id}`, "data-id": p.id }, icon(p.icon), h("span", p.title))),
+    PAGES.filter((p) => !p.hidden).map((p) => h("a.tab", { href: `#/${p.id}`, "data-id": p.id }, icon(p.icon), h("span", p.title))),
     h("div.spacer"),
     h("a.tab", { href: "javascript:void 0", onclick: openNotifications },
       icon("bell"), h("span", "Alerts"), h("span.dot.hidden", { "data-unread": "" })));
@@ -279,6 +289,8 @@ async function boot() {
   try { await refreshState(); } catch (e) { if (e.message !== "login required") toast(e.message, true); return; }
   if (!location.search.includes("static")) connectEvents();  // ?static: no live updates (screenshots)
   window.addEventListener("hashchange", render);
+  // first run: guided setup (skippable; Settings can start it again)
+  if (store.onboarding && !location.hash) location.hash = "#/welcome";
   render();
 }
 

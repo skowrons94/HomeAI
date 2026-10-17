@@ -1,5 +1,7 @@
-# Casa home hub configuration. Copy to config.toml and edit; restart the hub after changes.
-# Every [plugins.<name>] table enables that plugin; add `enabled = false` to switch one off.
+# Casa home hub configuration - a reference of every option.
+# You don't need to edit this: on first launch the web app's Welcome wizard creates
+# config.toml, and everything is editable later in Settings (changes apply live).
+# Every [plugins.<name>] table enables that plugin; `enabled = false` switches one off.
 name = "Casa"
 rooms = ["Soggiorno", "Cucina", "Camera", "Bagno", "Studio"]
 
@@ -34,12 +36,13 @@ name = "KEF LSX"
 room = "Soggiorno"
 # poll_interval = 10
 
-# Govee Bluetooth thermo-hygrometers. Sensors are added when first heard.
-[plugins.govee]
+# Bluetooth LE sensors (Govee, Xiaomi pvvx/ATC, BTHome, SwitchBot, Qingping, Inkbird...).
+# Recognised sensors are added when first heard; manage them in Settings > Bluetooth.
+[plugins.bluetooth]
 auto_add = true
 homekit = true
+stale_minutes = 30
 # adapter = "hci0"
-# sensors = { "A4:C1:38:12:34:56" = { name = "Bagno", room = "Bagno" } }
 
 # Apple TV: pair from the web UI (Settings → Apple TV), a PIN shows on the TV.
 [plugins.appletv]
@@ -66,6 +69,29 @@ homekit = false              # DIRIGERA can join Apple Home itself via Matter
 # Everything the hub sees on the network (mDNS + ARP).
 [plugins.network]
 arp = true
+
+# CPU, memory, disk, network traffic, Wi-Fi signal and internet latency of the hub.
+[plugins.system]
+interval = 15
+
+# Recipes: search GialloZafferano / TheMealDB or import any recipe URL; saved locally.
+[plugins.recipes]
+daily_kcal_goal = 2000
+default_servings = 2
+language = "it"
+# sources = ["giallozafferano", "themealdb"]
+
+# NAS: discovered and mounted from Settings > Storage & NAS.
+[plugins.storage]
+auto_mount = true
+
+[plugins.storage.nas]
+host = "NAS.local"
+share = "Multimedia"
+mount_point = "/mnt/nas"
+version = "2.0"               # old QNAP firmware; "auto" for recent NAS
+# username = ""
+# password = ""
 
 [plugins.media]
 # Movie/series metadata. Free key: themoviedb.org -> Settings -> API (v3 key or v4 token).

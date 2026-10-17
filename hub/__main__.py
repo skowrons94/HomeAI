@@ -5,39 +5,42 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
-import tomllib
 from pathlib import Path
 
 from .core import Hub
+from .settings import Config
 from .web import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def load_config(path: Path) -> dict:
+def load_config(path: Path) -> Config:
     if not path.exists():
-        sys.exit(f"Missing {path}. Copy config.example.toml to config.toml and edit it.")
-    with path.open("rb") as f:
-        return tomllib.load(f)
+        # a fresh install starts empty: the web app's Welcome wizard sets it up
+        path.write_text('name = "Casa"\n\n[web]\nport = 8080\n\n[homekit]\nname = "Casa"\n')
+        path.chmod(0o600)
+    return Config(path)
 
 
-async def run(cfg: dict) -> None:
+async def run(cfg: Config) -> bool:
+    """Run until stopped; True if a restart was requested from the app."""
     hub = Hub(cfg, ROOT)
     await hub.start()
-    web = WebServer(hub, cfg.get("web", {}), ROOT / "web")
+    web = WebServer(hub, cfg.data.get("web", {}), ROOT / "web")
     await web.start()
 
-    stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-    await stop.wait()
+        loop.add_signal_handler(sig, hub.shutdown.set)
+    await hub.shutdown.wait()
 
-    logging.getLogger("hub").info("shutting down")
+    logging.getLogger("hub").info("restarting" if hub.restart_requested else "shutting down")
     await web.stop()
     await hub.stop()
+    return hub.restart_requested
 
 
 def main() -> None:
@@ -55,7 +58,9 @@ def main() -> None:
     for name in ("pyhap.hap_protocol", "pyhap.hap_handler", "aiohttp.access", "bleak"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    asyncio.run(run(load_config(args.config)))
+    if asyncio.run(run(load_config(args.config))):
+        os.chdir(ROOT)
+        os.execv(sys.executable, [sys.executable, "-m", "hub", *sys.argv[1:]])
 
 
 if __name__ == "__main__":

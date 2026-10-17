@@ -44,6 +44,7 @@ class HomeKit:
         self.driver: AccessoryDriver | None = None
         self.bridge: Bridge | None = None
         self.uids: set[str] = set()
+        self.owners: dict[str, str] = {}  # uid -> plugin that registered it
 
     # -- registration -------------------------------------------------------------
 
@@ -60,7 +61,11 @@ class HomeKit:
         added live and the Home app is told the bridge changed."""
         if not self.enabled or uid in self.uids:
             return
+        from .core import current_plugin
+
         self.uids.add(uid)
+        if current_plugin.get():
+            self.owners[uid] = current_plugin.get()
         if self.driver is None:
             self.pending.append((uid, factory))
             return
@@ -75,6 +80,31 @@ class HomeKit:
             log.warning("no generic HomeKit mapping for %s (%s)", entity.id, entity.kind)
             return
         self.add(uid or entity.id, lambda driver: maker(driver, self.hub, entity.id))
+
+    def remove(self, uid: str) -> None:
+        """Take one accessory off the bridge (its AID stays reserved)."""
+        if uid in self.uids:
+            self._detach([uid])
+
+    def remove_owned(self, plugin: str) -> None:
+        """Take a disabled plugin's accessories off the bridge. Their AIDs stay
+        reserved, so re-enabling the plugin restores rooms and automations."""
+        uids = [u for u, owner in self.owners.items() if owner == plugin]
+        if uids:
+            self._detach(uids)
+
+    def _detach(self, uids: list[str]) -> None:
+        for uid in uids:
+            self.uids.discard(uid)
+            self.owners.pop(uid, None)
+            self.pending = [p for p in self.pending if p[0] != uid]
+            if self.bridge is not None:
+                acc = self.bridge.accessories.pop(self.aids.get(uid), None)
+                if acc is not None:
+                    self.hub.listeners[:] = [cb for cb in self.hub.listeners
+                                             if getattr(cb, "__self__", None) is not acc]
+        if self.driver is not None:
+            self.driver.config_changed()
 
     def _attach(self, uid: str, factory: Factory) -> None:
         try:

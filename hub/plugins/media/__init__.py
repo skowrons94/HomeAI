@@ -45,9 +45,58 @@ def _json(data, status=200):
     return web.json_response(data, status=status, dumps=lambda o: json.dumps(o, default=str))
 
 
+def _f(key, label, type_="text", **kw):
+    return {"key": key, "label": label, "type": type_, **kw}
+
+
+SCHEMA = [
+    _f("tmdb_api_key", "TMDB API key", "password",
+       help="Optional but recommended: Italian titles and posters. Empty = Cinemeta (English).",
+       link={"url": "https://www.themoviedb.org/settings/api", "label": "Get a free TMDB key"}),
+    _f("language", "Metadata language", default="it-IT", placeholder="it-IT",
+       help="Language of titles and descriptions (TMDB code)."),
+    _f("languages", "Audio languages", "list", default=["it", "en"],
+       help="In priority order: Italian first, then English."),
+    _f("quality", "Preferred quality", "select", default="1080p",
+       options=["720p", "1080p", "2160p"]),
+    _f("allow_4k", "Accept 4K", "bool", default=True, help="Also take 2160p releases."),
+    _f("max_movie_gb", "Max movie size", "number", default=20, min=1, max=200, unit="GB"),
+    _f("max_episode_gb", "Max episode size", "number", default=4, min=0.2, max=50, step=0.1,
+       unit="GB"),
+    _f("download_dir", "Download folder", "path", required=True,
+       placeholder="/mnt/nas/downloads/incomplete",
+       help="Where Transmission writes. Its user (debian-transmission) must be able to write there."),
+    _f("movies_dir", "Movies library", "path", required=True, placeholder="/mnt/nas/movies",
+       help="Finished movies are moved here. Use Storage & NAS to find it."),
+    _f("series_dir", "Series library", "path", required=True, placeholder="/mnt/nas/series",
+       help="Finished episodes go to Show/Season N/."),
+    _f("post_process", "When a download finishes", "select", default="move",
+       options=["move", "copy", "none"],
+       help="move: into the library. copy: keep seeding the original. none: leave it."),
+    _f("seed_ratio", "Seed ratio", "number", default=0, min=0, max=20, step=0.1,
+       help="With 'copy': seed until this ratio."),
+    _f("auto_download", "Auto-download favourites", "bool", default=False,
+       help="Default for new favourites: fetch new episodes automatically."),
+    _f("italian_grace_days", "Wait for Italian", "number", default=3, min=0, max=30, unit="days",
+       help="Wait this long for an Italian release before taking English."),
+    _f("indexers", "Indexers", "list", advanced=True,
+       help="Empty = all: torrentio, knaben, apibay, eztv, yts, ilcorsaronero, 1337x."),
+    _f("transmission.url", "Transmission RPC URL", advanced=True,
+       default="http://127.0.0.1:9091/transmission/rpc"),
+    _f("transmission.username", "Transmission user", advanced=True),
+    _f("transmission.password", "Transmission password", "password", advanced=True),
+    _f("proxy.url", "Proxy / VPN", advanced=True, placeholder="socks5h://user:pass@host:1080",
+       help="For DNS-blocked trackers. socks5h resolves DNS on the proxy; http://host:3128 also works. "
+            "Point it at your VPN's proxy."),
+]
+
+
 class MediaPlugin(Plugin):
     name = "media"
     title = "Media"
+    description = "Movies and series: discover, search Italian-first, download, keep your library."
+    icon = "film"
+    schema = SCHEMA
 
     def __init__(self, hub, config):
         super().__init__(hub, config)
@@ -71,11 +120,21 @@ class MediaPlugin(Plugin):
         await self.indexers.open()  # raises with a clear message if the proxy can't work
         await self.transmission.open()
         hub = self.hub
+        if self.config.get("download_dir"):
+            hub.spawn(self._sync_download_dir(self.config["download_dir"]), "transmission dir")
         hub.spawn(self.indexers.probe(), "indexer probe")
         hub.every(3600, self.indexers.probe, "indexer probe")
         hub.every(10, self.downloads.poll, "transmission poll", initial_delay=3)
         hub.every(6 * 3600, self._scan, "library scan", initial_delay=5)
         hub.every(15 * 60, self.watcher.tick, "watchlist", initial_delay=90)
+
+    async def _sync_download_dir(self, path: str):
+        """Best effort: make Transmission's default download folder match our setting."""
+        try:
+            if await self.transmission.set_download_dir(path):
+                self.log.info("Transmission download folder set to %s", path)
+        except Exception as err:
+            self.log.warning("could not set Transmission download folder to %s: %s", path, err)
 
     async def stop(self):
         await self.indexers.close()

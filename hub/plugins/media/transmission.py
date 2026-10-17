@@ -100,3 +100,11 @@ class Transmission:
 
     async def session(self) -> dict:
         return await self.call("session-get")
+
+    async def set_download_dir(self, path: str) -> bool:
+        """Point Transmission's default download folder at ``path``; True if it changed."""
+        cur = (await self.session()).get("download-dir")
+        if cur == path:
+            return False
+        await self.call("session-set", **{"download-dir": path})
+        return True

@@ -3,7 +3,14 @@
   GET   /api/state                         everything the UI needs at load
   POST  /api/entities/{id}/{action}        run an action, JSON body = params
   PATCH /api/entities/{id}                 {name?, room?, hidden?}
-  GET   /api/history/{id}?key=&hours=      sensor history
+  GET   /api/history                       recorded series
+  GET   /api/history/{id}?key=&hours=      [[ts, avg, min, max], ...]
+  GET   /api/settings                      core sections + plugin catalog with schemas & values
+  PUT   /api/settings/core/{section}       {values}
+  PUT   /api/settings/plugins/{name}       {enabled?, values?}  -> plugin restarts live
+  POST  /api/restart                       restart the whole hub
+  GET   /api/fs?path=                      folder browser for "path" settings
+  POST  /api/onboarding                    {done} - first-run guided setup finished / rerun
   GET   /api/events                        server-sent events (entity, notification, ...)
   GET   /api/notifications   POST /api/notifications/read   POST /api/notifications/test
   GET   /api/homekit         GET /api/homekit/qr.svg
@@ -22,6 +29,9 @@ import time
 from pathlib import Path
 
 from aiohttp import web
+from yarl import URL
+
+from . import settings
 
 log = logging.getLogger("hub.web")
 COOKIE = "casa_session"
@@ -44,6 +54,7 @@ class WebServer:
         self.token = hmac.new(secret.encode(), self.password.encode(), hashlib.sha256).hexdigest()
         self.static_dir = static_dir
         self.runner: web.AppRunner | None = None
+        self._routers: dict[int, web.UrlDispatcher] = {}  # id(plugin) -> its routes
 
     # -- app ---------------------------------------------------------------------
 
@@ -55,21 +66,22 @@ class WebServer:
         r.add_get("/api/state", self.state)
         r.add_post("/api/entities/{id}/{action}", self.action)
         r.add_patch("/api/entities/{id}", self.patch_entity)
+        r.add_get("/api/history", self.history_series)
         r.add_get("/api/history/{id}", self.history)
+        r.add_get("/api/settings", self.settings)
+        r.add_put("/api/settings/core/{section}", self.settings_core)
+        r.add_put("/api/settings/plugins/{name}", self.settings_plugin)
+        r.add_post("/api/restart", self.restart)
+        r.add_get("/api/fs", self.fs)
+        r.add_post("/api/onboarding", self.onboarding)
         r.add_get("/api/events", self.events)
         r.add_get("/api/notifications", self.notifications)
         r.add_post("/api/notifications/read", self.notifications_read)
         r.add_post("/api/notifications/test", self.notifications_test)
         r.add_get("/api/homekit", self.homekit)
         r.add_get("/api/homekit/qr.svg", self.homekit_qr)
-        for name, plugin in self.hub.plugins.items():
-            for rd in plugin.routes():
-                path, kw = f"/api/p/{name}{rd.path}", dict(rd.kwargs)
-                if rd.method == "GET":  # web.get() adds allow_head, only add_get takes it
-                    r.add_get(path, rd.handler, **kw)
-                else:
-                    kw.pop("allow_head", None)
-                    r.add_route(rd.method, path, rd.handler, **kw)
+        # plugins come and go at runtime, so their routes are resolved per request
+        r.add_route("*", "/api/p/{plugin}/{tail:.*}", self.plugin_route)
         r.add_get("/static/{path:.+}", self.static)
         return app
 
@@ -82,6 +94,39 @@ class WebServer:
     async def stop(self) -> None:
         if self.runner:
             await self.runner.cleanup()
+
+    # -- plugin routes -------------------------------------------------------------
+
+    def _router(self, plugin) -> web.UrlDispatcher:
+        router = self._routers.get(id(plugin))
+        if router is None:
+            router = web.UrlDispatcher()
+            for rd in plugin.routes():
+                kw = dict(rd.kwargs)
+                if rd.method == "GET":  # web.get() adds allow_head, only add_get takes it
+                    router.add_get(rd.path, rd.handler, **kw)
+                else:
+                    kw.pop("allow_head", None)
+                    router.add_route(rd.method, rd.path, rd.handler, **kw)
+            self._routers = {k: v for k, v in self._routers.items()
+                             if k in {id(p) for p in self.hub.plugins.values()}}
+            self._routers[id(plugin)] = router
+        return router
+
+    async def plugin_route(self, request):
+        plugin = self.hub.plugins.get(request.match_info["plugin"])
+        if plugin is None:
+            raise KeyError(f"plugin {request.match_info['plugin']} is not running")
+        tail = "/" + request.match_info["tail"]
+        sub = request.clone(rel_url=URL.build(path=tail, query_string=request.query_string,
+                                               encoded=False))
+        match = await self._router(plugin).resolve(sub)
+        if match.http_exception is not None:
+            raise match.http_exception
+        match.add_app(request.app)
+        match.freeze()
+        sub._match_info = match  # what aiohttp itself does after resolving
+        return await match.handler(sub)
 
     # -- middlewares -------------------------------------------------------------
 
@@ -139,7 +184,7 @@ class WebServer:
             "entities": [e.to_json() for e in hub.entities.values()],
             "plugins": [
                 {"name": p.name, "title": p.title or p.name.title(), "error": p.error,
-                 "status": _safe(p.status)}
+                 "icon": p.icon, "status": _safe(p.status)}
                 for p in hub.plugins.values()
             ],
             "homekit": hub.homekit.info(),
@@ -148,6 +193,7 @@ class WebServer:
                 "SELECT COUNT(*) AS n FROM notifications WHERE read=0")[0]["n"],
             "rooms": hub.config.get("rooms", []),
             "name": hub.config.get("name", "Casa"),
+            "onboarding": not hub.onboarded,
         })
 
     async def action(self, request):
@@ -161,6 +207,16 @@ class WebServer:
         self.hub.set_override(request.match_info["id"], name=body.get("name"),
                               room=body.get("room"), hidden=body.get("hidden"))
         return _json({"ok": True})
+
+    async def history_series(self, request):
+        ents = self.hub.entities
+        return _json([
+            {**row, "name": ents[row["entity"]].name if row["entity"] in ents else row["entity"],
+             "room": ents[row["entity"]].room if row["entity"] in ents else "",
+             "unit": (ents[row["entity"]].attrs.get("units") or {}).get(row["key"], "")
+             if row["entity"] in ents else ""}
+            for row in self.hub.store.series()
+        ])
 
     async def history(self, request):
         hours = float(request.query.get("hours", 24))
@@ -201,6 +257,82 @@ class WebServer:
     async def notifications_test(self, request):
         await self.hub.notify.send("Casa", "Test notification - it works 🎉", tag="bell")
         return _json({"ok": True, "channels": self.hub.notify.channels})
+
+    # -- settings ---------------------------------------------------------------------
+
+    async def settings(self, request):
+        cfg = self.hub.cfg
+        plugins = []
+        for info in self.hub.catalog():
+            running = self.hub.plugins.get(info["name"])
+            plugins.append({
+                **info,
+                "configured": cfg.plugin(info["name"]) is not None,
+                "running": running is not None,
+                "error": info.get("error") or (running.error if running else None),
+                "status": _safe(running.status) if running else {},
+                "values": settings.values_for(info["schema"], cfg.plugin(info["name"]) or {}),
+            })
+        return _json({
+            "core": [{"name": k, "title": v["title"], "restart": v["restart"],
+                      "schema": v["fields"], "values": cfg.core_values(k)}
+                     for k, v in settings.CORE.items()],
+            "plugins": plugins,
+            "config_file": str(cfg.path),
+        })
+
+    async def settings_core(self, request):
+        section = request.match_info["section"]
+        if section not in settings.CORE:
+            raise KeyError(f"unknown section {section}")
+        body = await request.json()
+        self.hub.cfg.set_core(section, body.get("values") or {})
+        await self.hub.apply_core(section)
+        return _json({"ok": True, "restart": settings.CORE[section]["restart"]})
+
+    async def settings_plugin(self, request):
+        name = request.match_info["name"]
+        cls = self.hub.plugin_class(name)  # validates the name
+        body = await request.json()
+        enabled = body.get("enabled")
+        was_running = name in self.hub.plugins
+        self.hub.cfg.set_plugin(name, cls.schema, body.get("values"), enabled)
+        if enabled is False:
+            await self.hub.stop_plugin(name, forget_homekit=True)
+        elif enabled or body.get("values") or was_running:
+            await self.hub.start_plugin(name)
+        p = self.hub.plugins.get(name)
+        return _json({"ok": True, "running": p is not None, "error": p.error if p else None})
+
+    async def fs(self, request):
+        """Folder browser for "path" settings: ?path= -> {path, parent, dirs, roots}."""
+        import os
+        import shutil
+
+        path = Path(request.query.get("path") or Path.home()).expanduser().resolve()
+        if not path.is_dir():
+            raise KeyError(f"{path} is not a folder")
+        try:
+            dirs = sorted((e.name for e in os.scandir(path)
+                           if e.is_dir() and not e.name.startswith(".")), key=str.lower)
+        except PermissionError:
+            dirs = []
+        usage = shutil.disk_usage(path)
+        roots = [str(p) for p in (Path.home(), Path("/mnt"), Path("/media"), Path("/Volumes"),
+                                  self.hub.root / "data") if p.is_dir()]
+        return _json({"path": str(path), "parent": str(path.parent) if path.parent != path else None,
+                      "dirs": dirs, "roots": roots, "writable": os.access(path, os.W_OK),
+                      "free_gb": round(usage.free / 1e9, 1)})
+
+    async def onboarding(self, request):
+        body = await request.json()
+        self.hub.store.set("onboarding.done", bool(body.get("done", True)))
+        return _json({"ok": True})
+
+    async def restart(self, request):
+        self.hub.restart_requested = True
+        asyncio.get_running_loop().call_later(0.3, self.hub.shutdown.set)
+        return _json({"ok": True})
 
     async def homekit(self, request):
         return _json(self.hub.homekit.info())
