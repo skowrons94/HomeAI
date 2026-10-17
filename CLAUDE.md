@@ -57,6 +57,7 @@ hub/homekit.py   single HAP bridge; persisted AIDs
 hub/web.py       REST + SSE + static; plugin routes are dispatched dynamically
 hub/plugins/     one module or package per integration, exports PLUGIN
 web/             ES modules, no build step; pages in web/pages/*.js
+docs/sync.md     shared feed contract
 deploy/          Pi installer, VPN script, macOS launchd
 ```
 

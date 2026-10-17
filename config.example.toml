@@ -81,6 +81,17 @@ default_servings = 2
 language = "it"
 # sources = ["giallozafferano", "themealdb"]
 
+# Shared feed: watched/ratings/watchlist and shared recipes with other houses, through a private git repo.
+# Generate the SSH key on first start, then add its public key (Settings > Shared feed) as a deploy key
+# with write access. See docs/sync.md.
+# [plugins.sync]
+# repo_url = "git@github.com:you/casa-feed.git"
+# user = "mango"
+# share_watchlist = true
+# branch = "main"
+# interval = 10                 # minutes
+# key_path = ""                 # empty: data/sync/id_ed25519
+
 # NAS: discovered and mounted from Settings > Storage & NAS.
 [plugins.storage]
 auto_mount = true

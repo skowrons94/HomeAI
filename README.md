@@ -129,6 +129,22 @@ Some trackers (YTS, ilCorSaRoNeRo, 1337x) are blocked by the ISP's DNS. Two ways
   keeps working, and Transmission is bound to the tunnel with a kill-switch, so torrent traffic stops
   if the VPN drops. `./deploy/vpn-wireguard.sh --off` undoes it.
 
+## Shared feed
+
+Houses can share a small social layer: what everyone watched, rated and put on their watchlist, plus
+a common recipe book where each person adds their own tips (*Trucchi*). It goes through a **private
+git repo**; hubs never talk to each other.
+
+1. Create an empty private repo (e.g. `casa-feed` on GitHub).
+2. In Settings → Shared feed enter the repo URL (`git@github.com:you/casa-feed.git`) and your name in the feed.
+3. Copy the public key shown there into the repo's *Settings → Deploy keys* and tick *Allow write access*.
+   Casa generates the key on first start (`data/sync/id_ed25519`); each house has its own.
+
+The hub syncs every few minutes and right after you rate or share something. The repo only ever gets
+IMDb/TMDB ids, ratings, dates, short notes, title cards, posters and recipes. Paths, IPs, hostnames,
+tracker names, magnet links, URLs in notes and library contents are refused before anything is written.
+Details of the format are in [docs/sync.md](docs/sync.md).
+
 ## Device setup notes
 
 - **Apple TV**: on the TV, Settings → AirPlay and HomeKit → *Allow Access* → *Everyone on the

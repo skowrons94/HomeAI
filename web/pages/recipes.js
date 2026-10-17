@@ -1,6 +1,6 @@
 // Recipes: discover/import, personal recipe book, shopping list, calorie log (hub/plugins/recipes).
 // Routes: #/recipes[/discover|mine|shopping|today|recipe/<id>]
-import { api, h, icon, toast, sheet, ensureCss, act, debounce, go } from "../app.js";
+import { api, h, icon, toast, sheet, ensureCss, act, debounce, go, hasPlugin } from "../app.js";
 
 const P = (path, opts) => api(`p/recipes/${path}`, opts);
 const enc = encodeURIComponent;
@@ -45,6 +45,8 @@ const TXT = {
   logEmpty: ["Niente registrato per questo giorno.", "Nothing logged for this day."], pick: ["Scegli una ricetta…", "Pick a recipe…"],
   new: ["Nuova", "New"], manualTitle: ["Nuova ricetta", "New recipe"], needTitle: ["Serve un titolo", "A title is required"],
   min: ["min", "min"], prep: ["preparazione", "prep"], cook: ["cottura", "cook"], offline: ["Non raggiungibile", "Unreachable"],
+  share: ["Condividi con gli amici", "Share with friends"], shared: ["Ricetta condivisa.", "Recipe shared."],
+  view: ["Vedi", "View"],
   srcErr: ["Alcune fonti non rispondono", "Some sources didn't answer"],
 };
 let LANG = 0;
@@ -270,6 +272,12 @@ function paintDetail(view, rec, ctx) {
       h("label.field", t("tagsF").split(" (")[0], tagInput)),
     h("div.row.wrap", { style: { gap: "8px" } },
       h("button", { onclick: () => editMode(view, rec, ctx) }, icon("edit"), t("edit")),
+      hasPlugin("sync") && h("button", { onclick: (e) => act(async () => {
+        const r = await api("p/sync/recipes/share", { body: { recipe_id: rec.id } });
+        const el = h("div.toast", `${t("shared")} `, h("a", { href: `#/social/recipe/${encodeURIComponent(r.slug)}` }, t("view")));
+        document.getElementById("toasts").append(el);
+        setTimeout(() => el.remove(), 7000);
+      }, e.currentTarget) }, icon("users"), t("share")),
       rec.has_original && rec.edited && h("button", { onclick: () => confirm(t("resetQ")) && act(async () => {
         await P(`recipe/${id}/reset`, { body: {} }); ctx.servings = 0; await ctx.reload(); ctx.paint();
       }) }, icon("refresh"), t("reset")),

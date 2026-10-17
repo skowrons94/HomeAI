@@ -1,6 +1,6 @@
 // Media: discover, search, favourites, downloads, library (hub/plugins/media).
 // Routes: #/media[/discover|watchlist|downloads|library|search/<q>|movie/<id>|series/<id>]
-import { api, h, icon, toast, sheet, ensureCss, act, debounce, fmt, bus, go } from "../app.js";
+import { api, h, icon, toast, sheet, ensureCss, act, debounce, fmt, bus, go, hasPlugin } from "../app.js";
 
 const P = (path, opts) => api(`p/media/${path}`, opts);
 const FLAG = { it: "🇮🇹", en: "🇬🇧", fr: "🇫🇷", es: "🇪🇸", de: "🇩🇪", ru: "🇷🇺", uk: "🇺🇦", ko: "🇰🇷",
@@ -238,7 +238,52 @@ async function renderDetail(root, type, id, on) {
     it.overview && h("p.overview", it.overview),
     it.cast?.length && h("div.small.muted", "With ", it.cast.slice(0, 6).join(", ")));
 
+  if (hasPlugin("sync")) sharedBlock(it, type).then((el) => el && actions.after(el)).catch(() => {});
   if (type === "series") body.append(await seasonsView(it, on));
+}
+
+// "Shared feed" (hub/plugins/sync): my watched/rating state + what friends said. Hidden if the plugin errors.
+async function sharedBlock(it, type) {
+  ensureCss(`/static/pages/social.css?v=${window.CASA_V}`);
+  const S = (path, opts) => api(`p/sync/${path}`, opts);
+  const val = (x, k) => (x && typeof x === "object" ? x[k] : x);
+  let d = await S(`lookup?type=${type}&id=${enc(it.id)}`);
+  const box = h("div.s-share");
+  const post = (ev) => act(async () => {
+    await S("events", { body: { type, id: it.id, ...ev } });
+    d = await S(`lookup?type=${type}&id=${enc(it.id)}`);
+    paint();
+  });
+  const today = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`; };
+  const paint = () => {
+    const watched = val(d.mine?.watch, "watched_at");
+    const rating = val(d.mine?.rating, "rating");
+    const note = h("input", { placeholder: "Note (optional)", maxlength: 500, value: val(d.mine?.rating, "note") || "" });
+    const rate = h("div.s-rate", [1, 2, 3, 4, 5].map((n) => {
+      const cls = rating >= n ? ".on" : rating >= n - 0.5 ? ".half" : "";
+      return h(`button${cls}`, { title: `${n}`, "aria-label": `${n} stars`, onclick: (e) => {
+        const r = e.offsetX < e.currentTarget.offsetWidth / 2 ? n - 0.5 : n;
+        post({ kind: "rating", rating: r === rating ? null : r, note: note.value });
+      } }, "★");
+    }));
+    const others = (d.others || []).map((o) => {
+      const bits = [val(o.watch, "watched_at") && "watched", val(o.rating, "rating") != null && `★ ${val(o.rating, "rating")}`].filter(Boolean);
+      const n = val(o.rating, "note") || o.note;
+      return h("div", h("b", o.user), bits.length ? ` ${bits.join(" · ")}` : "", n && h("span.muted", ` “${n}”`));
+    });
+    fill(box, h("h3", "Shared feed"),
+      h("div.row.wrap", { style: { gap: "10px" } },
+        watched
+          ? [h("span.chip.ok", icon("check"), `Watched ${watched}`),
+             h("button", { onclick: () => post({ kind: "watch", watched_at: null }) }, "Undo")]
+          : h("button", { onclick: () => post({ kind: "watch", watched_at: today() }) }, icon("check"), "Mark watched"),
+        rate),
+      h("div.row", { style: { gap: "8px" } }, note,
+        rating != null && h("button", { onclick: () => post({ kind: "rating", rating, note: note.value }) }, "Save note")),
+      others.length && h("div.s-others", others));
+  };
+  paint();
+  return box;
 }
 
 async function seasonsView(it, on) {

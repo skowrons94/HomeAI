@@ -101,6 +101,7 @@ const ICONS = {
   cpu: '<rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>',
   storage: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   flag: '<path d="M4 22V4s1.5-1 5-1 5 2 8 2 3-1 3-1v11s-1 1-3 1-5-2-8-2-5 1-5 1"/>',
+  users: '<circle cx="9" cy="8" r="3.5"/><path d="M2 21v-1a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v1M16 4.5a3.5 3.5 0 0 1 0 7M22 21v-1a6 6 0 0 0-4-5.6"/>',
   homekit: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><rect x="9" y="11" width="6" height="6" rx="1"/>',
 };
 
@@ -185,6 +186,7 @@ export async function refreshState() {
   store.attention = s.attention || 0;
   updateBadge();
   refreshAttention().catch(() => {});
+  updateNav();
   bus.dispatchEvent(new CustomEvent("state", { detail: s }));
   return s;
 }
@@ -212,6 +214,15 @@ function connectEvents() {
   let wasDown = false;
   es.onerror = () => { wasDown = true; };
   es.onopen = () => { if (wasDown) { wasDown = false; refreshState().then(render); } };
+}
+
+/** True when a plugin is running (enabled and started). */
+export const hasPlugin = (name) => store.plugins.some((p) => p.name === name);
+
+/** Pages tied to a plugin (PAGES[].plugin) only show in the nav while that plugin runs. */
+function updateNav() {
+  document.querySelectorAll("nav a.tab[data-plugin]").forEach((a) =>
+    a.classList.toggle("hidden", !hasPlugin(a.dataset.plugin)));
 }
 
 function updateBadge() {
@@ -264,6 +275,7 @@ const PAGES = [
   { id: "home", title: "Home", icon: "home" },
   { id: "media", title: "Media", icon: "film" },
   { id: "recipes", title: "Recipes", icon: "utensils" },
+  { id: "social", title: "Feed", icon: "users", plugin: "sync" },
   { id: "history", title: "History", icon: "chart" },
   { id: "network", title: "Network", icon: "network" },
   { id: "settings", title: "Settings", icon: "settings" },
@@ -295,7 +307,7 @@ export const go = (hash) => { location.hash = hash; };
 function shell() {
   const nav = h("nav.side",
     h("div.brand", "Casa"),
-    PAGES.filter((p) => !p.hidden).map((p) => h("a.tab", { href: `#/${p.id}`, "data-id": p.id }, icon(p.icon), h("span", p.title),
+    PAGES.filter((p) => !p.hidden).map((p) => h("a.tab", { href: `#/${p.id}`, "data-id": p.id, "data-plugin": p.plugin }, icon(p.icon), h("span", p.title),
       p.id === "settings" && h("span.count-badge.hidden", { "data-attn": "", title: "Needs attention" }))),
     h("div.spacer"),
     h("a.tab", { href: "javascript:void 0", onclick: openNotifications },
