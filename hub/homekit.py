@@ -230,7 +230,7 @@ class SensorAccessory(_EntityAccessory):
             s = self.add_preload_service("HumiditySensor")
             self.c_hum = s.get_characteristic("CurrentRelativeHumidity")
         if "battery" in e.state or "battery" in e.attrs.get("measures", []):
-            s = self.add_preload_service("Battery", chars=["BatteryLevel", "StatusLowBattery"])
+            s = self.add_preload_service("BatteryService", chars=["BatteryLevel", "StatusLowBattery"])
             self.c_batt = s.get_characteristic("BatteryLevel")
             self.c_low = s.get_characteristic("StatusLowBattery")
 
