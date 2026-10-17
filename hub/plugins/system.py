@@ -139,20 +139,20 @@ class SystemPlugin(Plugin):
         self.hub.add_entity(Entity(
             "system.cpu", "CPU", "sensor", self.name, "",
             attrs={"units": {"usage": "%", "temperature": "°C", "load": ""},
-                   "history": ["usage", "temperature", "load"], "icon": "cpu"}))
+                   "history": ["usage", "temperature", "load"], "primary": "temperature", "group": "This hub", "icon": "cpu"}))
         self.hub.add_entity(Entity(
             "system.memory", "Memory", "sensor", self.name, "",
-            attrs={"units": {"used": "%", "free": "MB"}, "history": ["used"], "icon": "cpu"}))
+            attrs={"units": {"used": "%", "free": "MB"}, "history": ["used"], "primary": "used", "group": "This hub", "icon": "cpu"}))
         self.hub.add_entity(Entity(
             "system.disk", "Disk", "sensor", self.name, "",
-            attrs={"units": {"free": "GB", "used": "%"}, "history": ["free"], "icon": "storage"}))
+            attrs={"units": {"free": "GB", "used": "%"}, "history": ["free"], "primary": "free", "group": "This hub", "icon": "storage"}))
         self.hub.add_entity(Entity(
             "system.network", "Network", "sensor", self.name, "",
             attrs={"units": {"download": "Mbit/s", "upload": "Mbit/s", "signal": "dBm", "quality": "%"},
-                   "history": ["download", "upload", "signal", "quality"], "icon": "wifi"}))
+                   "history": ["download", "upload", "signal", "quality"], "primary": "download", "group": "This hub", "icon": "wifi"}))
         self.hub.add_entity(Entity(
             "system.internet", "Internet", "sensor", self.name, "",
-            attrs={"units": {"latency": "ms"}, "history": ["latency"], "icon": "wifi"}))
+            attrs={"units": {"latency": "ms"}, "history": ["latency"], "primary": "latency", "group": "This hub", "icon": "wifi"}))
         interval = max(5, float(self.config.get("interval", 15) or 15))
         self.hub.every(interval, self.poll, "system", initial_delay=1)
 

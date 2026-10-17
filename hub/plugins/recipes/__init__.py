@@ -15,7 +15,7 @@ import re
 
 from aiohttp import web
 
-from ...core import Entity, Plugin
+from ...core import Plugin
 from . import sources
 from .db import Book
 
@@ -56,16 +56,11 @@ class RecipesPlugin(Plugin):
 
     async def start(self):
         self.book = Book(self.hub.store, self.hub.data_dir, self.config)
-        self.hub.add_entity(Entity(
-            id="recipes.calories", name="Calories today", kind="sensor", plugin=self.name,
-            state={"today": self.book.today_total()}, attrs={"units": {"today": "kcal"}, "icon": "utensils"}))
-        self.hub.every(600, self._tick, "recipes calories", initial_delay=600)
-
-    async def _tick(self):  # day rollover
-        self._publish()
+        # calories are shown per recipe and in the Today tab, not as a chart
+        self.hub.store.delete_series("recipes.calories")
 
     def _publish(self):
-        self.hub.update("recipes.calories", today=self.book.today_total())
+        self.hub.publish("recipes", None)
 
     @property
     def sources(self) -> list[str]:

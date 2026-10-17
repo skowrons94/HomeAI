@@ -141,6 +141,15 @@ class Store:
         ).fetchall()
         return [[r[0], round(r[1], 3), round(r[2], 3), round(r[3], 3)] for r in rows]
 
+    def delete_series(self, entity: str, key: str | None = None) -> None:
+        """Forget recorded history of an entity (or one of its keys)."""
+        for (ent, k), sid in list(self._series.items()):
+            if ent == entity and key in (None, k):
+                for table, _, _ in ROLLUPS:
+                    self.db.execute(f"DELETE FROM {table} WHERE s=?", (sid,))
+                self.db.execute("DELETE FROM series WHERE id=?", (sid,))
+                del self._series[(ent, k)]
+
     def series(self) -> list[dict]:
         """All recorded series with their latest hourly bucket."""
         return self.query(

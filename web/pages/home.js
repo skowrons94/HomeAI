@@ -15,11 +15,11 @@ export default {
       const rooms = new Map();
       for (const e of visible.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind)
                                              || a.name.localeCompare(b.name))) {
-        const r = e.room || "Other";
+        const r = groupOf(e);
         if (!rooms.has(r)) rooms.set(r, []);
         rooms.get(r).push(e);
       }
-      const order = [...store.rooms, "Other"];
+      const order = [...store.rooms, "Other", "This hub"];
       const names = [...rooms.keys()].sort((a, b) =>
         ((order.indexOf(a) + 1) || 99) - ((order.indexOf(b) + 1) || 99) || a.localeCompare(b));
       grids.replaceChildren(
@@ -43,7 +43,7 @@ export default {
     const onEntity = (ev) => {
       const e = ev.detail, old = tiles.get(e.id);
       if (!old || old.dataset.busy) return;
-      if (old.dataset.room !== (e.room || "Other") || !!e.attrs.hidden) return draw();
+      if (old.dataset.room !== groupOf(e) || !!e.attrs.hidden) return draw();
       const fresh = tile(e);
       old.replaceWith(fresh);
       tiles.set(e.id, fresh);
@@ -69,8 +69,9 @@ function greeting() {
 
 function summaryChips() {
   const ents = [...store.entities.values()];
-  const temps = ents.filter((e) => e.kind === "sensor" && typeof e.state.temperature === "number");
-  const hums = ents.filter((e) => e.kind === "sensor" && typeof e.state.humidity === "number");
+  const room = (e) => e.kind === "sensor" && !e.attrs.group && !e.attrs.hidden;
+  const temps = ents.filter((e) => room(e) && typeof e.state.temperature === "number");
+  const hums = ents.filter((e) => room(e) && typeof e.state.humidity === "number");
   const lightsOn = ents.filter((e) => e.kind === "light" && e.state.on).length;
   const heating = ents.find((e) => e.kind === "climate");
   const avg = (a, k) => a.reduce((s, e) => s + e.state[k], 0) / a.length;
@@ -89,7 +90,7 @@ function tile(e) {
   const maker = { climate: climateTile, water_heater: climateTile, sensor: sensorTile, light: lightTile,
                   switch: switchTile, speaker: speakerTile, media_player: mediaTile, tv: tvTile }[e.kind];
   const el = maker ? maker(e) : genericTile(e);
-  el.dataset.room = e.room || "Other";
+  el.dataset.room = groupOf(e);
   if (!e.available) el.classList.add("unavailable");
   el.append(h("button.icon.ghost.more", { title: "Edit", onclick: (ev) => { ev.stopPropagation(); editEntity(e); } },
               icon("more")));
@@ -130,18 +131,53 @@ function climateTile(e) {
         { off: "Off", heat: water ? "On" : "Manual", auto: "Auto" }[m] || m))));
 }
 
+// -- generic sensors: any numeric state, units from attrs.units --------------------
+
+const groupOf = (e) => e.room || e.attrs.group || "Other";
+const KEY_COLORS = { temperature: "#ff7a45", humidity: "#33a4d8", download: "#30b85a", upload: "#0a84ff",
+                     latency: "#f2a516", used: "#a970ff", free: "#33a4d8", usage: "#ff7a45" };
+const colorOf = (k) => KEY_COLORS[k] || "#ff7a45";
+const labelOf = (k) => (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, " ");
+const unitOf = (e, k) => (e.attrs.units || {})[k]
+  ?? ({ temperature: "°", humidity: "%", battery: "%" }[k] || "");
+const fmtNum = (v) => (Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10).toLocaleString();
+
+function sensorKeys(e) {  // values worth showing/charting, most important first
+  const keys = e.attrs.history
+    || Object.keys(e.state).filter((k) => typeof e.state[k] === "number" && k !== "battery");
+  const p = primaryKey(e);
+  return [p, ...keys.filter((k) => k !== p && e.state[k] !== undefined && e.state[k] !== null)].filter(Boolean);
+}
+
+function primaryKey(e) {
+  if (e.attrs.primary && e.state[e.attrs.primary] !== undefined) return e.attrs.primary;
+  if (e.state.temperature !== undefined) return "temperature";
+  return (e.attrs.history || Object.keys(e.state))
+    .find((k) => typeof e.state[k] === "number" && k !== "battery");
+}
+
 function sensorTile(e) {
   const st = e.state;
+  const keys = sensorKeys(e);
+  const [main, ...rest] = keys;
   const canvas = h("canvas.spark");
+  const value = (k, big) => {
+    const u = unitOf(e, k);
+    return big ? h("div.big", fmtNum(st[k]), u && h("small", u === "°C" ? "°" : u))
+               : h("span", fmtNum(st[k]), h("small.muted", ` ${u}`));
+  };
+  const climate = main === "temperature" && st.humidity !== undefined;  // thermo-hygrometer layout
+  const sub = [st.battery !== undefined ? `🔋 ${st.battery}%` : "", e.attrs.model || ""].filter(Boolean).join(" · ");
   const el = h("div.card.tile", { onclick: () => sensorDetail(e), style: { cursor: "pointer" } },
-    top(e, "thermo", [st.battery !== undefined ? `🔋 ${st.battery}%` : "", e.attrs.model || ""].filter(Boolean).join(" · ")),
-    h("div.row", { style: { alignItems: "baseline" } },
-      st.temperature !== undefined && h("div.big", fmt.temp(st.temperature), h("small", "°")),
+    top(e, e.attrs.icon || "thermo", sub),
+    main ? h("div.row", { style: { alignItems: "baseline", gap: "10px" } },
+      value(main, true),
       h("div.spacer"),
-      st.humidity !== undefined && h("div", { style: { fontSize: "20px", fontWeight: 700 } },
-        `${Math.round(st.humidity)}`, h("small.muted", "%"))),
+      climate ? h("div", { style: { fontSize: "20px", fontWeight: 700 } }, `${Math.round(st.humidity)}`, h("small.muted", "%"))
+              : rest[0] !== undefined && h("div.small.muted", { style: { textAlign: "right" } },
+                  labelOf(rest[0]), h("br"), value(rest[0], false))) : null,
     canvas);
-  loadSpark(e.id, "temperature", canvas);
+  if (main) loadSpark(e.id, main, canvas, colorOf(main));
   return el;
 }
 
@@ -268,19 +304,22 @@ async function sensorDetail(e) {
   const s = sheet(e.name, body, { wide: true });
   let hours = 24;
   const draw = async () => {
-    const keys = ["temperature", "humidity"].filter((k) => e.state[k] !== undefined);
+    const keys = sensorKeys(e);
     const charts = await Promise.all(keys.map(async (k) => {
       const pts = await api(`history/${encodeURIComponent(e.id)}?key=${k}&hours=${hours}`);
       const c = h("canvas", { style: { width: "100%", height: "160px" } });
-      requestAnimationFrame(() => drawChart(c, pts, k === "humidity" ? "#33a4d8" : "#ff7a45", k === "humidity" ? "%" : "°"));
-      return h("div.card", h("div.row", h("h3", k === "humidity" ? "Humidity" : "Temperature"), h("div.spacer"),
+      requestAnimationFrame(() => drawChart(c, pts, colorOf(k), unitOf(e, k)));
+      return h("div.card", h("div.row", h("h3", labelOf(k)),
+        h("span.muted.small", `${fmtNum(e.state[k])} ${unitOf(e, k)}`), h("div.spacer"),
         h("a.small", { href: `#/history/${encodeURIComponent(e.id)}:${k}`, onclick: () => s.close() }, "Open in History")), c);
     }));
     body.replaceChildren(
       h("div.seg", [24, 168, 720].map((hr) => h(`button${hr === hours ? ".active" : ""}`,
         { onclick: () => { hours = hr; draw(); } }, hr === 24 ? "24 h" : hr === 168 ? "7 days" : "30 days"))),
       ...charts,
-      h("div.small.muted", Object.entries(e.attrs).filter(([k]) => !["hidden", "measures"].includes(k))
+      h("div.small.muted", Object.entries(e.attrs)
+        .filter(([k, v]) => !["hidden", "measures", "units", "history", "primary", "group", "icon"].includes(k)
+                            && typeof v !== "object")
         .map(([k, v]) => `${k}: ${v}`).join(" · ")));
   };
   draw();
@@ -289,10 +328,10 @@ async function sensorDetail(e) {
 
 // ------------------------------------------------------------------ charts
 
-async function loadSpark(id, key, canvas) {
+async function loadSpark(id, key, canvas, color = "#ff7a45") {
   try {
     const pts = await api(`history/${encodeURIComponent(id)}?key=${key}&hours=24`);
-    requestAnimationFrame(() => drawChart(canvas, pts, "#ff7a45", "", true));
+    requestAnimationFrame(() => drawChart(canvas, pts, color, "", true));
   } catch {}
 }
 
