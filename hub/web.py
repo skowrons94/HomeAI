@@ -67,6 +67,10 @@ class WebServer:
         r.add_post("/api/login", self.login)
         r.add_get("/api/state", self.state)
         r.add_get("/api/i18n", self.i18n)
+        r.add_get("/sw.js", self.service_worker)
+        r.add_get("/api/push/key", self.push_key)
+        r.add_post("/api/push/subscribe", self.push_subscribe)
+        r.add_post("/api/push/unsubscribe", self.push_unsubscribe)
         r.add_get("/api/prefs", self.prefs)
         r.add_put("/api/prefs", self.prefs_save)
         r.add_post("/api/entities/{id}/{action}", self.action)
@@ -179,13 +183,43 @@ class WebServer:
         body = await request.json()
         if not self.password or hmac.compare_digest(str(body.get("password", "")), self.password):
             resp = _json({"ok": True})
-            resp.set_cookie(COOKIE, self.token, max_age=365 * 86400, httponly=True,
-                            samesite="Lax")
+            self._remember(request, resp)
             return resp
         await asyncio.sleep(1)
         return _json({"error": "wrong password"}, 403)
 
+    def _remember(self, request, resp) -> None:
+        """Stay logged in: a year, renewed on every app start (GET /api/state)."""
+        if self.password:
+            secure = request.secure or request.headers.get("X-Forwarded-Proto") == "https"
+            resp.set_cookie(COOKIE, self.token, max_age=365 * 86400, httponly=True,
+                            samesite="Lax", secure=secure)
+
+    async def service_worker(self, request):
+        # served from / so it may control the whole app (scope "/")
+        return web.FileResponse(self.static_dir / "sw.js", headers={
+            "Cache-Control": "no-cache", "Content-Type": "text/javascript"})
+
+    async def push_key(self, request):
+        return _json({"key": self.hub.push.public_key()})
+
+    async def push_subscribe(self, request):
+        body = await request.json()
+        self.hub.push.subscribe(body.get("subscription"), str(body.get("person", ""))[:60],
+                                request.headers.get("User-Agent", ""))
+        return _json({"ok": True})
+
+    async def push_unsubscribe(self, request):
+        body = await request.json()
+        self.hub.push.unsubscribe(str(body.get("endpoint", "")))
+        return _json({"ok": True})
+
     async def state(self, request):
+        resp = await self._state()
+        self._remember(request, resp)
+        return resp
+
+    async def _state(self):
         hub = self.hub
         return _json({
             "entities": [e.to_json() for e in hub.entities.values()],

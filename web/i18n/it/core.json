@@ -39,5 +39,18 @@
   "Other": "Altro",
   "This hub": "Questo hub",
   "People": "Persone",
-  "it = Italiano, en = English.": "it = Italiano, en = English."
+  "it = Italiano, en = English.": "it = Italiano, en = English.",
+  "Notifications are not allowed": "Le notifiche non sono consentite",
+  "You'll stay logged in on this device.": "Su questo dispositivo resterai collegato.",
+  "Notifications on this phone": "Notifiche su questo telefono",
+  "Open Casa from its Tailscale address (https://…) to turn them on.": "Apri Casa dal suo indirizzo Tailscale (https://…) per attivarle.",
+  "In Safari tap Share → Add to Home Screen, open Casa from there and turn them on here.": "In Safari tocca Condividi → Aggiungi alla schermata Home, apri Casa da lì e attivale qui.",
+  "This browser can't receive notifications.": "Questo browser non può ricevere notifiche.",
+  "Notifications are blocked: allow them for Casa in the phone's Settings.": "Le notifiche sono bloccate: consentile per Casa nelle Impostazioni del telefono.",
+  "Notifications turned off": "Notifiche disattivate",
+  "Notifications turned on": "Notifiche attivate",
+  "On: Casa can notify this phone": "Attive: Casa può avvisare questo telefono",
+  "Notifications off": "Disattivate",
+  "Disable": "Disattiva",
+  "Enable": "Attiva"
 }

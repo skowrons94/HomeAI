@@ -1,7 +1,7 @@
 // More ("Altro"): every page that isn't in the phone tab bar, notifications, who is using this
 // phone, and the tab bar layout (saved per person on the hub, see savePrefs in app.js).
 import { h, icon, t, store, go, openNotifications, person, choosePerson, savePrefs,
-         pinnable, pinnedTabs, MAX_TABS, LANG } from "../app.js";
+         pinnable, pinnedTabs, MAX_TABS, LANG, act, toast, pushState, enablePush, disablePush } from "../app.js";
 
 export default {
   async render(root) {
@@ -17,6 +17,9 @@ export default {
             store.unread ? h("span.chip.accent", store.unread) : null),
         others.map((p) => row(p.icon, t(p.title), () => go(`#/${p.id}`),
           p.id === "settings" && store.attention ? h("span.chip.warn", store.attention) : null))),
+
+      h("div.section", h("h2", t("Notifications on this phone"))),
+      pushRow(),
 
       store.people.length ? [
         h("div.section", h("h2", t("Who is using this phone"))),
@@ -58,6 +61,33 @@ function tabEditor() {
           onclick: () => { tabs = on ? tabs.filter((x) => x !== id) : [...tabs, id]; save(); },
         }, icon(on ? "check" : "plus")));
     }));
+  };
+  draw();
+  return box;
+}
+
+const PUSH_HINT = {
+  "needs-https": "Open Casa from its Tailscale address (https://…) to turn them on.",
+  "needs-home-screen": "In Safari tap Share → Add to Home Screen, open Casa from there and turn them on here.",
+  unsupported: "This browser can't receive notifications.",
+  denied: "Notifications are blocked: allow them for Casa in the phone's Settings.",
+};
+
+function pushRow() {
+  const box = h("div.list");
+  const draw = async () => {
+    const st = await pushState().catch(() => "unsupported");
+    const on = st === "on";
+    const btn = h(`button${on ? "" : ".primary"}`, { disabled: !["on", "off"].includes(st), onclick: () => act(async () => {
+      if (on) { await disablePush(); toast(t("Notifications turned off")); }
+      else { await enablePush(); toast(t("Notifications turned on")); }
+      draw();
+    }, btn) }, on ? t("Disable") : t("Enable"));
+    box.replaceChildren(h("div.item", icon("bell"),
+      h("div.stack.spacer", { style: { gap: "2px" } },
+        h("span", on ? t("On: Casa can notify this phone") : t("Notifications off")),
+        PUSH_HINT[st] && h("span.muted.small", t(PUSH_HINT[st]))),
+      btn));
   };
   draw();
   return box;

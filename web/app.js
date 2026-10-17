@@ -326,11 +326,48 @@ export async function openNotifications() {
   return s;
 }
 
+// ---------------------------------------------------------------- phone notifications
+// Web push (hub/push.py): needs HTTPS, and on iPhone Casa added to the Home Screen.
+
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const standalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+
+/** "on" | "off" | "denied" | "needs-https" | "needs-home-screen" | "unsupported" */
+export async function pushState() {
+  if (!window.isSecureContext) return "needs-https";
+  if (isIOS() && !standalone()) return "needs-home-screen";
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return "unsupported";
+  if (Notification.permission === "denied") return "denied";
+  const reg = await navigator.serviceWorker.getRegistration("/");
+  return (await reg?.pushManager.getSubscription()) ? "on" : "off";
+}
+
+/** Must run from a tap (iOS asks for permission only then). */
+export async function enablePush() {
+  if (await Notification.requestPermission() !== "granted") throw new Error(t("Notifications are not allowed"));
+  const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+  await navigator.serviceWorker.ready;
+  const { key } = await api("push/key");
+  const raw = Uint8Array.from(atob(key.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: raw });
+  await api("push/subscribe", { body: { subscription: sub.toJSON(), person: person() } });
+}
+
+export async function disablePush() {
+  const reg = await navigator.serviceWorker.getRegistration("/");
+  const sub = await reg?.pushManager.getSubscription();
+  if (sub) { await api("push/unsubscribe", { body: { endpoint: sub.endpoint } }); await sub.unsubscribe(); }
+}
+
 // ---------------------------------------------------------------- login
 
 function showLogin() {
   if (document.querySelector("#login")) return;
-  const pw = h("input", { type: "password", placeholder: t("Password"), autocomplete: "current-password" });
+  // a (hidden) user name lets iCloud Keychain / password managers save and fill the password
+  const user = h("input", { type: "text", name: "username", value: "casa", autocomplete: "username",
+                            style: { display: "none" } });
+  const pw = h("input", { type: "password", name: "password", placeholder: t("Password"), autocomplete: "current-password" });
   const go = async (e) => {
     e.preventDefault();
     const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -339,7 +376,8 @@ function showLogin() {
   };
   document.body.append(h("div.backdrop#login",
     h("form.sheet.stack", { onsubmit: go, style: { maxWidth: "360px" } },
-      h("h2", "Casa"), pw, h("button.primary.lg", { type: "submit" }, t("Unlock")))));
+      h("h2", "Casa"), user, pw, h("button.primary.lg", { type: "submit" }, t("Unlock")),
+      h("p.muted.small", { style: { margin: 0 } }, t("You'll stay logged in on this device.")))));
   pw.focus();
 }
 
@@ -432,6 +470,9 @@ async function boot() {
   await loadPrefs();
   buildNav();
   if (!location.search.includes("static")) connectEvents();  // ?static: no live updates (screenshots)
+  // keep the push service worker current (registered when notifications are turned on)
+  if (window.isSecureContext && "serviceWorker" in navigator)
+    navigator.serviceWorker.getRegistration("/").then((r) => r?.update()).catch(() => {});
   window.addEventListener("hashchange", render);
   // first run: guided setup (skippable; Settings can start it again)
   if (store.onboarding && !location.hash) location.hash = "#/welcome";

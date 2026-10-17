@@ -1,5 +1,5 @@
-"""Notifications: always stored and shown in the web UI, optionally pushed to
-the phone through ntfy (https://ntfy.sh, free app, no account) or Telegram.
+"""Notifications: always stored and shown in the web UI, pushed to the phones that turned
+them on in Casa (web push, hub/push.py), optionally also through ntfy (https://ntfy.sh, free app, no account) or Telegram.
 
 config.toml:
     [notify]
@@ -29,6 +29,8 @@ class Notifier:
     @property
     def channels(self) -> list[str]:
         out = ["app"]
+        if self.hub.push.subscriptions():
+            out.append("phone")
         if self.ntfy_url:
             out.append("ntfy")
         if self.tg_token and self.tg_chat:
@@ -42,6 +44,10 @@ class Notifier:
         log.info("notify: %s - %s", title, body)
         if not push:
             return
+        try:
+            await self.hub.push.send(title, body, url, tag)
+        except Exception as err:
+            log.warning("web push failed: %s", err)
         if self.ntfy_url:
             await self._ntfy(title, body, url, image, tag)
         if self.tg_token and self.tg_chat:

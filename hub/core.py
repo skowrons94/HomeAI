@@ -137,6 +137,7 @@ class Hub:
     def __init__(self, cfg, root: Path):
         from .homekit import HomeKit
         from .notify import Notifier
+        from .push import Push
         from .settings import Config
         from .store import Store
 
@@ -154,6 +155,7 @@ class Hub:
         self.store = Store(self.data_dir / "hub.db")
         i18n.set_language(config.get("language"))
         self._apply_history_config()
+        self.push = Push(self)
         self.notify = Notifier(self, config.get("notify", {}))
         self.homekit = HomeKit(self, config.get("homekit", {}), self.data_dir)
         self.entities: dict[str, Entity] = {}
