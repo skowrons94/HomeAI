@@ -187,3 +187,36 @@ button.w-pickrow { display: flex; align-items: center; gap: 10px; min-height: 52
 /* planner buttons hold titles: let them wrap instead of being cut */
 button.w-filled, .w-row2 button, button.w-pickrow { white-space: normal; text-align: left; line-height: 1.2; }
 .w-row2 button { text-align: center; }
+
+/* cook with what we have */
+.r-cookcard { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 76px; padding: 14px 16px; text-align: left;
+  border-radius: var(--radius); border: 0; color: #fff; box-shadow: var(--shadow);
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #ff9f43)); }
+.r-cookic, .r-cookgo { flex: none; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; background: rgb(255 255 255 / .22); }
+.r-cooktx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.r-cooktx b { font-size: 17px; line-height: 1.25; }
+.r-cooktx span { font-size: 13px; opacity: .92; }
+.r-cookhead { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.r-cookhead h2 { font-size: 18px; margin: 0; }
+.r-cchips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.r-cchip { display: inline-flex; align-items: center; gap: 2px; min-height: 44px; padding: 0 4px 0 16px; border-radius: 999px; font-size: 15px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+.r-cchip button { min-width: 44px; min-height: 44px; padding: 0; background: none; border: 0; box-shadow: none; display: grid; place-items: center; color: inherit; }
+.r-sugg { justify-content: flex-start; margin: -6px 0 6px; }
+.r-cookopts { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 6px 0 4px; }
+.r-pantrytog { display: flex; align-items: center; gap: 10px; min-height: 44px; font-size: 15px; cursor: pointer; }
+.r-pantrytog input { width: 24px; height: 24px; }
+.r-pantrybtn { min-height: 44px; gap: 8px; }
+.r-clist { display: flex; flex-direction: column; gap: 10px; }
+.r-cres { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+.r-cmain { display: flex; gap: 12px; align-items: center; cursor: pointer; min-height: 72px; }
+.r-cmain img, .r-cmain .ph { flex: none; width: 72px; height: 72px; border-radius: var(--radius-sm); object-fit: cover; display: grid; place-items: center; background: var(--bg); }
+.r-cinfo { min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.r-cinfo .t { font-weight: 600; font-size: 16px; }
+.r-ok { display: inline-flex; align-items: center; gap: 6px; color: var(--ok); font-weight: 600; }
+.r-ok svg.i { width: 16px; height: 16px; stroke-width: 3; }
+.r-ok.r-near { color: var(--warn); }
+.r-miss { color: var(--warn); }
+.r-sub { color: var(--muted); font-size: 13px; }
+.r-cres > button { min-height: 44px; gap: 8px; }
+.r-cookcard { white-space: normal; }

@@ -18,6 +18,7 @@ from aiohttp import web
 
 from ...core import Plugin
 from ...i18n import _
+from . import pantry as pantry_mod
 from . import sources
 from .db import Book
 from .planner import Planner, monday
@@ -55,16 +56,22 @@ class RecipesPlugin(Plugin):
          "options": [{"value": "it", "label": "Italiano"}, {"value": "en", "label": "English"}]},
         {"key": "plan_reminder", "label": "Remind tonight's dinner", "type": "bool", "default": False,
          "help": "A notification in the afternoon with what's for dinner."},
+        {"key": "pantry_from_shopping", "label": "Ticked shopping items go to the pantry", "type": "bool",
+         "default": True},
     ]
 
     def __init__(self, hub, config):
         super().__init__(hub, config)
         self.book: Book | None = None
         self.planner: Planner | None = None
+        self.pantry: pantry_mod.Pantry | None = None
 
     async def start(self):
         self.book = Book(self.hub.store, self.hub.data_dir, self.config)
         self.planner = Planner(self.book)
+        self.pantry = pantry_mod.Pantry(self.hub.store)
+        if self.book.tidy_titles(sources.clean_title):
+            self.log.info("tidied imported recipe titles")
         self.hub.every(60, self._remind, name="recipes.plan_reminder", initial_delay=20)
         # calories are shown per recipe and in the Today tab, not as a chart
         self.hub.store.delete_series("recipes.calories")
@@ -102,6 +109,12 @@ class RecipesPlugin(Plugin):
             web.patch("/shopping/{id}", self.r_shop_patch),
             web.delete("/shopping", self.r_shop_clear),
             web.delete("/shopping/{id}", self.r_shop_delete),
+            web.get("/pantry", self.r_pantry),
+            web.put("/pantry", self.r_pantry_put),
+            web.post("/pantry/add", self.r_pantry_add),
+            web.post("/pantry/remove", self.r_pantry_remove),
+            web.get("/ingredients", self.r_ingredients),
+            web.post("/cook-with", self.r_cook_with),
             web.get("/log", self.r_log),
             web.post("/log", self.r_log_add),
             web.delete("/log/{id}", self.r_log_delete),
@@ -219,7 +232,11 @@ class RecipesPlugin(Plugin):
         return _json({"items": self.book.shopping()})
 
     async def r_shop_patch(self, request):
-        self.book.shop_patch(int(request.match_info["id"]), await _body(request))
+        sid, b = int(request.match_info["id"]), await _body(request)
+        row = self.book.store.query("SELECT name FROM recipes_shop WHERE id=?", (sid,))
+        self.book.shop_patch(sid, b)
+        if b.get("checked") and row and self.config.get("pantry_from_shopping", True):
+            self.pantry.add([row[0]["name"]])
         return _json({"items": self.book.shopping()})
 
     async def r_shop_delete(self, request):
@@ -229,6 +246,36 @@ class RecipesPlugin(Plugin):
     async def r_shop_clear(self, request):
         self.book.shop_clear(everything=request.query.get("all") in ("1", "true"))
         return _json({"items": self.book.shopping()})
+
+    # -- pantry / cook with what we have ---------------------------------------------
+
+    async def r_pantry(self, request):
+        return _json({"items": self.pantry.items()})
+
+    @staticmethod
+    def _items(b: dict) -> list[str]:
+        v = b.get("items")
+        if not isinstance(v, list):
+            raise ValueError(_("A list of items is required"))
+        return [str(x) for x in v]
+
+    async def r_pantry_put(self, request):
+        return _json({"items": self.pantry.put(self._items(await _body(request)))})
+
+    async def r_pantry_add(self, request):
+        return _json({"items": self.pantry.add(self._items(await _body(request)))})
+
+    async def r_pantry_remove(self, request):
+        return _json({"items": self.pantry.remove(self._items(await _body(request)))})
+
+    async def r_ingredients(self, request):
+        return _json({"items": pantry_mod.known_ingredients(self.book)})
+
+    async def r_cook_with(self, request):
+        b = await _body(request)
+        typed = self._items({"items": b.get("ingredients")})
+        use = b.get("use_pantry", True)
+        return _json({"results": pantry_mod.cook_with(self.book, typed, self.pantry.items() if use else [])})
 
     # -- calories -----------------------------------------------------------------
 

@@ -110,6 +110,8 @@ async def import_url(http, url: str) -> dict:
     if not rec:
         raise ValueError(_("No recipe found on that page (it has no schema.org Recipe data)"))
     rec["lang"] = guess_lang(urlparse(final).netloc, page)
+    if rec.get("title"):
+        rec["title"] = clean_title(rec["title"])  # "… : Ricetta originale" tails
     return rec
 
 

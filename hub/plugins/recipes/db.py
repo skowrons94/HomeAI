@@ -243,6 +243,24 @@ class Book:
         cols = ", ".join(f"{k}=?" for k in sets)
         self.store.execute(f"UPDATE recipes_recipe SET {cols} WHERE id=?", (*sets.values(), rid))
 
+    def tidy_titles(self, clean) -> int:
+        """Imported titles with marketing tails ("… : Ricetta originale e Consigli"): clean the
+        title and the stored original alike, so it isn't shown as an edit. Returns how many."""
+        n = 0
+        for r in self.store.query("SELECT id, title, original FROM recipes_recipe WHERE source_url != ''"):
+            new = clean(r["title"])
+            if not new or new == r["title"]:
+                continue
+            orig = r["original"]
+            if orig:
+                o = json.loads(orig)
+                if o.get("title") == r["title"]:
+                    o["title"] = new
+                orig = json.dumps(o, ensure_ascii=False)
+            self.store.execute("UPDATE recipes_recipe SET title=?, original=? WHERE id=?", (new, orig, r["id"]))
+            n += 1
+        return n
+
     def reset(self, rid: int) -> None:
         r = self._row(rid)
         if not r["original"]:

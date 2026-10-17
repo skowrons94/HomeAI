@@ -70,7 +70,7 @@ function renderDiscover(el) {
     try { showResults(out, await P(`search?q=${enc(q)}`), q); }
     catch (err) { fill(out, h("div.empty", err.message)); }
   };
-  fill(el, h("form.r-search", { onsubmit: submit }, h("div.r-input", icon("search"), input), btn), out);
+  fill(el, cookCard(el), h("form.r-search", { onsubmit: submit }, h("div.r-input", icon("search"), input), btn), out);
   if (input.value.trim() && !isUrl(input.value)) submit(new Event("submit"));
   else intro(out, input, submit);
 }
@@ -138,6 +138,139 @@ async function newRecipe() {
       s.close(); go(`#/recipes/recipe/${r.id}`);
     }, e.currentTarget) }, t("Save"))]);
   title.focus();
+}
+
+// ---------------------------------------------------------------- cook with what we have
+
+const norm = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+const jsonKey = (k, d) => { try { return JSON.parse(sessionStorage.getItem(k)) ?? d; } catch { return d; } };
+
+function cookCard(el) {
+  return h("button.r-cookcard", { type: "button", onclick: () => renderCook(el) },
+    h("span.r-cookic", icon("utensils")),
+    h("span.r-cooktx", h("b", t("What can I cook with what I have?")), h("span", t("Type 2-3 ingredients and see what you can make"))),
+    h("span.r-cookgo", icon("search")));
+}
+
+async function renderCook(el) {
+  let chips = jsonKey("r-cook", []);
+  let usePantry = jsonKey("r-cook-pantry", true);
+  let pantry = [], known = [], seq = 0;
+  const save = () => { try { sessionStorage.setItem("r-cook", JSON.stringify(chips)); sessionStorage.setItem("r-cook-pantry", JSON.stringify(usePantry)); } catch {} };
+  const input = h("input", { placeholder: t("Add an ingredient (e.g. zucchini)"), enterkeyhint: "done", autocomplete: "off", autocapitalize: "none" });
+  const chipBox = h("div.r-cchips"), sugg = h("div.r-ideas.r-sugg"), pantryBtn = h("button.r-pantrybtn", { type: "button" });
+  const toggle = h("input", { type: "checkbox", checked: usePantry, onchange: (e) => { usePantry = e.target.checked; save(); run(); } });
+  const local = h("div"), web = h("div");
+
+  const add = (txt) => {
+    const parts = String(txt).split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
+    let changed = false;
+    for (const x of parts) if (!chips.some((c) => norm(c) === norm(x))) { chips.push(x); changed = true; }
+    input.value = ""; paintSugg();
+    if (changed) { paintChips(); run(); }
+  };
+  const drop = (i) => { chips.splice(i, 1); paintChips(); run(); };
+  function paintChips() {
+    save();
+    fill(chipBox, chips.map((c, i) => h("span.r-cchip", c,
+      h("button", { type: "button", "aria-label": t("Remove {name}", { name: c }), onclick: () => drop(i) }, icon("x")))));
+  }
+  function paintSugg() {
+    const q = norm(input.value);
+    const list = q ? known.filter((k) => norm(k).includes(q) && !chips.some((c) => norm(c) === norm(k))).slice(0, 6) : [];
+    fill(sugg, list.map((k) => h("button.chipbtn", { type: "button", onclick: () => { add(k); input.focus(); } }, icon("plus"), k)));
+  }
+  const paintPantryBtn = () => fill(pantryBtn, icon("storage"), `${t("Pantry")} (${pantry.length})`);
+  pantryBtn.onclick = () => pantrySheet(pantry, (items) => { pantry = items; paintPantryBtn(); paintToggle(); run(); });
+  const toggleLabel = h("label.r-pantrytog", toggle, `${t("Use the pantry")} (0)`);
+  function paintToggle() { fill(toggleLabel, toggle, `${t("Use the pantry")} (${pantry.length})`); }
+
+  input.addEventListener("input", () => { if (input.value.includes(",")) add(input.value); else paintSugg(); });
+  const form = h("form.r-search", { onsubmit: (e) => { e.preventDefault(); if (input.value.trim()) add(input.value); } },
+    h("div.r-input", icon("plus"), input), h("button.primary", { type: "submit" }, t("Add")));
+
+  async function run() {
+    const my = ++seq;
+    if (!chips.length) { fill(web); return showEmpty(); }
+    fill(local, loading()); fill(web);
+    const q = chips.join(" ");
+    P("cook-with", { body: { ingredients: chips, use_pantry: usePantry } }).then((r) => {
+      if (my !== seq) return;
+      fill(local, h("h2.r-sec", t("From your recipes")),
+        r.results.length ? h("div.r-clist", r.results.map(cookResult))
+          : h("div.r-banner", icon("search"), h("div", t("None of your saved recipes fits yet. Try the web ideas below."))));
+    }).catch((e) => my === seq && fill(local, h("div.empty", e.message)));
+    fill(web, h("h2.r-sec", t("Ideas from the web")), loading());
+    P(`search?q=${enc(q)}`).then((res) => {
+      if (my !== seq) return;
+      const items = (res.results || []).slice(0, 12);
+      fill(web, h("h2.r-sec", t("Ideas from the web")), items.length
+        ? h("div.r-grid", items.map((r) => {
+          const c = card({ image: r.image, title: r.title, meta: `${FLAG[r.lang] || ""} ${r.source || r.subtitle || r.site}` },
+            () => importRecipe(r.mealdb ? { mealdb: r.mealdb } : { url: r.url }, c), r.saved ? h("span.r-badge", icon("check")) : null);
+          return c;
+        }))
+        : h("p.muted", t("Nothing found.")));
+    }).catch(() => my === seq && fill(web));
+  }
+  function showEmpty() {
+    const ex = [t("zucchini, eggs"), t("pasta, tomatoes"), t("potatoes, onions"), t("rice, mushrooms")];
+    fill(local, h("div.r-empty.r-intro", h("div.r-empty-ic", icon("utensils")),
+      h("p", t("Type what you have: we look for what you can cook, from your recipes and from the web.")),
+      h("div.r-ideas", ex.map((x) => h("button.chipbtn", { type: "button", onclick: () => { chips = []; add(x); } }, x)))));
+  }
+
+  fill(el,
+    h("div.r-cookhead", h("button.icon.ghost", { type: "button", "aria-label": t("Back"), onclick: () => renderDiscover(el) }, icon("back")),
+      h("h2", t("What can I cook with what I have?"))),
+    form, sugg, chipBox,
+    h("div.r-cookopts", toggleLabel, pantryBtn), local, web);
+  paintChips(); paintToggle(); paintPantryBtn(); run();
+  input.focus({ preventScroll: true });
+  try {
+    pantry = (await P("pantry")).items; paintToggle(); paintPantryBtn(); if (chips.length) run();
+    known = (await P("ingredients")).items;
+  } catch {}
+}
+
+function cookResult(r) {
+  const missing = r.missing || [], subs = r.substitutes || [];
+  const status = !missing.length && !subs.length ? h("span.r-ok", icon("check"), t("You have everything"))
+    : !missing.length ? h("span.r-ok.r-near", icon("check"), t("You have everything (with substitutes)"))
+    : h("span.r-miss", t("Missing: {items}", { items: missing.join(", ") }));
+  const addBtn = missing.length ? h("button", { type: "button", onclick: (e) => act(async () => {
+    for (const m of missing) await P("shopping", { body: { name: m } });
+    toast(t("Added to the shopping list"));
+  }, e.currentTarget) }, icon("cart"), t("Add missing to the shopping list")) : null;
+  return h("div.r-cres",
+    h("div.r-cmain", { onclick: () => go(`#/recipes/recipe/${r.id}`) },
+      r.image ? h("img", { src: r.image, loading: "lazy", alt: "" }) : h("div.ph", icon("utensils")),
+      h("div.r-cinfo", h("div.t", r.title), status,
+        subs.map((s) => h("div.r-sub", t("≈ {have} instead of {need}", { have: s.have, need: s.need }))))),
+    addBtn);
+}
+
+function pantrySheet(items, onChange) {
+  let list = [...items];
+  const box = h("div.r-cchips"), input = h("input", { placeholder: t("Add to the pantry (e.g. rice)"), enterkeyhint: "done", autocomplete: "off" });
+  const paint = () => fill(box, list.length ? list.map((x) => h("span.r-cchip", x,
+    h("button", { type: "button", "aria-label": t("Remove {name}", { name: x }), onclick: () => change("remove", [x]) }, icon("x"))))
+    : h("p.muted", t("The pantry is empty.")));
+  const change = (what, its) => act(async () => {
+    list = (await P(`pantry/${what}`, { body: { items: its } })).items; paint(); onChange(list);
+  });
+  const s = sheet(t("Pantry"), [
+    h("p.muted", t("What we always have at home. Salt, pepper, oil, water, sugar and vinegar are already counted.")),
+    h("form.r-search", { onsubmit: (e) => { e.preventDefault(); if (input.value.trim()) { change("add", [input.value]); input.value = ""; } } },
+      h("div.r-input", icon("plus"), input), h("button.primary", { type: "submit" }, t("Add"))),
+    box,
+    h("button", { type: "button", onclick: (e) => act(async () => {
+      const taken = (await P("shopping")).items.filter((i) => i.checked).map((i) => i.name);
+      if (!taken.length) return toast(t("No ticked items in the shopping list"));
+      await change("add", taken);
+    }, e.currentTarget) }, icon("cart"), t("Add ticked shopping items"))]);
+  paint();
+  return s;
 }
 
 // ---------------------------------------------------------------- my recipes
