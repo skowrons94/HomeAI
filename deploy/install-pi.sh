@@ -9,6 +9,8 @@
 #   2. Python venv + requirements
 #   3. NAS: root mount helper (lets the app mount/unmount NAS shares) and, unless
 #      NAS_FSTAB=0, a boot-time /etc/fstab mount of the default share at /mnt/nas
+#      (NAS_FSTAB=0 if the NAS is already mounted, e.g. by your own fstab lines;
+#      MOUNT=... and DOWNLOAD_DIR=... point the installer at those folders)
 #   4. Transmission: RPC on localhost only, downloads on the NAS
 #   5. systemd service "casa" (starts at boot, restarts on failure)
 set -euo pipefail
@@ -18,6 +20,7 @@ USER_NAME="$(id -un)"
 NAS_HOST="${NAS_HOST:-NAS.local}"
 NAS_SHARE="${NAS_SHARE:-Multimedia}"
 MOUNT="${MOUNT:-/mnt/nas}"
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-$MOUNT/downloads/incomplete}"   # where Transmission writes
 
 say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 
@@ -70,7 +73,7 @@ sudo mount "$MOUNT" 2>/dev/null || true
 ls "$MOUNT" >/dev/null && echo "NAS mounted: $(ls "$MOUNT" | tr '\n' ' ')" \
   || echo "!! NAS not mounted yet - check $CRED and the share name, then: sudo mount $MOUNT"
 sudo usermod -aG debian-transmission "$USER_NAME"
-mkdir -p "$MOUNT/downloads/incomplete" 2>/dev/null || true
+mkdir -p "$DOWNLOAD_DIR" 2>/dev/null || true
 else
   sudo usermod -aG debian-transmission "$USER_NAME"
   sudo mkdir -p "$MOUNT"
@@ -79,7 +82,7 @@ fi
 say "Configuring Transmission"
 sudo systemctl stop transmission-daemon
 SETTINGS=/etc/transmission-daemon/settings.json
-sudo python3 - "$SETTINGS" "$MOUNT/downloads/incomplete" <<'PY'
+sudo python3 - "$SETTINGS" "$DOWNLOAD_DIR" <<'PY'
 import json, sys
 path, dl = sys.argv[1], sys.argv[2]
 s = json.load(open(path))
