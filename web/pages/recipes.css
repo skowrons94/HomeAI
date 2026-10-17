@@ -99,3 +99,42 @@ button.star.on svg { fill: var(--on); }
 .r-grid.editing .r-card:hover .img { transform: none; }
 .r-cardel { position: absolute; right: 8px; bottom: 8px; min-height: 36px; padding: 0 12px; gap: 6px;
   background: var(--bad); color: #fff; box-shadow: var(--shadow); }
+
+/* empty states, intro, touch targets */
+.r-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 32px 16px; }
+.r-empty p { margin: 0; max-width: 300px; line-height: 1.4; }
+.r-empty-ic { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.r-empty-ic svg.i { width: 30px; height: 30px; }
+.r-empty-act, .r-ideas { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.r-intro { padding-bottom: 20px; }
+.r-ideas button.chipbtn { font-size: 15px; }
+h2.r-sec { font-size: 17px; margin: 18px 0 10px; }
+button.chipbtn, .r-editbtn, .r-actions button, .r-cardel, .r-search button { min-height: 44px; }
+button.chipbtn { padding: 0 16px; }
+.r-search > button.primary { padding: 0 16px; }
+button.icon { min-width: 44px; min-height: 44px; }
+button.star { min-width: 44px; min-height: 44px; }
+.r-ing button.icon { padding: 6px; }
+.r-shop { min-height: 56px; cursor: pointer; }
+.r-shop input[type=checkbox] { width: 24px; height: 24px; }
+.r-donehead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
+.r-donehead h2 { margin: 12px 0; color: var(--muted); }
+.r-allin { padding: 20px 16px; }
+.r-bars .bar { min-height: 44px; }
+.r-head + .tabs { flex-wrap: wrap; overflow: visible; }
+.r-head + .tabs button { min-height: 44px; }
+
+/* servings control under the title */
+.r-portions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.r-portions .lbl { font-weight: 600; font-size: 17px; }
+.r-portions .orig, .r-orig { flex-basis: 100%; }
+.stepper.big { display: flex; align-items: center; gap: 6px; }
+.stepper.big button.icon { width: 48px; height: 48px; min-width: 48px; border-radius: 50%; }
+.stepper.big .val { min-width: 44px; text-align: center; font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* edit mode: phone friendly */
+.r-detail input, .r-detail textarea { font-size: 16px; }
+.r-detail textarea.r-edit { min-height: 200px; line-height: 1.45; }
+.r-editbar { position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; justify-content: flex-end; padding: 8px 0;
+  background: var(--bg); }
+.r-editbar button { min-height: 44px; flex: 1; max-width: 160px; }

@@ -97,7 +97,7 @@ function poster(it, clickable = true) {
       h("div.badges",
         it.in_library && h("span.badge.lib", { title: t("In your library") }, icon("check")),
         it.favourite && h("span.badge.fav", { title: t("Favourite") }, icon("heart"))),
-      it.rating && h("span.rating", `★ ${it.rating}`)),
+      it.rating && h("span.rating", `★ ${fmt.num(it.rating, 1)}`)),
     h("div.t", it.title),
     h("div.y", [it.year, it.type === "series" ? t("Series") : ""].filter(Boolean).join(" · ")));
 }
@@ -120,14 +120,25 @@ function reason(r) {
 
 const loading = () => h("div.empty", h("div.spin"));
 
+// placeholder posters (same size as real ones) while a rail/grid loads
+const skeletons = (n = 4) => Array.from({ length: n }, () =>
+  h("div.poster.skel", h("div.img"), h("div.t"), h("div.y")));
+const skelRail = () => [h("div.section", h("h2.skel-h", "\u00a0")), h("div.m-row", skeletons(4))];
+
+// friendly empty state: icon, one sentence, a button that leads somewhere
+const emptyState = (ico, text, label, hash) =>
+  h("div.empty.m-empty", h("div.m-empty-ico", icon(ico)), h("p", text),
+    h("button.primary", { onclick: () => go(hash) }, label));
+
 // ---------------------------------------------------------------- discover / search
 
 async function renderDiscover(el, kind, genre) {
   kind = kind === "series" ? "series" : "movie";
   genre = genre ? decodeURIComponent(genre) : "";
-  const chips = h("div.m-chips");
+  const chips = h("div.m-chips-in");
   const out = h("div");
   const seg = h("div.seg.m-kind");
+  const strip = h("div.m-chips", seg, chips);
   let genres = [];
   let token = null;
   const setHash = () => history.replaceState(null, "", genre ? `#/media/discover/${kind}/${enc(genre)}` : "#/media");
@@ -155,16 +166,18 @@ async function renderDiscover(el, kind, genre) {
         const r = await P(`discover/genre?type=${kind}&genre=${enc(genre)}&page=${page + 1}`);
         if (mine !== token) return;
         page = r.page;
+        grid.querySelectorAll(".skel").forEach((x) => x.remove());
         grid.append(...r.items.map((it) => poster(it)));
         if (!grid.children.length) box.replaceChildren(h("div.empty", t("Nothing found.")));
         else if (!r.has_more) box.remove();
-      } catch (e) { toast(t("Couldn't load genre: {error}", { error: e.message }), true); }
+      } catch (e) { grid.querySelectorAll(".skel").forEach((x) => x.remove()); toast(t("Couldn't load genre: {error}", { error: e.message }), true); }
       finally { busy = false; more.disabled = false; }
     }
     more.onclick = next;
     fill(out, h("div.section", h("h2", genreName(g ? g.name : genre)), h("div.spacer"),
                 h("button.ghost", { onclick: () => pick(genre) }, icon("x"), t("Clear"))),
          grid, box);
+    grid.append(...skeletons(6));
     if ("IntersectionObserver" in window) {
       new IntersectionObserver((e) => e[0].isIntersecting && page && mine === token && next(),
                                { rootMargin: "400px" }).observe(box);
@@ -172,7 +185,7 @@ async function renderDiscover(el, kind, genre) {
     await next();
   }
   async function rows(mine) {
-    fill(out, loading());
+    fill(out, skelRail(), skelRail());
     let d;
     try { d = await P("discover"); } catch (e) { toast(e.message, true); d = { sections: [] }; }
     if (mine !== token) return;
@@ -191,13 +204,14 @@ async function renderDiscover(el, kind, genre) {
     paintChips();
     await show();
   }
-  fill(el, seg, chips, out);
+  fill(el, strip, out);
   await start();
 }
 
 async function renderSearch(el, q, current = () => true) {
   // keep the previous results on screen (dimmed) while the new ones load: no jumping
-  if (el.querySelector(".m-grid")) el.classList.add("m-stale"); else fill(el, loading());
+  if (el.querySelector(".m-grid") && !el.querySelector(".skel")) el.classList.add("m-stale");
+  else fill(el, h("div.m-grid", skeletons(6)));
   let items;
   try { items = await P(`search?q=${enc(q)}`); } finally { if (current()) el.classList.remove("m-stale"); }
   if (!current()) return;
@@ -222,7 +236,7 @@ async function renderDetail(root, type, id, on) {
           h("div.row.wrap.small.muted",
             [it.year, typeof it.runtime === "number" ? t("{n} min", { n: it.runtime }) : it.runtime, it.type === "series" ? t("Series") : t("Movie"),
              ...(it.genres || []).slice(0, 3)].filter(Boolean).join(" · "),
-            it.rating && h("span.chip", `★ ${it.rating}`),
+            it.rating && h("span.chip", `★ ${fmt.num(it.rating, 1)}`),
             it.in_library && h("span.chip.ok", icon("check"), t("In library")))))),
     body);
 
@@ -450,7 +464,8 @@ async function renderWatchlist(el, on) {
   const paint = async () => {
     const items = await P("watchlist");
     if (!items.length) {
-      fill(el, h("div.empty", t("No favourites yet. Open a movie or series and tap ♥ - you'll get a notification as soon as it's available (Italian first).")));
+      fill(el, emptyState("heart", t("Tap the heart on a film or series and I'll tell you when it's ready to watch."),
+                          t("Discover movies"), "#/media"));
       return;
     }
     fill(el, h("div.section", h("h2", t("Favourites")), h("span.muted", items.length)),
@@ -510,7 +525,8 @@ async function renderDownloads(el, on) {
     const done = items.filter((d) => !active.includes(d));
     fill(el, 
       h("div.section", h("h2", t("Downloading")), h("span.muted", active.length)),
-      active.length ? h("div.list", active.map(dlRow)) : h("div.empty", t("Nothing downloading. Find something in Discover ✨")),
+      active.length ? h("div.list", active.map(dlRow))
+        : emptyState("download", t("Nothing is downloading right now."), t("Discover movies"), "#/media"),
       done.length ? [h("div.section", h("h2", t("Finished"))), h("div.list", done.slice(0, 30).map(dlRow))] : null);
   };
   fill(el, loading());
@@ -534,9 +550,9 @@ async function renderLibrary(el) {
     const r = await P(`library?kind=${kind}`);
     const s = r.stats;
     fill(stats, 
-      h("div.card.stat", h("b", s.movies), h("span.muted.small", t("movies"))),
-      h("div.card.stat", h("b", s.shows), h("span.muted.small", t("series"))),
-      h("div.card.stat", h("b", s.episodes), h("span.muted.small", t("episodes"))),
+      h("div.card.stat", h("b", String(s.movies)), h("span.muted.small", t("movies"))),
+      h("div.card.stat", h("b", String(s.shows)), h("span.muted.small", t("series"))),
+      h("div.card.stat", h("b", String(s.episodes)), h("span.muted.small", t("episodes"))),
       h("div.card.stat", h("b", fmt.bytes(s.size)), h("span.muted.small", s.last_scan ? t("scanned {when}", { when: fmt.ago(s.last_scan) }) : t("never scanned"))));
     const missing = [!s.movies_dir_ok && t("movies folder not found: {dir}", { dir: s.movies_dir || t("(not set)") }),
                      !s.series_dir_ok && t("series folder not found: {dir}", { dir: s.series_dir || t("(not set)") })].filter(Boolean);
@@ -545,7 +561,8 @@ async function renderLibrary(el) {
       r.items.length ? h("div.m-grid", r.items.map((x) => poster({
         ...x, type: kind === "movies" ? "movie" : "series", id: x.meta_id,
         in_library: false, title: x.title, year: [x.year, x.episodes ? t("{n} ep", { n: x.episodes }) : x.quality].filter(Boolean).join(" · "),
-      }, !!x.meta_id))) : h("div.empty", t("Empty.")));
+      }, !!x.meta_id))) : emptyState("film", t("Your library is empty. Films you download will show up here."),
+                                                                       t("Discover movies"), "#/media"));
   }
   fill(el, 
     h("div.section", h("h2", t("Your library")), h("div.spacer"), scanBtn), stats,

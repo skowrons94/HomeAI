@@ -31,11 +31,17 @@
 .h-txt .name.wrap { hyphens: auto; -webkit-hyphens: auto; overflow-wrap: anywhere; line-height: 1.2; }
 .h-txt .sub { color: var(--muted); font-size: 13px; }
 .stepper.sm { gap: 4px; }
+/* heating rows: two lines (name/status/switch, then now/target) */
+.hrow.climate { flex-direction: column; align-items: stretch; gap: 4px; padding: 10px 12px; }
+.c-line { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.c-set { padding-left: 48px; gap: 8px; }
 .stepper.sm button { padding: 6px; }
 .stepper.sm .c-target { min-width: 52px; text-align: center; font-size: 16px; font-variant-numeric: tabular-nums; }
 .sw-slot { width: 46px; flex: none; }
 .h-txt .sub, .g-temp b, .stepper .val { font-variant-numeric: tabular-nums; }
-input.vol { flex: 1 1 120px; min-width: 90px; max-width: 220px; }
+.vol-wrap { display: flex; align-items: center; gap: 8px; flex: 1 1 140px; min-width: 120px; color: var(--muted); }
+input.vol { flex: 1; min-width: 60px; }
+.vol-n { min-width: 26px; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
 .hrow.unavailable, .lchip.unavailable { opacity: .5; }
 
 /* -- light chips: tap = on/off, hold = brightness/colour -- */
@@ -44,6 +50,7 @@ input.vol { flex: 1 1 120px; min-width: 90px; max-width: 220px; }
          background: var(--surface); box-shadow: var(--shadow); font-weight: 600; min-height: 52px;
          -webkit-touch-callout: none; user-select: none; touch-action: manipulation; }
 .lchip.lit { background: color-mix(in srgb, var(--on) 22%, var(--surface)); color: var(--text); }
+@media (prefers-color-scheme: light) { .lchip:not(.lit) { box-shadow: var(--shadow), inset 0 0 0 1px var(--line); } }
 .ldot { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--surface-2);
         box-shadow: inset 0 0 0 1.5px var(--line); }
 .lchip.lit .ldot { background: var(--on); box-shadow: 0 0 10px var(--on); }
@@ -57,14 +64,14 @@ input.vol { flex: 1 1 120px; min-width: 90px; max-width: 220px; }
                 background: var(--surface-2); display: grid; place-items: center; color: var(--muted); }
 .p-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 
-/* -- shortcuts -- */
-.shortcuts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 22px; }
-.sc { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 6px; border-radius: var(--radius);
-      background: var(--surface); box-shadow: var(--shadow); color: var(--text); font-weight: 600; font-size: 13px;
-      text-align: center; }
+/* -- shortcuts: compact links -- */
+.shortcuts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 22px; }
+.sc { display: flex; align-items: center; gap: 10px; padding: 8px 10px; min-height: 52px; border-radius: 14px;
+      background: var(--surface); box-shadow: var(--shadow); color: var(--text); font-weight: 600; font-size: 14px; min-width: 0; }
 .sc:active { transform: scale(.97); }
-.sc-ico { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center;
+.sc-ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; flex: none;
           background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+.sc-ico svg.i { width: 18px; height: 18px; }
 @media (max-width: 760px) { .shortcuts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 /* -- full view: compact device tiles, folded system sensors -- */
@@ -89,3 +96,14 @@ details.sys[open] summary { margin-bottom: 12px; }
 .t-edit button.icon { padding: 6px; }
 .t-edit button.icon { background: var(--surface); box-shadow: var(--shadow); }
 .tile.editing .more { display: none; }
+
+/* -- notes block -- */
+.notes-block { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; }
+.n-line { display: flex; align-items: baseline; gap: 8px; color: var(--text); padding: 8px 2px; min-height: 44px;
+          border-bottom: 1px solid var(--line); }
+.n-text { flex: 1; min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.n-meta { flex: none; }
+.n-add { display: flex; gap: 8px; align-items: center; padding-top: 8px; }
+.sc-label { min-width: 0; line-height: 1.2; overflow-wrap: anywhere; }
+.start-hint { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.h-vol { flex: 1 1 100%; padding-left: 48px; display: flex; }

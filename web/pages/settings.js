@@ -25,7 +25,7 @@ const optText = (key, o) => OPTION_LABELS[key]?.[optVal(o)]?.() ?? optLabel(o);
 // ---------------------------------------------------------------- form renderer
 
 function switchEl(checked, onchange, disabled) {
-  const input = h("input", { type: "checkbox", checked: !!checked, disabled: !!disabled, onchange });
+  const input = h("input", { type: "checkbox", role: "switch", checked: !!checked, disabled: !!disabled, onchange });
   return { el: h("label.sw", input, h("span")), input };
 }
 

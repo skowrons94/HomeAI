@@ -30,6 +30,7 @@ again* in Settings re-opens the wizard.
 | `system` | This hub | CPU, temperature, memory, disk, network download/upload, Wi-Fi signal, internet latency — recorded in History |
 | `storage` | NAS via mDNS | Find the NAS, list its shares, mount it from the app, suggest library folders, free-space sensors |
 | `recipes` | GialloZafferano, TheMealDB, any recipe URL | Search or import recipes (stored locally, with images); favourites, notes, your own edits (with reset); shopping list with substitutions; calories per serving and a daily log against a goal |
+| `notes` | This hub (SQLite) | Shared notes and small checklists for the household: colours, pinned notes, tick items on the card, phone notification for new notes |
 | `media` | TMDB / Cinemeta, Torrentio, Knaben, TPB, EZTV (+ YTS, ilCorSaRoNeRo, 1337x via proxy/VPN), Transmission, NAS | Discover, search, one-click download, watchlist + notifications, library on the NAS |
 
 ## Layout

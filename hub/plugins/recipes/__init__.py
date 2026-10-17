@@ -44,7 +44,7 @@ class RecipesPlugin(Plugin):
         {"key": "daily_kcal_goal", "label": "Daily calorie goal", "type": "number", "default": 2000,
          "min": 500, "max": 6000, "step": 50, "unit": "kcal"},
         {"key": "default_servings", "label": "Default servings", "type": "number", "default": 2,
-         "min": 1, "max": 30, "step": 1, "help": "Used when a recipe doesn't say how many it serves."},
+         "min": 1, "max": 12, "step": 1, "help": "Recipes open already scaled for this many people."},
         {"key": "sources", "label": "Search sources", "type": "list", "default": ["themealdb", "giallozafferano"],
          "advanced": True, "help": "themealdb (English) and giallozafferano (Italian). Any URL can be imported anyway."},
         {"key": "language", "label": "Language", "type": "select", "default": "it",

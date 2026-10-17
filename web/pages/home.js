@@ -9,10 +9,10 @@ import { api, h, icon, sheet, bus, store, callEntity, act, debounce, fmt, toast,
 
 const KIND_ORDER = ["climate", "water_heater", "media_player", "tv", "speaker", "light", "switch", "sensor"];
 const SYS = "__system";  // full view: the hub's own sensors (system plugin)
-const SIMPLE = ["glance", "climate", "lights", "playing", "devices", "shortcuts"];
-const SIMPLE_TITLE = () => ({ glance: t("At a glance"), climate: t("Heating"), lights: t("Lights"),
+const SIMPLE = ["glance", "notes", "climate", "lights", "playing", "devices", "shortcuts"];
+const SIMPLE_TITLE = () => ({ glance: t("At a glance"), notes: t("Notes"), climate: t("Heating"), lights: t("Lights"),
   playing: t("Now playing"), devices: t("TV and speakers"), shortcuts: t("Shortcuts") });
-const HEADED = new Set(["lights", "playing", "devices"]);  // simple blocks with a visible title
+const HEADED = new Set(["notes", "lights", "playing", "devices"]);  // simple blocks with a visible title
 
 export default {
   async render(root) {
@@ -125,6 +125,13 @@ export default {
       summary.replaceChildren(...summaryChips());
     };
 
+    // household notes (notes plugin): the latest few + quick add; live through bus "notes"
+    let notes = [];
+    const loadNotes = () => (hasPlugin("notes")
+      ? api("p/notes/notes").then((n) => { notes = n; if (view() === "simple") redraw(); }).catch(() => {})
+      : Promise.resolve());
+    const onNotes = (ev) => { notes = ev.detail?.items || notes; if (view() === "simple") redraw(); };
+
     const drawSimple = () => {
       const ents = [...store.entities.values()].filter((e) => !e.attrs.hidden);
       const mine = tp().order || [];
@@ -145,7 +152,8 @@ export default {
       });
       const lights = by("light"), on = lights.filter((l) => l.state.on);
       const blocks = {
-        glance: glanceCard(ents),
+        glance: [glanceCard(ents), startHint(ents)],
+        notes: hasPlugin("notes") ? notesBlock(notes) : null,
         climate: rowsCard(ed(by("climate", "water_heater"), climateRow)),
         lights: lights.length ? h("div.lchips", ed(lights, lightChip)) : null,
         playing: playingCard(ents),
@@ -153,6 +161,7 @@ export default {
         shortcuts: shortcuts(),
       };
       const extra = {
+        notes: [h("div.spacer"), h("a.small", { href: "#/notes" }, t("All notes"))],
         lights: [h("span.muted.small", on.length ? t("{n} on", { n: on.length }) : t("all off")),
                  on.length > 0 && [h("div.spacer"), h("button.small", { onclick: (ev) => act(() =>
                    Promise.all(on.map((l) => callEntity(l.id, "turn_off"))), ev.currentTarget) }, icon("power"), t("Turn all off"))]],
@@ -180,7 +189,7 @@ export default {
       pending = setTimeout(wait > 0 ? redraw : draw, wait > 0 ? wait : 250);
     };
 
-    const editBtn = h("button.icon.ghost", { title: t("Customize"), onclick: () => {
+    const editBtn = h("button.icon.ghost", { title: t("Customize"), "aria-label": t("Customize"), onclick: () => {
       editing = !editing;
       editBtn.classList.toggle("primary", editing);
       draw();
@@ -191,6 +200,7 @@ export default {
       body,
     );
     draw();
+    loadNotes();
 
     const onEntity = (ev) => {
       if (view() === "simple") return redraw();
@@ -208,7 +218,9 @@ export default {
     bus.addEventListener("state", onState);
     bus.addEventListener("entity_removed", onState);
     bus.addEventListener("attentionchange", redraw);
+    bus.addEventListener("notes", onNotes);
     return () => {
+      bus.removeEventListener("notes", onNotes);
       clearTimeout(pending);
       bus.removeEventListener("entity", onEntity);
       bus.removeEventListener("state", onState);
@@ -272,8 +284,19 @@ function glanceCard(ents) {
     temps.length > 0 && h("button.g-temp", { onclick: () => thermoSheet(temps) },
       icon("thermo"), h("b", `${fmt.num(avg(temps, "temperature"), 1)}°`),
       hums.length > 0 && h("span.muted", icon("drop"), `${Math.round(avg(hums, "humidity"))}%`)),
-    h("div.spacer"),
+    temps.length > 0 && h("div.spacer"),
     h(`button.g-status.${st.level}`, { onclick: () => st.go && go(st.go) }, h("span.dot"), st.text));
+}
+
+/** A house without any controllable device yet (a friend's fresh install): say where to start. */
+function startHint(ents) {
+  const controllable = ents.some((e) => e.plugin !== "system" && e.kind !== "sensor") || roomSensors(ents).length;
+  return controllable ? null : h("div.card.start-hint",
+    h("span.sc-ico", icon("plug")),
+    h("div.stack", { style: { gap: "2px", flex: 1, minWidth: 0 } },
+      h("b", t("Connect your devices")),
+      h("span.muted.small", t("Lights, heating, TV and speakers appear here once you add them."))),
+    h("a.btn", { href: "#/settings" }, t("Add")));
 }
 
 function thermoSheet(temps) {
@@ -286,12 +309,14 @@ function thermoSheet(temps) {
 const rowsCard = (rows) => (rows.length ? h("div.card.rows", rows) : null);
 
 /** iOS-style on/off switch that doesn't trigger the row it sits in. */
-function toggle(on, onchange, disabled = false) {
-  const input = h("input", { type: "checkbox", checked: !!on, disabled, onchange: (ev) => onchange(ev.target.checked) });
+function toggle(on, onchange, disabled = false, label = "") {
+  const input = h("input", { type: "checkbox", role: "switch", checked: !!on, disabled, "aria-label": label,
+                             onchange: (ev) => onchange(ev.target.checked) });
   return h("label.sw", { onclick: (ev) => ev.stopPropagation() }, input, h("span"));
 }
 
-/** Heating / hot water: name + now, −/+ target, on/off. Tap the name for every option. */
+/** Heating / hot water in two lines - name, plain status, on/off / "Ora 20,8°", −/+ target.
+ *  Tap the name for every option (modes, schedule). */
 function climateRow(e) {
   const st = e.state, a = e.attrs, water = e.kind === "water_heater", modes = a.modes || [];
   let target = st.target_temperature;
@@ -303,18 +328,24 @@ function climateRow(e) {
     send();
   };
   const onMode = modes.includes("auto") ? "auto" : modes.find((m) => m !== "off");
-  const now = st.heating ? t("Heating now") : st.mode === "off" ? t("Off") : st.mode === "auto" ? t("Schedule") : t("Idle");
-  return h(`div.hrow${st.heating ? ".hot" : ""}${e.available ? "" : ".unavailable"}`,
-    h("button.h-main", { onclick: () => sheet(e.name, climateTile(e)) },
-      h("div.ico", icon(water ? "shower" : "flame")),
-      h("div.h-txt", h("div.name.wrap", e.name), h("div.sub.ellipsis", `${fmt.temp(st.current_temperature)}° · ${now}`))),
-    h("div.stepper.sm",
-      h("button.icon", { onclick: () => step(-1), "aria-label": t("Lower") }, icon("minus")), val,
-      h("button.icon", { onclick: () => step(1), "aria-label": t("Raise") }, icon("plus"))),
-    // no "off" mode (e.g. hot water): keep the switch's place so the −/+ of every row line up
-    modes.includes("off") && onMode ? toggle(st.mode !== "off",
-      (on) => act(() => callEntity(e.id, "set_mode", { mode: on ? onMode : "off" })), !e.available)
-      : h("span.sw-slot"));
+  const status = !e.available ? t("Unavailable") : st.mode === "off" ? t("Off")
+    : st.heating ? t("Heating now") : water ? t("Ready") : st.mode === "auto" ? t("Schedule") : t("Paused");
+  return h(`div.hrow.climate${st.heating ? ".hot" : ""}${e.available ? "" : ".unavailable"}`,
+    h("div.c-line",
+      h("button.h-main", { onclick: () => sheet(e.name, climateTile(e)) },
+        h("div.ico", icon(water ? "shower" : "flame")),
+        h("div.h-txt", h("div.name.ellipsis", e.name), h("div.sub", status))),
+      // no "off" mode (e.g. hot water): keep the switch's place so rows line up
+      modes.includes("off") && onMode ? toggle(st.mode !== "off",
+        (on) => act(() => callEntity(e.id, "set_mode", { mode: on ? onMode : "off" })), !e.available, e.name)
+        : h("span.sw-slot")),
+    h("div.c-line.c-set",
+      h("span.muted.small", t("Now {temp}°", { temp: fmt.temp(st.current_temperature) })),
+      h("div.spacer"),
+      h("span.muted.small", t("Target")),
+      h("div.stepper.sm",
+        h("button.icon", { onclick: () => step(-1), "aria-label": t("Lower") }, icon("minus")), val,
+        h("button.icon", { onclick: () => step(1), "aria-label": t("Raise") }, icon("plus")))));
 }
 
 /** Tap = on/off, hold = brightness and colour. */
@@ -323,7 +354,10 @@ function lightChip(e) {
   const el = h(`button.lchip${st.on ? ".lit" : ""}${e.available ? "" : ".unavailable"}`,
     h("span.ldot", { style: color ? { background: color } : null }),
     h("span.l-txt", h("span.ellipsis", e.name),
-      h("small.ellipsis", st.on && st.brightness !== undefined ? `${st.brightness}%` : (e.room !== e.name && e.room) || "")));
+      h("small.ellipsis", [st.on ? (st.brightness !== undefined ? `${st.brightness}%` : t("On")) : t("Off"),
+                           e.room !== e.name && e.room].filter(Boolean).join(" · "))));
+  el.setAttribute("aria-pressed", st.on ? "true" : "false");
+  el.setAttribute("aria-label", `${e.name}: ${st.on ? t("On") : t("Off")}`);
   longPress(el, () => lightSheet(e), () => act(() => callEntity(e.id, st.on ? "turn_off" : "turn_on")));
   return el;
 }
@@ -364,11 +398,20 @@ function playingCard(ents) {
 
 const DEVICE_ICON = { tv: "tv", media_player: "appletv", speaker: "speaker", switch: "plug" };
 
+// speaker inputs as people say them
+const SOURCE = () => ({ wifi: t("Wi-Fi"), bluetooth: t("Bluetooth"), tv: t("TV"), optical: t("Optical"), aux: t("Aux"),
+                        usb: t("USB"), analog: t("Aux") });
+const sourceName = (s) => (s ? SOURCE()[String(s).toLowerCase()] || s : "");
+
 function deviceSub(e) {
   const st = e.state;
   if (!e.available) return t("Unavailable");
-  if (e.kind === "speaker") return st.on ? [st.source, st.playing && t("playing")].filter(Boolean).join(" · ") || t("On") : t("Standby");
-  if (e.kind === "media_player") return !st.on ? t("Off") : st.app || stateName(st.state || "idle");
+  if (e.kind === "speaker") return st.on ? [t("On"), sourceName(st.source), st.playing && t("playing")].filter(Boolean).join(" · ") : t("Off");
+  if (e.kind === "media_player") {
+    if (!st.on) return t("Off");
+    if (st.title && ["playing", "paused"].includes(st.state)) return `${stateName(st.state)} · ${st.title}`;
+    return st.app ? t("On · {app}", { app: st.app }) : t("On");
+  }
   if (e.kind === "tv") return st.on ? (st.source || t("On")) : t("Off");
   return st.on ? t("On") : t("Off");
 }
@@ -380,12 +423,19 @@ function deviceRow(e) {
     h("button.h-main", { onclick: () => deviceSheet(e) },
       h("div.ico", icon(DEVICE_ICON[e.kind] || "sensor")),
       h("div.h-txt", h("div.name.ellipsis", e.name), h("div.sub.ellipsis", deviceSub(e)))),
-    e.kind === "speaker" && st.on && volume(e),
-    toggle(st.on, (on) => act(() => callEntity(e.id, on ? "turn_on" : "turn_off")), !e.available));
+    toggle(st.on, (on) => act(() => callEntity(e.id, on ? "turn_on" : "turn_off")), !e.available, e.name),
+    e.kind === "speaker" && st.on && h("div.h-vol", volume(e)));  // own line under the name
 }
 
-const volume = (e) => h("input.vol", { type: "range", min: 0, max: e.attrs.max_volume || 100, value: e.state.volume ?? 0,
-  "aria-label": t("Volume"), onchange: (ev) => act(() => callEntity(e.id, "set_volume", { value: +ev.target.value })) });
+/** Volume slider with its number (updates while dragging, sends on release). */
+function volume(e) {
+  const num = h("span.vol-n", `${e.state.volume ?? 0}`);
+  return h("span.vol-wrap", icon("volume"),
+    h("input.vol", { type: "range", min: 0, max: e.attrs.max_volume || 100, value: e.state.volume ?? 0,
+      "aria-label": t("Volume"), oninput: (ev) => { num.textContent = ev.target.value; },
+      onchange: (ev) => act(() => callEntity(e.id, "set_volume", { value: +ev.target.value })) }),
+    num);
+}
 
 function deviceSheet(e) {
   if (e.kind === "tv" && e.actions.includes("remote")) return remoteSheet(e);
@@ -393,15 +443,34 @@ function deviceSheet(e) {
   sheet(e.name, full ? full(e) : tile(e));
 }
 
+/** The latest notes (pinned first, max 3) and a field to leave a new one. */
+function notesBlock(notes) {
+  const input = h("input", { placeholder: t("Write a note…"), enterkeyhint: "send", "aria-label": t("New note") });
+  const add = () => {
+    const text = input.value.trim();
+    if (!text) return;
+    act(async () => { await api("p/notes/notes", { body: { text } }); input.value = ""; toast(t("Note saved")); });
+  };
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); add(); } });
+  const preview = (n) => n.text || (n.items || []).map((i) => (i.done ? "✓ " : "• ") + i.text).join("  ");
+  return h("div.card.notes-block",
+    notes.slice(0, 3).map((n) => h("a.n-line", { href: "#/notes" },
+      n.pinned && h("span.n-pin", "📌"),
+      h("span.n-text", preview(n)),
+      h("span.muted.small.n-meta", [n.author, fmt.ago(n.updated)].filter(Boolean).join(" · ")))),
+    h("div.n-add", input, h("button.icon.primary", { "aria-label": t("Add"), onclick: add }, icon("plus"))));
+}
+
+/** Quick links one level deeper than the tab bar (the tab bar already has Media/Cucina). */
 function shortcuts() {
   const items = [
-    hasPlugin("media") && ["film", t("Movies"), "#/media"],
-    hasPlugin("media") && ["heart", t("Favourites"), "#/media/watchlist"],
-    hasPlugin("recipes") && ["utensils", t("Recipes"), "#/recipes/mine"],
     hasPlugin("recipes") && ["cart", t("Shopping list"), "#/recipes/shopping"],
+    hasPlugin("media") && ["heart", t("Favourites"), "#/media/watchlist"],
+    hasPlugin("recipes") && ["utensils", t("My recipes"), "#/recipes/mine"],
+    hasPlugin("media") && ["download", t("Downloads"), "#/media/downloads"],
   ].filter(Boolean);
   return items.length ? h("div.shortcuts", items.map(([ico, label, hash]) =>
-    h("a.sc", { href: hash }, h("span.sc-ico", icon(ico)), h("span", label)))) : null;
+    h("a.sc", { href: hash }, h("span.sc-ico", icon(ico)), h("span.sc-label", label)))) : null;
 }
 
 // ------------------------------------------------------------------ tiles
@@ -654,7 +723,7 @@ function compactTile(e, extra) {
       h("button.h-main", { onclick: () => deviceSheet(e) },
         h("div.ico", icon(DEVICE_ICON[e.kind] || "sensor")),
         h("div.h-txt", h("div.name.ellipsis", e.name), h("div.sub.ellipsis", deviceSub(e)))),
-      toggle(e.state.on, (on) => act(() => callEntity(e.id, on ? "turn_on" : "turn_off")), !e.available)),
+      toggle(e.state.on, (on) => act(() => callEntity(e.id, on ? "turn_on" : "turn_off")), !e.available, e.name)),
     extra);
 }
 
@@ -665,10 +734,7 @@ function mediaTile(e) {
   return st.on && st.title && ["playing", "paused"].includes(st.state) ? mediaFull(e) : compactTile(e);
 }
 
-const speakerTile = (e) => compactTile(e, e.state.on && h("div.row", { style: { gap: "6px" } },
-  h("button.icon.ghost", { "aria-label": t("Mute"), onclick: () => act(() => callEntity(e.id, "mute", { value: !e.state.muted })) },
-    icon(e.state.muted ? "mute" : "volume")),
-  volume(e)));
+const speakerTile = (e) => compactTile(e, e.state.on && volume(e));
 
 function genericTile(e) {
   return h("div.card.tile", top(e, "sensor", e.kind),

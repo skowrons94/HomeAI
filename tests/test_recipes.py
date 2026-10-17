@@ -250,6 +250,14 @@ def test_check_url():
     assert sources.check_url("https://ricette.giallozafferano.it/x.html")
 
 
+def test_scaling_countable_whole_pieces():
+    from hub.plugins.recipes import parse
+    p = parse.parse_ingredient("3 uova")
+    assert parse.format_ingredient(p, 0.5, "it").startswith("2 uova")
+    p = parse.parse_ingredient("200 g farina")
+    assert parse.format_ingredient(p, 0.5, "it") == "100 g di farina"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

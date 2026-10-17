@@ -150,5 +150,21 @@
   "Volume": "Volume",
   "all off": "tutte spente",
   "{n} to fix": "{n} da sistemare",
-  "Home view": "Vista di Casa"
+  "Home view": "Vista di Casa",
+  "Aux": "Aux",
+  "Bluetooth": "Bluetooth",
+  "Now {temp}°": "Ora {temp}°",
+  "On · {app}": "Acceso · {app}",
+  "Optical": "Ottico",
+  "Ready": "Pronta",
+  "TV": "TV",
+  "Target": "Obiettivo",
+  "USB": "USB",
+  "Wi-Fi": "Wi-Fi",
+  "Paused": "In pausa",
+  "Write a note…": "Scrivi una nota…",
+  "All notes": "Tutte",
+  "Note saved": "Nota salvata",
+  "Connect your devices": "Collega i tuoi dispositivi",
+  "Lights, heating, TV and speakers appear here once you add them.": "Luci, riscaldamento, TV e diffusori compaiono qui appena li aggiungi."
 }

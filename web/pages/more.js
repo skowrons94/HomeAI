@@ -1,70 +1,56 @@
-// More ("Altro"): every page that isn't in the phone tab bar, notifications, who is using this
-// phone, and the tab bar layout (saved per person on the hub, see savePrefs in app.js).
+// More ("Altro"): who is using this phone, every page that isn't in the tab bar, notifications,
+// and the tab bar layout (saved per person on the hub, see savePrefs in app.js). Grouped like
+// the iOS Settings app: a profile card, then titled lists.
 import { h, icon, t, store, go, openNotifications, person, choosePerson, savePrefs,
-         pinnable, pinnedTabs, MAX_TABS, LANG, act, toast, pushState, enablePush, disablePush } from "../app.js";
+         pinnable, pinnedTabs, MAX_TABS, act, toast, pushState, enablePush, disablePush } from "../app.js";
+
+// one line under each page so nobody has to guess what "Rete" is
+const PAGE_HINT = () => ({
+  history: t("Charts of temperatures and usage"),
+  network: t("Devices connected at home"),
+  settings: t("Integrations, password, language"),
+  social: t("What friends watched and cooked"),
+  home: t("The house at a glance"), media: t("Movies and series"), recipes: t("Recipes and shopping list"),
+});
+
+const row = (ico, label, sub, onclick, extra) =>
+  h("div.item.m-row", { onclick, role: onclick ? "button" : null, tabindex: onclick ? 0 : null },
+    h("span.m-ico", icon(ico)),
+    h("div.stack.spacer", { style: { gap: "1px", minWidth: 0 } }, h("span", label), sub && h("span.muted.small", sub)),
+    extra, onclick && h("span.muted", icon("right")));
 
 export default {
   async render(root) {
     const pinned = pinnedTabs();
     const others = pinnable().filter((p) => !pinned.includes(p.id));
-    const row = (ico, label, onclick, extra) =>
-      h("div.item", { onclick, style: { cursor: "pointer" } }, icon(ico), h("span.spacer", label), extra, icon("right"));
-
     root.append(...[
       h("header.page", h("h1", t("More"))),
-      h("div.list",
-        row("bell", t("Notifications"), openNotifications,
-            store.unread ? h("span.chip.accent", store.unread) : null),
-        others.map((p) => row(p.icon, t(p.title), () => go(`#/${p.id}`),
+
+      store.people.length ? h("div.card.m-profile", { onclick: () => choosePerson(), role: "button", tabindex: 0 },
+        h("span.m-avatar", (person() || "?").slice(0, 1).toUpperCase()),
+        h("div.stack.spacer", { style: { gap: "1px" } },
+          h("b", person() || t("Nobody chosen")), h("span.muted.small", t("Who is using this phone"))),
+        h("span.chip.accent", t("Change"))) : null,
+
+      others.length ? [
+        h("div.grp-head", t("Pages")),
+        h("div.list", others.map((p) => row(p.icon, t(p.title), PAGE_HINT()[p.id], () => go(`#/${p.id}`),
           p.id === "settings" && store.attention ? h("span.chip.warn", store.attention) : null))),
-
-      h("div.section", h("h2", t("Notifications on this phone"))),
-      pushRow(),
-
-      store.people.length ? [
-        h("div.section", h("h2", t("Who is using this phone"))),
-        h("div.list", row("users", person() || t("Nobody chosen"), () => choosePerson(),
-                          h("span.muted.small", t("Change")))),
       ] : null,
 
-      h("div.section", h("h2", t("Tab bar"))),
-      h("p.muted.small", { style: { margin: "0 0 10px" } },
-        t("Up to {n} pages next to More. Everything else stays here.", { n: MAX_TABS })),
-      tabEditor(),
+      h("div.grp-head", t("Notifications")),
+      h("div.list",
+        row("bell", t("Received notifications"), null, openNotifications,
+            store.unread ? h("span.chip.accent", store.unread) : null),
+        pushRow()),
+      h("p.grp-foot", t("Casa tells you when a film is ready to watch, when subtitles are found or when something at home needs you.")),
 
-      h("div.section", h("h2", t("Language"))),
-      h("div.list", row("flag", LANG === "it" ? "Italiano" : "English", () => go("#/settings"),
-                        h("span.muted.small", t("Settings")))),
+      h("div.grp-head", t("Tab bar")),
+      tabEditor(),
+      h("p.grp-foot", t("Up to {n} pages next to More. Everything else stays here.", { n: MAX_TABS })),
     ].flat().filter(Boolean));
   },
 };
-
-function tabEditor() {
-  const box = h("div.list");
-  let tabs = [...pinnedTabs()];
-  const save = () => savePrefs({ tabs });
-  const draw = () => {
-    const all = pinnable();
-    const order = [...tabs, ...all.map((p) => p.id).filter((id) => !tabs.includes(id))];
-    box.replaceChildren(...order.map((id) => {
-      const p = all.find((x) => x.id === id);
-      const on = tabs.includes(id), i = tabs.indexOf(id);
-      return h("div.item",
-        icon(p.icon), h("span.spacer", t(p.title)),
-        on && h("button.icon.ghost", { title: t("Move up"), disabled: i === 0,
-          onclick: () => { [tabs[i - 1], tabs[i]] = [tabs[i], tabs[i - 1]]; save(); } }, icon("up")),
-        on && h("button.icon.ghost", { title: t("Move down"), disabled: i === tabs.length - 1,
-          onclick: () => { [tabs[i + 1], tabs[i]] = [tabs[i], tabs[i + 1]]; save(); } }, icon("down")),
-        h(`button.icon${on ? ".primary" : ""}`, {
-          title: on ? t("Remove from the tab bar") : t("Add to the tab bar"),
-          disabled: !on && tabs.length >= MAX_TABS,
-          onclick: () => { tabs = on ? tabs.filter((x) => x !== id) : [...tabs, id]; save(); },
-        }, icon(on ? "check" : "plus")));
-    }));
-  };
-  draw();
-  return box;
-}
 
 const PUSH_HINT = {
   "needs-https": "Open Casa from its Tailscale address (https://…) to turn them on.",
@@ -74,7 +60,7 @@ const PUSH_HINT = {
 };
 
 function pushRow() {
-  const box = h("div.list");
+  const box = h("div.item.m-row", h("span.m-ico", icon("remote")), h("span.spacer", "…"));
   const draw = async () => {
     const st = await pushState().catch(() => "unsupported");
     const on = st === "on";
@@ -83,12 +69,36 @@ function pushRow() {
       else { await enablePush(); toast(t("Notifications turned on")); }
       draw();
     }, btn) }, on ? t("Disable") : t("Enable"));
-    box.replaceChildren(h("div.item", icon("bell"),
-      h("div.stack.spacer", { style: { gap: "2px" } },
-        h("span", on ? t("On: Casa can notify this phone") : t("Notifications off")),
-        PUSH_HINT[st] && h("span.muted.small", t(PUSH_HINT[st]))),
-      btn));
+    box.replaceChildren(h("span.m-ico", icon("remote")),
+      h("div.stack.spacer", { style: { gap: "2px", minWidth: 0 } },
+        h("span", t("On this phone")),
+        h("span.muted.small", on ? t("On: Casa can notify this phone") : PUSH_HINT[st] ? t(PUSH_HINT[st]) : t("Notifications off"))),
+      btn);
   };
   draw();
+  return box;
+}
+
+/** Two groups like iOS edit lists: in the bar (move, remove) and other pages (add). */
+function tabEditor() {
+  const box = h("div.stack", { style: { gap: "10px" } });
+  let tabs = [...pinnedTabs()];
+  const save = () => savePrefs({ tabs });
+  const all = pinnable();
+  const page = (id) => all.find((x) => x.id === id);
+  const inBar = tabs.map((id, i) => h("div.item.m-row",
+    h("button.icon.m-rm", { "aria-label": t("Remove from the tab bar"), onclick: () => { tabs = tabs.filter((x) => x !== id); save(); } }, icon("minus")),
+    h("span.m-ico", icon(page(id).icon)), h("span.spacer", t(page(id).title)),
+    h("button.icon.ghost", { "aria-label": t("Move up"), disabled: i === 0,
+      onclick: () => { [tabs[i - 1], tabs[i]] = [tabs[i], tabs[i - 1]]; save(); } }, icon("up")),
+    h("button.icon.ghost", { "aria-label": t("Move down"), disabled: i === tabs.length - 1,
+      onclick: () => { [tabs[i + 1], tabs[i]] = [tabs[i], tabs[i + 1]]; save(); } }, icon("down"))));
+  const rest = all.filter((p) => !tabs.includes(p.id)).map((p) => h("div.item.m-row",
+    h("button.icon.m-add", { "aria-label": t("Add to the tab bar"), disabled: tabs.length >= MAX_TABS,
+      onclick: () => { tabs = [...tabs, p.id]; save(); } }, icon("plus")),
+    h("span.m-ico", icon(p.icon)), h("span.spacer", t(p.title))));
+  box.append(
+    h("div.list", h("div.item.m-sub", t("In the bar")), inBar.length ? inBar : h("div.item.muted", t("Nothing yet."))),
+    rest.length ? h("div.list", h("div.item.m-sub", t("Other pages")), rest) : "");
   return box;
 }

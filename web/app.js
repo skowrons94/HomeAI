@@ -403,6 +403,7 @@ export const PAGES = [
   { id: "home", title: "Home", icon: "home", tab: true },
   { id: "media", title: "Media", icon: "film", tab: true },
   { id: "recipes", title: "Kitchen", icon: "utensils", tab: true },
+  { id: "notes", title: "Notes", icon: "edit", tab: true, plugin: "notes" },
   { id: "social", title: "Feed", icon: "users", plugin: "sync" },
   { id: "history", title: "History", icon: "chart" },
   { id: "network", title: "Network", icon: "network" },
@@ -428,8 +429,11 @@ async function render() {
   const [id = "home", ...args] = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
   const page = PAGES.find((p) => p.id === id) || PAGES[0];
   const pinned = pinnedTabs();
-  document.querySelectorAll("nav a.tab").forEach((a) => a.classList.toggle("active",
-    a.dataset.id === page.id || (a.dataset.id === "more" && !pinned.includes(page.id) && page.id !== "home")));
+  document.querySelectorAll("nav a.tab").forEach((a) => {
+    const on = a.dataset.id === page.id || (a.dataset.id === "more" && !pinned.includes(page.id) && page.id !== "home");
+    a.classList.toggle("active", on);
+    on ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current");
+  });
   const main = document.querySelector("main");
   if (typeof cleanup === "function") { try { cleanup(); } catch {} }
   cleanup = null;

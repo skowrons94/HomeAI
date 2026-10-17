@@ -477,13 +477,15 @@ def parse_ingredient(line: str) -> dict:
 _VULGAR = {0.25: "¼", 0.5: "½", 0.75: "¾", 1 / 3: "⅓", 2 / 3: "⅔"}
 
 
-def fmt_qty(q: float, unit: str = "") -> str:
+def fmt_qty(q: float, unit: str = "", pieces: bool = False) -> str:
     if unit in ("g", "ml"):
         q = round(q, 1) if q < 10 else round(q) if q < 100 else round(q / 5) * 5
         return str(int(q)) if q == int(q) else str(q).replace(".", ",")
     if unit in ("kg", "l"):
         q = round(q, 2)
         return str(int(q)) if q == int(q) else str(q).replace(".", ",")
+    if pieces and unit in ("", "pz") and q >= 1:  # countable things (eggs...): whole pieces
+        return str(int(q + 0.5))
     whole = int(q)
     frac = q - whole
     if frac < 0.08:
@@ -527,9 +529,9 @@ def format_ingredient(ing: dict, factor: float = 1.0, lang: str = "it") -> str:
 
 
 def _compose(q: float, q2: float | None, unit: str, name: str, note: str, lang: str) -> str:
-    qs = fmt_qty(q, unit)
+    qs = fmt_qty(q, unit, True)
     if q2:
-        qs += "-" + fmt_qty(q2, unit)
+        qs += "-" + fmt_qty(q2, unit, True)
     parts = [qs]
     if unit:
         parts.append(_unit_text(unit, q2 or q, lang))
