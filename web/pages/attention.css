@@ -1,0 +1,41 @@
+/* Needs attention: banner, list and step flow */
+.lv-error { --lv: var(--bad); }
+.lv-warning { --lv: var(--warn); }
+.lv-info { --lv: var(--accent); }
+.at-ico { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; flex: none;
+  background: color-mix(in srgb, var(--lv, var(--accent)) 16%, transparent); color: var(--lv, var(--accent)); }
+.at-ico .i { width: 20px; height: 20px; }
+.at-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.at-txt span { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.at-banner { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding: 12px 14px;
+  border-left: 4px solid var(--lv); }
+.at-banner .at-txt span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.at-info { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 6px 10px; font-size: 13px;
+  color: var(--muted); border-radius: 12px; max-width: 100%; }
+.at-info span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.at-info .i { color: var(--accent); flex: none; }
+.at-group { gap: 6px; }
+.at-gh { display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 13px; color: var(--lv);
+  text-transform: uppercase; letter-spacing: .04em; margin-top: 6px; }
+.at-item { flex-wrap: wrap; align-items: flex-start !important; }
+.at-item .at-ico { width: 32px; height: 32px; }
+.at-btns { display: flex; gap: 6px; align-items: center; width: 100%; padding-left: 44px; }
+@media (min-width: 560px) { .at-btns { width: auto; padding: 0; } .at-item { flex-wrap: nowrap; } }
+.at-prog { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.at-prog i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+.at-step { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; padding: 24px 18px;
+  background: var(--surface-2, var(--bg)); box-shadow: none; }
+.at-step .chip { background: color-mix(in srgb, var(--lv) 16%, transparent); color: var(--lv); }
+.at-step .at-st { font-size: 19px; }
+.at-step button { align-self: stretch; }
+.at-bigico { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--lv, var(--ok)) 16%, transparent); color: var(--lv, var(--ok)); }
+.at-bigico .i { width: 28px; height: 28px; }
+.at-done { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; padding: 18px 0 4px; }
+.at-done b { font-size: 20px; }
+.at-done button { align-self: stretch; }
+.at-bigico.mute { --lv: var(--muted); }
+.count-badge { position: absolute; top: 4px; left: 24px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  background: var(--warn); color: #1b1300; font-size: 11px; font-weight: 700; line-height: 16px; text-align: center; }
+.count-badge.err { background: var(--bad); color: #fff; }
+@media (max-width: 760px) { .count-badge { left: 50%; margin-left: 4px; top: 2px; } }

@@ -1,4 +1,5 @@
 // Home: every entity grouped by room, rendered from its kind (see hub/core.py).
+import { attentionBanner } from "./attention.js";
 import { api, h, icon, sheet, bus, store, callEntity, act, debounce, fmt, toast } from "../app.js";
 
 const KIND_ORDER = ["climate", "water_heater", "media_player", "tv", "speaker", "light", "switch", "sensor"];
@@ -34,6 +35,7 @@ export default {
     const summary = h("div.row.wrap");
     root.append(
       h("header.page", h("div.stack", { style: { gap: "6px" } }, h("h1", greeting()), summary)),
+      attentionBanner(),
       grids,
     );
     draw();

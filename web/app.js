@@ -7,7 +7,7 @@
 // "notification", "state", plus any type the hub publishes, e.g. "media").
 
 export const bus = new EventTarget();
-export const store = { entities: new Map(), plugins: [], homekit: {}, rooms: [], unread: 0, name: "Casa" };
+export const store = { entities: new Map(), plugins: [], homekit: {}, rooms: [], unread: 0, name: "Casa", attention: 0, attentionItems: [] };
 
 // ---------------------------------------------------------------- helpers
 
@@ -182,9 +182,20 @@ export async function refreshState() {
   Object.assign(store, { plugins: s.plugins, homekit: s.homekit, rooms: s.rooms, unread: s.unread,
                          name: s.name, notify_channels: s.notify_channels, onboarding: s.onboarding });
   document.title = s.name;
+  store.attention = s.attention || 0;
   updateBadge();
+  refreshAttention().catch(() => {});
   bus.dispatchEvent(new CustomEvent("state", { detail: s }));
   return s;
+}
+
+/** Re-read the attention list (items for the Home banner, counts for the nav badge). */
+export async function refreshAttention() {
+  const items = await api("attention");
+  store.attentionItems = items;
+  store.attention = items.filter((i) => i.level !== "info").length;
+  updateBadge();
+  bus.dispatchEvent(new CustomEvent("attentionchange", { detail: items }));
 }
 
 function connectEvents() {
@@ -194,6 +205,7 @@ function connectEvents() {
     if (msg.type === "entity") store.entities.set(msg.data.id, msg.data);
     if (msg.type === "entity_removed") store.entities.delete(msg.data.id);
     if (msg.type === "notification") { store.unread++; updateBadge(); toast(`🔔 ${msg.data.title}`); }
+    if (msg.type === "plugins" || msg.type === "attention") refreshAttention().catch(() => {});
     bus.dispatchEvent(new CustomEvent(msg.type, { detail: msg.data }));
   };
   // EventSource reconnects by itself; resync once it's back
@@ -204,6 +216,12 @@ function connectEvents() {
 
 function updateBadge() {
   document.querySelectorAll("[data-unread]").forEach((el) => el.classList.toggle("hidden", !store.unread));
+  const hasErr = (store.attentionItems || []).some((i) => i.level === "error");
+  document.querySelectorAll("[data-attn]").forEach((el) => {
+    el.classList.toggle("hidden", !store.attention);
+    el.classList.toggle("err", hasErr);
+    el.textContent = store.attention;
+  });
 }
 
 // ---------------------------------------------------------------- notifications
@@ -277,7 +295,8 @@ export const go = (hash) => { location.hash = hash; };
 function shell() {
   const nav = h("nav.side",
     h("div.brand", "Casa"),
-    PAGES.filter((p) => !p.hidden).map((p) => h("a.tab", { href: `#/${p.id}`, "data-id": p.id }, icon(p.icon), h("span", p.title))),
+    PAGES.filter((p) => !p.hidden).map((p) => h("a.tab", { href: `#/${p.id}`, "data-id": p.id }, icon(p.icon), h("span", p.title),
+      p.id === "settings" && h("span.count-badge.hidden", { "data-attn": "", title: "Needs attention" }))),
     h("div.spacer"),
     h("a.tab", { href: "javascript:void 0", onclick: openNotifications },
       icon("bell"), h("span", "Alerts"), h("span.dot.hidden", { "data-unread": "" })));
@@ -285,6 +304,7 @@ function shell() {
 }
 
 async function boot() {
+  ensureCss(`/static/pages/attention.css?v=${window.CASA_V}`);
   shell();
   try { await refreshState(); } catch (e) { if (e.message !== "login required") toast(e.message, true); return; }
   if (!location.search.includes("static")) connectEvents();  // ?static: no live updates (screenshots)

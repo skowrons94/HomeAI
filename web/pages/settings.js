@@ -9,6 +9,7 @@
 //
 // Exports: default page, renderForm(schema, values) -> {el, values()}, pluginSheet(plugin),
 // setupWizard(plugin), folderBrowser(start) -> Promise<path|null>.
+import { attentionBanner } from "./attention.js";
 import { api, h, icon, sheet, store, toast, act, refreshState, bus, ensureCss } from "../app.js";
 
 const MASK = "••••••••";
@@ -179,6 +180,7 @@ export default {
         h("button", { onclick: (e) => { if (confirm("Restart Casa now?")) restartHub(e.currentTarget); } },
           icon("power"), "Restart")),
       banner,
+      attentionBanner(),
       h("div.section", h("h2", "Integrations")), intBox,
       h("div.section", h("h2", "Casa")), coreBox,
       hiddenBox);
