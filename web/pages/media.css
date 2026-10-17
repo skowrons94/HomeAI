@@ -68,3 +68,10 @@
 .dl img { width: 46px; height: 69px; border-radius: 6px; object-fit: cover; background: var(--surface-2); flex: none; }
 .stat { text-align: center; }
 .stat b { display: block; font-size: 26px; letter-spacing: -0.03em; }
+
+.m-chips { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px 10px; scrollbar-width: none; margin-top: 8px; }
+.m-chips::-webkit-scrollbar { display: none; }
+.m-chips .chip.g { flex: none; border: 0; cursor: pointer; padding: 7px 14px; font-size: 13px; white-space: nowrap;
+  background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+.m-chips .chip.g.on { background: var(--accent); color: #fff; }
+.m-more { display: flex; justify-content: center; padding: 18px 0; }

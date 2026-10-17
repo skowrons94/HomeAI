@@ -16,12 +16,30 @@ import json
 import logging
 import time
 from datetime import date
+from urllib.parse import quote
 
 log = logging.getLogger("hub.media.metadata")
 
 TMDB = "https://api.themoviedb.org/3"
 IMG = "https://image.tmdb.org/t/p/"
 CINEMETA = "https://v3-cinemeta.strem.io"
+CINEMETA_PAGE = 50  # items per genre catalog page (skip= steps)
+
+
+def parse_tmdb_genres(data: dict) -> list[dict]:
+    return sorted(({"id": str(g["id"]), "name": g["name"]} for g in data.get("genres", [])
+                   if g.get("id") is not None and g.get("name")), key=lambda g: g["name"])
+
+
+def parse_cinemeta_genres(manifest: dict, type_: str) -> list[dict]:
+    """Genre options of the 'top' catalog for a type in the Cinemeta manifest."""
+    for c in manifest.get("catalogs", []):
+        if c.get("type") != type_ or c.get("id") != "top":
+            continue
+        for e in c.get("extra", []):
+            if e.get("name") == "genre":
+                return [{"id": o, "name": o} for o in e.get("options", []) if o]
+    return []
 
 
 class Metadata:
@@ -167,6 +185,35 @@ class Metadata:
             out.append({"key": key, "title": title,
                         "items": [self._norm_cinemeta(m, t) for m in data.get("metas", [])[:40]]})
         return out
+
+    # -- genres ---------------------------------------------------------------------
+
+    async def genres(self, type_: str) -> list[dict]:
+        """[{id, name}] for 'movie' or 'series'. TMDB: localized names; Cinemeta: English names."""
+        if self.provider == "tmdb":
+            data = await self._tmdb(f"/genre/{'movie' if type_ == 'movie' else 'tv'}/list",
+                                    ttl=86400, persist=True)
+            return parse_tmdb_genres(data)
+        manifest = await self._get(CINEMETA + "/manifest.json", ttl=86400, persist=True)
+        return parse_cinemeta_genres(manifest, type_)
+
+    async def discover(self, type_: str, genre: str, page: int = 1) -> dict:
+        """Popular titles of one genre: {items, page, has_more}."""
+        page = max(1, page)
+        if self.provider == "tmdb":
+            if not str(genre).isdigit():
+                raise ValueError("unknown genre")
+            data = await self._tmdb(f"/discover/{'movie' if type_ == 'movie' else 'tv'}", ttl=3 * 3600,
+                                    with_genres=genre, sort_by="popularity.desc", page=page,
+                                    include_adult="false", **{"vote_count.gte": 20})
+            items = [x for x in (self._norm_tmdb(i, type_) for i in data.get("results", [])) if x]
+            return {"items": items, "page": page, "has_more": page < min(data.get("total_pages", 1), 500)}
+        skip = (page - 1) * CINEMETA_PAGE
+        data = await self._get(f"{CINEMETA}/catalog/{type_}/top/genre={quote(str(genre))}&skip={skip}.json",
+                               ttl=6 * 3600)
+        metas = data.get("metas", [])
+        return {"items": [self._norm_cinemeta(m, type_) for m in metas], "page": page,
+                "has_more": len(metas) >= CINEMETA_PAGE * 0.9}
 
     async def search(self, query: str) -> list[dict]:
         if self.provider == "tmdb":

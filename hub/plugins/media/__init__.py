@@ -26,6 +26,7 @@ Transmission downloads into the NAS library, favourites with notifications.
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import date
 
@@ -159,6 +160,30 @@ class MediaPlugin(Plugin):
                         "allow_4k": self.profile.allow_4k},
         }
 
+    def attention(self):
+        """Cheap: only cached state, no network."""
+        out = []
+        if not self.metadata.key:
+            out.append({"id": "tmdb", "level": "info", "title": "Add a free TMDB key",
+                        "detail": "Italian titles and plots, upcoming releases and genres",
+                        "action": {"type": "settings", "plugin": "media"}})
+        if self.downloads.ok is False:
+            out.append({"id": "transmission", "level": "warning", "title": "Downloads aren't working",
+                        "detail": self.downloads.error or "Transmission is unreachable",
+                        "action": {"type": "settings", "plugin": "media"}})
+        lib = self.library
+        dirs = [("movies", lib.movies_dir), ("series", lib.series_dir)]
+        unset = [n for n, d in dirs if not d]
+        missing = [n for n, d in dirs if d and not os.path.isdir(d)]
+        if unset or missing:
+            detail = (f"{' and '.join(missing)} folder not found - is the NAS mounted?" if missing
+                      else f"{' and '.join(unset)} folder not set")
+            storage = "storage" in getattr(self.hub, "plugins", {})
+            out.append({"id": "library", "level": "warning", "title": "Media library not available",
+                        "detail": detail,
+                        "action": {"type": "settings", "plugin": "storage" if missing and storage else "media"}})
+        return out
+
     # -- core operations ---------------------------------------------------------------
 
     def _flag(self, items: list[dict]) -> list[dict]:
@@ -197,6 +222,8 @@ class MediaPlugin(Plugin):
             web.get("/status", lambda r: _json(self.status())),
             web.get("/discover", self.r_discover),
             web.get("/search", self.r_search),
+            web.get("/genres", self.r_genres),
+            web.get("/discover/genre", self.r_discover_genre),
             web.get("/details/{type}/{id}", self.r_details),
             web.get("/episodes/{type}/{id}/{season}", self.r_episodes),
             web.get("/releases/{type}/{id}", self.r_releases),
@@ -219,6 +246,24 @@ class MediaPlugin(Plugin):
         for s in sections:
             self._flag(s["items"])
         return _json({"provider": self.metadata.provider, "sections": sections})
+
+    async def r_genres(self, request):
+        t = _kind(request)
+        return _json({"type": t, "provider": self.metadata.provider,
+                      "genres": await self.metadata.genres(t)})
+
+    async def r_discover_genre(self, request):
+        t = _kind(request)
+        genre = request.query.get("genre", "")
+        if not genre:
+            return _json({"error": "genre required"}, 400)
+        try:
+            page = int(request.query.get("page", 1))
+        except ValueError:
+            page = 1
+        res = await self.metadata.discover(t, genre, page)
+        self._flag(res["items"])
+        return _json({"type": t, "genre": genre, **res})
 
     async def r_search(self, request):
         q = request.query.get("q", "").strip()
@@ -316,6 +361,11 @@ class MediaPlugin(Plugin):
     async def r_indexers_test(self, request):
         await self.indexers.probe()
         return _json(self._indexer_info())
+
+
+def _kind(request) -> str:
+    t = request.query.get("type", "movie")
+    return "series" if t in ("series", "tv") else "movie"
 
 
 def _mask(url: str) -> str:

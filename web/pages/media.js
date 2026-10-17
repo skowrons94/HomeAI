@@ -23,7 +23,12 @@ export default {
     const cleanup = () => off.forEach((f) => f());
 
     if (view === "movie" || view === "series") {
-      await renderDetail(root, view, rest.join("/"), on);
+      try { await renderDetail(root, view, rest.join("/"), on); }
+      catch (e) {
+        toast(`Couldn't load details: ${e.message}`, true);
+        fill(root, h("button", { onclick: () => go("#/media") }, icon("left"), "Back"),
+             h("div.empty", e.message));
+      }
       return cleanup;
     }
 
@@ -51,7 +56,7 @@ export default {
     else if (view === "watchlist") await renderWatchlist(results, on);
     else if (view === "downloads") await renderDownloads(results, on);
     else if (view === "library") await renderLibrary(results);
-    else await renderDiscover(results);
+    else await renderDiscover(results, rest[0], rest[1]);
     return cleanup;
   },
 };
@@ -70,8 +75,10 @@ function warnings(el, s) {
 }
 
 function poster(it, clickable = true) {
+  clickable = clickable !== false;  // Array.map passes the index (0 on the first card!)
+  const open = () => it.id && it.type ? go(itemHash(it)) : toast("This title can't be opened (no id)", true);
   const img = it.poster ? h("img", { src: it.poster, loading: "lazy", alt: "" }) : h("div.ph", it.title);
-  return h("div.poster", { onclick: clickable ? () => go(itemHash(it)) : null, title: it.title,
+  return h("div.poster", { onclick: clickable ? open : null, title: it.title,
                           style: clickable ? null : { cursor: "default" } },
     h("div.img", img,
       h("div.badges",
@@ -86,14 +93,77 @@ const loading = () => h("div.empty", h("div.spin"));
 
 // ---------------------------------------------------------------- discover / search
 
-async function renderDiscover(el) {
-  fill(el, loading());
-  const d = await P("discover");
-  fill(el, ...d.sections.filter((s) => s.items.length).map((s) => [
-    h("div.section", h("h2", s.title)),
-    h("div.m-row", s.items.map(poster)),
-  ]).flat());
-  if (!d.sections.length) fill(el, h("div.empty", "Couldn't reach the movie database."));
+async function renderDiscover(el, kind, genre) {
+  kind = kind === "series" ? "series" : "movie";
+  genre = genre ? decodeURIComponent(genre) : "";
+  const chips = h("div.m-chips");
+  const out = h("div");
+  const seg = h("div.seg");
+  let genres = [];
+  let token = null;
+  const setHash = () => history.replaceState(null, "", genre ? `#/media/discover/${kind}/${enc(genre)}` : "#/media");
+  const pick = (id) => { genre = id === genre ? "" : id; paintChips(); show(); };
+  const paintChips = () => {
+    fill(seg, ...[["movie", "Movies"], ["series", "Series"]].map(([k, l]) =>
+      h(`button${k === kind ? ".active" : ""}`, { onclick: () => { if (k !== kind) { kind = k; genre = ""; start(); } } }, l)));
+    fill(chips, ...genres.map((g) =>
+      h(`button.chip.g${g.id === genre ? ".on" : ""}`, { onclick: () => pick(g.id) }, g.name)));
+    chips.querySelector(".on")?.scrollIntoView({ block: "nearest", inline: "center" });
+  };
+  async function show() {
+    setHash();
+    const mine = token = {};
+    if (!genre) return rows(mine);
+    const g = genres.find((x) => x.id === genre);
+    const grid = h("div.m-grid");
+    const more = h("button", "More");
+    const box = h("div.m-more", more);
+    let page = 0, busy = false;
+    async function next() {
+      if (busy) return;
+      busy = true; more.disabled = true;
+      try {
+        const r = await P(`discover/genre?type=${kind}&genre=${enc(genre)}&page=${page + 1}`);
+        if (mine !== token) return;
+        page = r.page;
+        grid.append(...r.items.map((it) => poster(it)));
+        if (!grid.children.length) box.replaceChildren(h("div.empty", "Nothing found."));
+        else if (!r.has_more) box.remove();
+      } catch (e) { toast(`Couldn't load genre: ${e.message}`, true); }
+      finally { busy = false; more.disabled = false; }
+    }
+    more.onclick = next;
+    fill(out, h("div.section", h("h2", g ? g.name : genre), h("div.spacer"),
+                h("button.ghost", { onclick: () => pick(genre) }, icon("x"), "Clear")),
+         grid, box);
+    if ("IntersectionObserver" in window) {
+      new IntersectionObserver((e) => e[0].isIntersecting && page && mine === token && next(),
+                               { rootMargin: "400px" }).observe(box);
+    }
+    await next();
+  }
+  async function rows(mine) {
+    fill(out, loading());
+    let d;
+    try { d = await P("discover"); } catch (e) { toast(e.message, true); d = { sections: [] }; }
+    if (mine !== token) return;
+    const secs = d.sections.filter((s) => s.items.length);
+    fill(out, ...secs.map((s) => [
+      h("div.section", h("h2", s.title)),
+      h("div.m-row", s.items.map((it) => poster(it))),
+    ]).flat());
+    if (!secs.length) fill(out, h("div.empty", "Couldn't reach the movie database."));
+  }
+  async function start() {
+    genres = [];
+    paintChips();
+    try { genres = (await P(`genres?type=${kind}`)).genres; } catch (e) { toast(`Genres unavailable: ${e.message}`, true); }
+    if (genre && !genres.some((g) => g.id === genre)) genre = "";
+    paintChips();
+    await show();
+  }
+  fill(el, seg, chips, out);
+  await start();
 }
 
 async function renderSearch(el, q) {
@@ -101,7 +171,7 @@ async function renderSearch(el, q) {
   const items = await P(`search?q=${enc(q)}`);
   fill(el, 
     h("div.section", h("h2", `Results for “${q}”`), h("span.muted", items.length)),
-    items.length ? h("div.m-grid", items.map(poster)) : h("div.empty", "Nothing found."));
+    items.length ? h("div.m-grid", items.map((it) => poster(it))) : h("div.empty", "Nothing found."));
 }
 
 // ---------------------------------------------------------------- detail
