@@ -107,3 +107,10 @@ details.sys[open] summary { margin-bottom: 12px; }
 .sc-label { min-width: 0; line-height: 1.2; overflow-wrap: anywhere; }
 .start-hint { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
 .h-vol { flex: 1 1 100%; padding-left: 48px; display: flex; }
+
+/* -- tonight's meal -- */
+.card.meal { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; margin-top: 12px; }
+.card.meal.empty { flex-direction: row; align-items: center; gap: 12px; color: var(--text); min-height: 56px; }
+.meal-row { display: flex; align-items: center; gap: 12px; color: var(--text); min-height: 56px; }
+.meal-row + .meal-row { border-top: 1px solid var(--line); }
+.meal-img { width: 44px; height: 44px; border-radius: 10px; object-fit: cover; flex: none; }

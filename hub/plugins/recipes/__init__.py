@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from aiohttp import web
 
@@ -19,6 +20,7 @@ from ...core import Plugin
 from ...i18n import _
 from . import sources
 from .db import Book
+from .planner import Planner, monday
 
 
 def _json(data, status=200):
@@ -51,14 +53,19 @@ class RecipesPlugin(Plugin):
          "Remove any you don't like. Any web address can be imported anyway."},
         {"key": "language", "label": "Language", "type": "select", "default": "it",
          "options": [{"value": "it", "label": "Italiano"}, {"value": "en", "label": "English"}]},
+        {"key": "plan_reminder", "label": "Remind tonight's dinner", "type": "bool", "default": False,
+         "help": "A notification in the afternoon with what's for dinner."},
     ]
 
     def __init__(self, hub, config):
         super().__init__(hub, config)
         self.book: Book | None = None
+        self.planner: Planner | None = None
 
     async def start(self):
         self.book = Book(self.hub.store, self.hub.data_dir, self.config)
+        self.planner = Planner(self.book)
+        self.hub.every(60, self._remind, name="recipes.plan_reminder", initial_delay=20)
         # calories are shown per recipe and in the Today tab, not as a chart
         self.hub.store.delete_series("recipes.calories")
 
@@ -99,6 +106,13 @@ class RecipesPlugin(Plugin):
             web.post("/log", self.r_log_add),
             web.delete("/log/{id}", self.r_log_delete),
             web.get("/nutrition", lambda r: _json(self.book.nutrition())),
+            web.get("/plan", self.r_plan),
+            web.get("/plan/today", lambda r: _json({**self.planner.today()})),
+            web.post("/plan/fill", self.r_plan_fill),
+            web.post("/plan/copy", self.r_plan_copy),
+            web.post("/plan/shopping", self.r_plan_shopping),
+            web.put("/plan/{date}/{meal}", self.r_plan_put),
+            web.delete("/plan/{date}/{meal}", self.r_plan_delete),
         ]
 
     # -- discovery / import -------------------------------------------------------
@@ -231,6 +245,60 @@ class RecipesPlugin(Plugin):
         self.book.log_delete(int(request.match_info["id"]))
         self._publish()
         return _json({"ok": True})
+
+    # -- meal planner -------------------------------------------------------------
+
+    def _plan_changed(self, day) -> None:
+        self.hub.publish("recipes_plan", {"week": monday(day).isoformat()})
+
+    async def r_plan(self, request):
+        return _json(self.planner.week(request.query.get("week")))
+
+    async def r_plan_put(self, request):
+        m = request.match_info
+        slot = self.planner.put(m["date"], m["meal"], await _body(request))
+        self._plan_changed(m["date"])
+        return _json(slot)
+
+    async def r_plan_delete(self, request):
+        m = request.match_info
+        self.planner.delete(m["date"], m["meal"])
+        self._plan_changed(m["date"])
+        return _json({"ok": True})
+
+    async def r_plan_fill(self, request):
+        b = await _body(request)
+        n = self.planner.fill(b.get("week"), b.get("meals"))
+        self._plan_changed(b.get("week"))
+        return _json({"filled": n, **self.planner.week(b.get("week"))})
+
+    async def r_plan_copy(self, request):
+        b = await _body(request)
+        n = self.planner.copy(b.get("from_week"), b.get("to_week"))
+        self._plan_changed(b.get("to_week"))
+        return _json({"copied": n, **self.planner.week(b.get("to_week"))})
+
+    async def r_plan_shopping(self, request):
+        b = await _body(request)
+        return _json({"added": self.planner.shopping(b.get("week"))})
+
+    async def _remind(self):
+        """Once a day, from 16:30, tell what's for dinner (only when the plan has one)."""
+        if not self.config.get("plan_reminder") or not self.planner:
+            return
+        now = time.localtime()
+        if (now.tm_hour, now.tm_min) < (16, 30) or now.tm_hour >= 20:
+            return
+        day = time.strftime("%Y-%m-%d", now)
+        if self.hub.store.get("recipes.plan_reminder_sent") == day:
+            return
+        dinner = self.planner.today()["dinner"]
+        if not dinner:
+            return
+        self.hub.store.set("recipes.plan_reminder_sent", day)
+        url = f"#/recipes/recipe/{dinner['recipe_id']}" if dinner["recipe_id"] else "#/recipes/week"
+        await self.hub.notify.send(_("Tonight: {title}", title=dinner["title"]),
+                                   body=_("Open the recipe for {n}", n=dinner["servings"]), url=url, tag="note")
 
 
 PLUGIN = RecipesPlugin

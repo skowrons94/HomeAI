@@ -9,8 +9,8 @@ import { api, h, icon, sheet, bus, store, callEntity, act, debounce, fmt, toast,
 
 const KIND_ORDER = ["climate", "water_heater", "media_player", "tv", "speaker", "light", "switch", "sensor"];
 const SYS = "__system";  // full view: the hub's own sensors (system plugin)
-const SIMPLE = ["glance", "notes", "climate", "lights", "playing", "devices", "shortcuts"];
-const SIMPLE_TITLE = () => ({ glance: t("At a glance"), notes: t("Notes"), climate: t("Heating"), lights: t("Lights"),
+const SIMPLE = ["glance", "meal", "notes", "climate", "lights", "playing", "devices", "shortcuts"];
+const SIMPLE_TITLE = () => ({ glance: t("At a glance"), meal: t("Menu"), notes: t("Notes"), climate: t("Heating"), lights: t("Lights"),
   playing: t("Now playing"), devices: t("TV and speakers"), shortcuts: t("Shortcuts") });
 const HEADED = new Set(["notes", "lights", "playing", "devices"]);  // simple blocks with a visible title
 
@@ -131,6 +131,11 @@ export default {
       ? api("p/notes/notes").then((n) => { notes = n; if (view() === "simple") redraw(); }).catch(() => {})
       : Promise.resolve());
     const onNotes = (ev) => { notes = ev.detail?.items || notes; if (view() === "simple") redraw(); };
+    // today's planned meals (recipes planner)
+    let today = null;
+    const loadToday = () => (hasPlugin("recipes")
+      ? api("p/recipes/plan/today").then((d) => { today = d; if (view() === "simple") redraw(); }).catch(() => {})
+      : Promise.resolve());
 
     const drawSimple = () => {
       const ents = [...store.entities.values()].filter((e) => !e.attrs.hidden);
@@ -154,6 +159,7 @@ export default {
       const blocks = {
         glance: [glanceCard(ents), startHint(ents)],
         notes: hasPlugin("notes") ? notesBlock(notes) : null,
+        meal: hasPlugin("recipes") ? mealCard(today) : null,
         climate: rowsCard(ed(by("climate", "water_heater"), climateRow)),
         lights: lights.length ? h("div.lchips", ed(lights, lightChip)) : null,
         playing: playingCard(ents),
@@ -201,6 +207,7 @@ export default {
     );
     draw();
     loadNotes();
+    loadToday();
 
     const onEntity = (ev) => {
       if (view() === "simple") return redraw();
@@ -219,7 +226,9 @@ export default {
     bus.addEventListener("entity_removed", onState);
     bus.addEventListener("attentionchange", redraw);
     bus.addEventListener("notes", onNotes);
+    bus.addEventListener("recipes_plan", loadToday);
     return () => {
+      bus.removeEventListener("recipes_plan", loadToday);
       bus.removeEventListener("notes", onNotes);
       clearTimeout(pending);
       bus.removeEventListener("entity", onEntity);
@@ -441,6 +450,23 @@ function deviceSheet(e) {
   if (e.kind === "tv" && e.actions.includes("remote")) return remoteSheet(e);
   const full = { speaker: speakerFull, media_player: mediaFull }[e.kind];
   sheet(e.name, full ? full(e) : tile(e));
+}
+
+/** "Stasera: Risotto" (lunch too before 15:00); nothing planned -> a quiet link to plan. */
+function mealCard(today) {
+  if (!today) return null;
+  const hr = new Date().getHours();
+  const slots = [hr < 15 && today.lunch && [t("Lunch"), today.lunch], today.dinner && [t("Tonight"), today.dinner]].filter(Boolean);
+  if (!slots.length) {
+    return h("a.card.meal.empty", { href: "#/recipes/week" }, h("span.sc-ico", icon("utensils")),
+      h("span.spacer", t("What's for dinner? Plan the week")), icon("right"));
+  }
+  return h("div.card.meal", slots.map(([when, sl]) =>
+    h("a.meal-row", { href: sl.recipe_id ? `#/recipes/recipe/${sl.recipe_id}` : "#/recipes/week" },
+      sl.image ? h("img.meal-img", { src: sl.image, alt: "" }) : h("span.sc-ico", icon("utensils")),
+      h("div.stack.spacer", { style: { gap: "1px", minWidth: 0 } },
+        h("span.muted.small", when), h("b.ellipsis", sl.title)),
+      h("span.chip", t("{n} pers.", { n: sl.servings })))));
 }
 
 /** The latest notes (pinned first, max 3) and a field to leave a new one. */

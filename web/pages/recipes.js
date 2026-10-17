@@ -1,6 +1,6 @@
 // Recipes: discover/import, personal recipe book, shopping list, calorie log (hub/plugins/recipes).
-// Routes: #/recipes[/discover|mine|shopping|today|recipe/<id>]
-import { api, h, icon, toast, sheet, ensureCss, act, debounce, go, hasPlugin, t, locale, fmt } from "../app.js";
+// Routes: #/recipes[/discover|week|mine|shopping|today|recipe/<id>]
+import { api, h, icon, toast, sheet, ensureCss, act, debounce, go, hasPlugin, t, locale, fmt, bus } from "../app.js";
 
 const P = (path, opts) => api(`p/recipes/${path}`, opts);
 const enc = encodeURIComponent;
@@ -17,8 +17,8 @@ const FLAG = { it: "🇮🇹", en: "🇬🇧" };
 
 let status = { language: "it", goal: 2000 };
 
-const TABS = ["discover", "mine", "shopping", "today"];
-const TAB_LABEL = () => ({ discover: t("Discover"), mine: t("My recipes"), shopping: t("Shopping list"), today: t("Calories") });
+const TABS = ["discover", "week", "mine", "shopping", "today"];
+const TAB_LABEL = () => ({ discover: t("Discover"), week: t("Week"), mine: t("My recipes"), shopping: t("Shopping list"), today: t("Calories") });
 
 export default {
   async render(root, args) {
@@ -35,7 +35,7 @@ export default {
       h("div.tabs", TABS.map((k) =>
         h(`button${k === tab ? ".active" : ""}`, { onclick: () => go(`#/recipes/${k}`) }, TAB_LABEL()[k]))),
       body);
-    ({ discover: renderDiscover, mine: renderMine, shopping: renderShopping, today: renderToday })[tab](body);
+    ({ discover: renderDiscover, week: renderWeek, mine: renderMine, shopping: renderShopping, today: renderToday })[tab](body);
   },
 };
 
@@ -272,6 +272,7 @@ function paintDetail(view, rec, ctx) {
       kcalChip, meta && h("span", meta), rec.edited && h("span.chip.warn", t("edited")),
       rec.source_url && h("a", { href: rec.source_url, target: "_blank", rel: "noopener" }, icon("link"), " ", rec.site || t("Source"))),
     h("div.row.wrap.r-actions", { style: { gap: "8px" } },
+      h("button.primary", { onclick: () => addToMenu(rec) }, icon("calendar"), t("Add to the menu")),
       h("button", { onclick: () => editMode(view, rec, ctx) }, icon("edit"), t("Edit")),
       hasPlugin("sync") && h("button", { onclick: (e) => act(async () => {
         const r = await api("p/sync/recipes/share", { body: { recipe_id: rec.id } });
@@ -430,4 +431,176 @@ async function renderToday(el) {
       h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("Last 7 days")), bars));
   }
   await paint();
+}
+
+// ---------------------------------------------------------------- week planner
+
+const MEAL_LABEL = () => ({ lunch: t("Lunch"), dinner: t("Dinner") });
+const dateOf = (s) => new Date(`${s}T12:00:00`);
+const addDays = (s, n) => { const d = dateOf(s); d.setDate(d.getDate() + n); return localDay(d); };
+const mondayOf = (s) => addDays(s, -((dateOf(s).getDay() + 6) % 7));
+const weekLabel = (mon) => {
+  const a = dateOf(mon), b = dateOf(addDays(mon, 6));
+  return a.getMonth() === b.getMonth()
+    ? `${a.getDate()}–${fmt.date(b, { weekday: false })}`
+    : `${fmt.date(a, { weekday: false })} – ${fmt.date(b, { weekday: false })}`;
+};
+const people = (n) => t("{n} people", { n });
+let recipeCache = null;
+const myRecipes = async (fresh) => (recipeCache && !fresh ? recipeCache : (recipeCache = await P("recipes")));
+
+function toastLink(msg, label, href) {
+  const el = h("div.toast", `${msg} `, h("a", { href }, label));
+  document.getElementById("toasts").append(el);
+  setTimeout(() => el.remove(), 6000);
+}
+
+async function renderWeek(el) {
+  const today = localDay();
+  let mon = mondayOf(today), plan = null;
+  const head = h("div.w-nav"), actions = h("div.w-actions"), days = h("div.w-days");
+  fill(el, head, actions, days);
+
+  async function load() {
+    try { plan = await P(`plan?week=${mon}`); } catch (e) { fill(days, h("div.empty", e.message)); return; }
+    paint();
+  }
+  const reloadSoon = debounce(() => { if (el.isConnected) load(); }, 120);
+  const onPlan = (e) => { if (!el.isConnected) bus.removeEventListener("recipes_plan", onPlan); else if (!e.detail || e.detail.week === mon) reloadSoon(); };
+  bus.addEventListener("recipes_plan", onPlan);
+
+  const go_ = (m) => { mon = m; load(); };
+  function paint() {
+    fill(head,
+      h("button.icon", { "aria-label": t("Previous week"), onclick: () => go_(addDays(mon, -7)) }, icon("left")),
+      h("div.w-label", weekLabel(mon)),
+      h("button.icon", { "aria-label": t("Next week"), onclick: () => go_(addDays(mon, 7)) }, icon("right")),
+      mon !== mondayOf(today) ? h("button.chipbtn", { onclick: () => go_(mondayOf(today)) }, t("Today")) : null);
+    const empty = plan.days.every((d) => !d.lunch && !d.dinner);
+    fill(actions,
+      h("button.primary.lg.w-shop", { disabled: empty, onclick: (e) => act(async () => {
+        const r = await P("plan/shopping", { body: { week: mon } });
+        if (!r.added) return toast(t("Nothing to add: plan some recipes first"));
+        toastLink(t("{n} ingredients on the list", { n: r.added }), t("Shopping list"), "#/recipes/shopping");
+      }, e.currentTarget) }, icon("cart"), t("Add everything to the shopping list")),
+      h("div.w-row2",
+        h("button", { onclick: (e) => act(async () => {
+          const r = await P("plan/fill", { body: { week: mon, meals: ["dinner"] } });
+          plan = r; paint();
+          toast(!r.filled ? ((await myRecipes()).length ? t("Nothing to fill") : t("Save some recipes first"))
+            : r.filled === 1 ? t("One dish added") : t("{n} dishes added", { n: r.filled }));
+        }, e.currentTarget) }, icon("utensils"), t("Fill the week")),
+        h("button", { onclick: (e) => act(async () => {
+          const r = await P("plan/copy", { body: { from_week: addDays(mon, -7), to_week: mon } });
+          plan = r; paint();
+          if (!r.copied) toast(t("Nothing to copy"));
+        }, e.currentTarget) }, icon("calendar"), t("Copy last week"))));
+    fill(days, plan.days.map((d) => h(`div.w-day${d.date === today ? ".today" : ""}`,
+      h("div.w-dayname", h("b", fmt.date(dateOf(d.date))), d.date === today ? h("span.chip.accent", t("Today")) : null),
+      ["lunch", "dinner"].map((m) => slotEl(d, m)))));
+  }
+
+  function slotEl(d, meal) {
+    const s = d[meal];
+    const lbl = h("span.w-meal", MEAL_LABEL()[meal]);
+    if (!s) return h("div.w-slot", lbl, h("button.w-add", { onclick: () => pickDish(d.date, meal, load) }, icon("plus"), t("Add")));
+    const img = s.image ? h("img", { src: s.image, alt: "", loading: "lazy" }) : h("div.ph", icon("utensils"));
+    return h("div.w-slot", lbl, h("button.w-filled", { onclick: () => slotSheet(s, load) },
+      h("span.w-img", img), h("span.w-title", s.title), h("span.chip", people(s.servings))));
+  }
+  await load();
+}
+
+function slotSheet(s, reload) {
+  let n = s.servings;
+  const val = h("span.val", String(n));
+  const save = debounce(() => act(async () => {
+    await P(`plan/${s.date}/${s.meal}`, { method: "PUT", body: { ...(s.recipe_id ? { recipe_id: s.recipe_id } : { title: s.title }), servings: n, note: s.note } });
+    reload();
+  }), 350);
+  const step = (dlt) => { n = Math.min(50, Math.max(1, n + dlt)); val.textContent = String(n); save(); };
+  const sh = sheet(`${MEAL_LABEL()[s.meal]} · ${fmt.date(dateOf(s.date))}`, [
+    h("div.w-sheet-title", s.title),
+    s.recipe_id ? h("button.lg", { onclick: () => { sh.close(); go(`#/recipes/recipe/${s.recipe_id}`); } }, icon("utensils"), t("Open recipe")) : null,
+    h("div.r-portions", h("span.lbl", t("Servings")),
+      h("div.stepper.big", h("button.icon", { "aria-label": "-", onclick: () => step(-1) }, icon("minus")), val,
+        h("button.icon", { "aria-label": "+", onclick: () => step(1) }, icon("plus")))),
+    h("button.lg", { onclick: () => { sh.close(); pickDish(s.date, s.meal, reload); } }, icon("refresh"), t("Replace")),
+    h("button.lg.danger", { onclick: (e) => act(async () => {
+      await P(`plan/${s.date}/${s.meal}`, { method: "DELETE" }); sh.close(); reload();
+    }, e.currentTarget) }, icon("trash"), t("Remove"))]);
+}
+
+async function pickDish(date, meal, reload) {
+  const q = h("input", { type: "search", placeholder: t("Search your recipes…"), enterkeyhint: "search" });
+  const list = h("div.w-pick");
+  const sh = sheet(`${MEAL_LABEL()[meal]} · ${fmt.date(dateOf(date))}`, [
+    h("div.r-input", icon("search"), q),
+    h("div.r-chips", [t("Pizza out"), t("Leftovers"), t("Free")].map((x) =>
+      h("button.chipbtn", { onclick: () => choose({ title: x }) }, x)),
+      h("button.chipbtn", { onclick: () => writeOwn() }, icon("edit"), t("Write something else…"))),
+    list]);
+  async function choose(body) {
+    try { await P(`plan/${date}/${meal}`, { method: "PUT", body }); sh.close(); reload(); }
+    catch (e) { toast(e.message, true); }
+  }
+  function writeOwn() {
+    const inp = h("input", { placeholder: t("What are you eating?"), maxlength: 80, enterkeyhint: "done" });
+    fill(list, h("form.r-search", { onsubmit: (e) => { e.preventDefault(); if (inp.value.trim()) choose({ title: inp.value.trim() }); } },
+      inp, h("button.primary", { type: "submit" }, t("Save"))));
+    inp.focus();
+  }
+  const row = (r) => h("button.w-pickrow", { onclick: () => choose({ recipe_id: r.id }) },
+    h("span.w-img", r.image ? h("img", { src: r.image, alt: "", loading: "lazy" }) : h("div.ph", icon("utensils"))),
+    h("span.w-title", r.title), r.fav ? h("span.w-fav", icon("heart")) : null);
+  let all = [];
+  const draw = () => {
+    const words = q.value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const items = all.filter((r) => words.every((w) => r.title.toLowerCase().includes(w)));
+    if (!all.length) return fill(list, h("div.muted.small", t("Save some recipes first")));
+    if (!items.length) return fill(list, h("div.muted.small", t("Nothing found.")));
+    if (words.length) return fill(list, items.slice(0, 60).map(row));
+    const fav = items.filter((r) => r.fav), rest = items.filter((r) => !r.fav);
+    fill(list, fav.length ? h("h2.r-sec", t("Favourites")) : null, fav.map(row),
+      rest.length ? h("h2.r-sec", fav.length ? t("Recent") : t("Your recipes")) : null, rest.slice(0, 40).map(row));
+  };
+  q.addEventListener("input", debounce(draw, 80));
+  try { all = await myRecipes(true); } catch (e) { toast(e.message, true); }
+  draw();
+}
+
+// from a recipe page: pick day + meal for the current portions
+async function addToMenu(rec) {
+  const today = localDay(), mon = mondayOf(today);
+  let meal = "dinner";
+  const grid = h("div");
+  const plans = {};
+  const sh = sheet(t("Add to the menu"), [
+    h("div.w-sheet-title", rec.title),
+    h("div.w-seg", ["lunch", "dinner"].map((m) => h("button", { "data-m": m, onclick: () => { meal = m; paint(); } }, MEAL_LABEL()[m]))),
+    grid]);
+  async function pick(day) {
+    const cur = plans[day]?.[meal];
+    if (cur && !confirm(t("This slot already has a dish. Replace it?") + "\n\n" + cur.title)) return;
+    try {
+      await P(`plan/${day}/${meal}`, { method: "PUT", body: { recipe_id: rec.id, servings: Math.round(rec.servings) } });
+      sh.close();
+      toastLink(t("Added to the menu"), t("Week"), `#/recipes/week`);
+    } catch (e) { toast(e.message, true); }
+  }
+  function paint() {
+    sh.el.querySelectorAll(".w-seg button").forEach((b) => b.classList.toggle("active", b.dataset.m === meal));
+    fill(grid, [mon, addDays(mon, 7)].map((m) => h("div.w-pickweek",
+      h("div.small.muted", weekLabel(m)),
+      h("div.w-pickdays", Array.from({ length: 7 }, (_, i) => {
+        const day = addDays(m, i), past = day < today, filled = !!plans[day]?.[meal];
+        return h(`button${filled ? ".filled" : ""}${day === today ? ".today" : ""}`, { disabled: past, onclick: () => pick(day) },
+          h("span", dateOf(day).toLocaleDateString(locale(), { weekday: "short" })), h("b", dateOf(day).getDate()));
+      })))));
+  }
+  paint();
+  try {
+    for (const m of [mon, addDays(mon, 7)]) for (const d of (await P(`plan?week=${m}`)).days) plans[d.date] = d;
+    paint();
+  } catch {}
 }
