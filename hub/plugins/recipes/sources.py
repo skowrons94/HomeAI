@@ -9,6 +9,7 @@ import ipaddress
 import logging
 import re
 import time
+import unicodedata
 from urllib.parse import quote, urlparse
 
 import aiohttp
@@ -255,6 +256,126 @@ async def wp_search(http, site: dict, q: str) -> list[dict]:
     return wp_results(data, site)
 
 
+# ---------------------------------------------------------------------------- relevance
+
+# Blog search engines (WordPress) match words anywhere in the text: "zuppa" returns anything that
+# mentions a soup, plus round-up articles. Results must name every searched word in the title
+# (Italian/English forms folded), round-ups are dropped, and blog pages must carry a schema.org
+# Recipe (what import needs anyway) - checked once and remembered.
+
+_STOP = {"di", "da", "con", "e", "ed", "al", "alla", "alle", "ai", "agli", "allo", "all", "del", "della",
+         "delle", "dei", "degli", "dello", "il", "lo", "la", "le", "i", "gli", "un", "una", "uno", "in", "per",
+         "a", "su", "the", "of", "and", "with", "a", "an", "to", "in"}
+# round-ups and articles, not single recipes ("10 zuppe…", "Le migliori ricette…", "Idee per…")
+_ARTICLE = re.compile(r"^\s*\d+\s|\b(ricette|idee|migliori|menu|recipes|ideas|best|ways|tips|roundup)\b|\?",
+                      re.I)
+_LD_RECIPE = re.compile(r'"@type"\s*:\s*(?:\[[^\]]*?)?"Recipe"')
+
+
+def _fold(s: str) -> str:
+    s = unicodedata.normalize("NFKD", (s or "").lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+def _stem(w: str) -> str:
+    """Light stemming so zuppa/zuppe, pomodoro/pomodori, soup/soups meet."""
+    if len(w) > 4 and w.endswith("es"):
+        w = w[:-2]
+    elif len(w) > 3 and w[-1] in "aeiouys":
+        w = w[:-1]
+    return w
+
+
+def query_terms(q: str) -> list[str]:
+    return [_stem(w) for w in _fold(q).split() if w not in _STOP and len(w) > 1]
+
+
+def title_score(title: str, terms: list[str]) -> float:
+    """0 = not about the query; higher = better (all words present, early, short title)."""
+    if not terms:
+        return 1.0
+    words = [_stem(w) for w in _fold(title).split()]
+    hits = [next((i for i, w in enumerate(words) if w.startswith(t)), None) for t in terms]
+    if any(h is None for h in hits):
+        return 0.0
+    return 2.0 + (1.0 if hits[0] == 0 else 0.0) + 1.0 / (1 + len(words))
+
+
+_TITLE_TAIL = re.compile(r"\s*(?:[:|–—-]\s*)(?:la\s+)?(?:ricetta|recipe)\b.*$|\s*\|.*$", re.I)
+
+
+def clean_title(title: str) -> str:
+    """'Curry di ceci : Ricetta perfetta, facilissima' -> 'Curry di ceci'."""
+    t = _TITLE_TAIL.sub("", title or "").strip(" -–:|")
+    return t or (title or "").strip()
+
+
+def is_article(title: str) -> bool:
+    return bool(_ARTICLE.search(title or ""))
+
+
+_recipe_cache: dict[str, tuple[float, bool]] = {}
+
+
+async def is_recipe_page(http, url: str) -> bool:
+    """Does the page carry a schema.org Recipe? Reads only until it finds one. Remembered for a
+    week (a failed fetch for an hour)."""
+    hit = _recipe_cache.get(url)
+    if hit and time.time() < hit[0]:
+        return hit[1]
+    found, ok = False, True
+    try:
+        for ua in (UA, API_UA):
+            async with http.get(url, headers={"User-Agent": ua, "Accept": "text/html"},
+                                timeout=aiohttp.ClientTimeout(total=6, connect=4), allow_redirects=True) as r:
+                if r.status == 403 and ua is UA:
+                    continue
+                if r.status >= 400:
+                    ok = False
+                    break
+                buf = ""
+                async for chunk in r.content.iter_chunked(65536):
+                    buf += chunk.decode("utf-8", errors="ignore")
+                    if _LD_RECIPE.search(buf):
+                        found = True
+                        break
+                    if len(buf) > 1_500_000:
+                        break
+                break
+    except Exception as err:
+        log.debug("recipe check %s: %s", url, err)
+        ok = False
+    _recipe_cache[url] = (time.time() + (7 * 86400 if ok else 3600), found)
+    return found
+
+
+async def tidy(http, by: dict[str, list[dict]], q: str) -> dict[str, list[dict]]:
+    """Keep only real recipes about the query, best title matches first within each source."""
+    terms = query_terms(q)
+    out: dict[str, list[dict]] = {}
+    for name, items in by.items():
+        scored = [(title_score(it.get("title", ""), terms), it) for it in items]
+        keep = [(sc, it) for sc, it in scored if sc > 0 and not is_article(it.get("title", ""))]
+        out[name] = [it | {"score": round(sc, 3), "title": clean_title(it.get("title", ""))}
+                     for sc, it in sorted(keep, key=lambda x: -x[0])]
+    # blog posts: verify they are recipe pages (GialloZafferano and TheMealDB list recipes only)
+    check = [(n, it) for n, items in out.items() if n not in LEGACY for it in items]
+    if check:
+        sem = asyncio.Semaphore(6)
+
+        async def one(it):
+            async with sem:
+                return await is_recipe_page(http, it["url"])
+        try:
+            oks = await asyncio.wait_for(asyncio.gather(*(one(it) for _n, it in check)), 8)
+        except asyncio.TimeoutError:
+            oks = [_recipe_cache.get(it["url"], (0, False))[1] for _n, it in check]
+        bad = {id(it) for (_n, it), good in zip(check, oks) if not good}
+        out = {n: [it for it in items if id(it) not in bad] for n, items in out.items()}
+    return out
+
+
 # ---------------------------------------------------------------------------- merged search
 
 _cache: dict[tuple, tuple[float, list]] = {}
@@ -334,7 +455,11 @@ async def search(http, q: str, sources: list[str], lang: str = "it") -> dict:
 
     def rank(n):  # household language first (Italian sources for "it"); otherwise settings order
         return (0 if _meta(n)[1] == lang else 1, sources.index(n))
-    out = {"results": merge(by, sorted(by, key=rank)), "errors": errors}
+    by = await tidy(http, by, q)
+    merged = merge(by, sorted(by, key=rank), limit=MAX_RESULTS * 2)
+    # best matches first; the language/round-robin order breaks ties
+    merged = sorted(merged, key=lambda it: -it.get("score", 0))[:MAX_RESULTS]
+    out = {"results": merged, "errors": errors}
     if out["results"] or not errors:
         _cache[key] = (time.time(), out)
     return out
