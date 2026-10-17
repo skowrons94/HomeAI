@@ -74,6 +74,9 @@ a boot-time mount of the NAS `Multimedia` share at `/mnt/nas` (it asks for the N
 the NAS only from the app, skip that mount: `NAS_FSTAB=0 ./deploy/install-pi.sh`. If your NAS
 is already mounted (your own fstab lines), point the installer at it instead:
 `NAS_FSTAB=0 MOUNT=/mnt/media DOWNLOAD_DIR=/mnt/download/incomplete ./deploy/install-pi.sh`.
+A machine that must never run Transmission: `TRANSMISSION=0 ./deploy/install-pi.sh` skips it (and
+stops/disables an existing daemon); it also follows `[plugins.media.transmission] enabled = false`
+in `config.toml`, which keeps the hub itself away from Transmission too.
 
 **Updating**: `~/casa/deploy/update.sh` (or from your computer `ssh <pi> '~/casa/deploy/update.sh'`)
 pulls the latest version and restarts Casa; settings and the HomeKit pairing are kept.

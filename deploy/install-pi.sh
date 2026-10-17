@@ -11,7 +11,9 @@
 #      NAS_FSTAB=0, a boot-time /etc/fstab mount of the default share at /mnt/nas
 #      (NAS_FSTAB=0 if the NAS is already mounted, e.g. by your own fstab lines;
 #      MOUNT=... and DOWNLOAD_DIR=... point the installer at those folders)
-#   4. Transmission: RPC on localhost only, downloads on the NAS
+#   4. Transmission: RPC on localhost only, downloads on the NAS. Skipped (and an
+#      existing daemon disabled) with TRANSMISSION=0 or when config.toml has
+#      [plugins.media.transmission] enabled = false
 #   5. systemd service "casa" (starts at boot, restarts on failure)
 set -euo pipefail
 
@@ -21,13 +23,29 @@ NAS_HOST="${NAS_HOST:-NAS.local}"
 NAS_SHARE="${NAS_SHARE:-Multimedia}"
 MOUNT="${MOUNT:-/mnt/nas}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-$MOUNT/downloads/incomplete}"   # where Transmission writes
+# Transmission on this machine? Default: what config.toml says (missing/true = yes).
+if [ -z "${TRANSMISSION:-}" ]; then
+  TRANSMISSION="$(python3 - "$DIR/config.toml" <<'PY' 2>/dev/null || echo 1
+import sys, tomllib
+try:
+    c = tomllib.load(open(sys.argv[1], "rb"))
+except FileNotFoundError:
+    c = {}
+tx = c.get("plugins", {}).get("media", {}).get("transmission", {})
+print(0 if tx.get("enabled", True) is False else 1)
+PY
+)"
+fi
+if [ "$TRANSMISSION" = 1 ]; then TX_GROUP=debian-transmission; else TX_GROUP="$(id -gn)"; fi
 
 say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 
 say "Installing system packages"
 sudo apt-get update -qq
-sudo apt-get install -y -qq python3-venv python3-dev bluez transmission-daemon cifs-utils smbclient \
-  libffi-dev libssl-dev
+PKGS="python3-venv python3-dev bluez cifs-utils smbclient libffi-dev libssl-dev"
+[ "$TRANSMISSION" = 1 ] && PKGS="$PKGS transmission-daemon"
+# shellcheck disable=SC2086
+sudo apt-get install -y -qq $PKGS
 
 say "Creating Python environment"
 python3 -m venv "$DIR/.venv"
@@ -62,9 +80,9 @@ if [ ! -f "$CRED" ]; then
   sudo chmod 600 "$CRED"
 fi
 sudo mkdir -p "$MOUNT"
-# Transmission runs as debian-transmission: give that group write access too.
+# Transmission runs as debian-transmission: give that group write access too (if installed).
 # vers=2.0 because the TS-419P II firmware is old; raise to 3.0 if your NAS allows it.
-FSTAB="//$NAS_HOST/$NAS_SHARE $MOUNT cifs credentials=$CRED,uid=$USER_NAME,gid=debian-transmission,file_mode=0775,dir_mode=0775,vers=2.0,iocharset=utf8,_netdev,x-systemd.automount,nofail 0 0"
+FSTAB="//$NAS_HOST/$NAS_SHARE $MOUNT cifs credentials=$CRED,uid=$USER_NAME,gid=$TX_GROUP,file_mode=0775,dir_mode=0775,vers=2.0,iocharset=utf8,_netdev,x-systemd.automount,nofail 0 0"
 if ! grep -q " $MOUNT cifs" /etc/fstab; then
   echo "$FSTAB" | sudo tee -a /etc/fstab >/dev/null
 fi
@@ -72,13 +90,14 @@ sudo systemctl daemon-reload
 sudo mount "$MOUNT" 2>/dev/null || true
 ls "$MOUNT" >/dev/null && echo "NAS mounted: $(ls "$MOUNT" | tr '\n' ' ')" \
   || echo "!! NAS not mounted yet - check $CRED and the share name, then: sudo mount $MOUNT"
-sudo usermod -aG debian-transmission "$USER_NAME"
+[ "$TRANSMISSION" = 1 ] && sudo usermod -aG debian-transmission "$USER_NAME"
 mkdir -p "$DOWNLOAD_DIR" 2>/dev/null || true
 else
-  sudo usermod -aG debian-transmission "$USER_NAME"
+  [ "$TRANSMISSION" = 1 ] && sudo usermod -aG debian-transmission "$USER_NAME"
   sudo mkdir -p "$MOUNT"
 fi
 
+if [ "$TRANSMISSION" = 1 ]; then
 say "Configuring Transmission"
 sudo systemctl stop transmission-daemon
 SETTINGS=/etc/transmission-daemon/settings.json
@@ -104,11 +123,21 @@ s.update({
 json.dump(s, open(path, "w"), indent=4)
 PY
 sudo systemctl enable --now transmission-daemon
+else
+  say "Transmission disabled on this machine"
+  if systemctl cat transmission-daemon.service >/dev/null 2>&1; then
+    sudo systemctl disable --now transmission-daemon 2>/dev/null || true
+    echo "transmission-daemon stopped and disabled (it won't start at boot)."
+  fi
+fi
 
 say "Configuration"
 if [ ! -f "$DIR/config.toml" ]; then
   cp "$DIR/config.example.toml" "$DIR/config.toml"
   chmod 600 "$DIR/config.toml"
+  if [ "$TRANSMISSION" != 1 ]; then  # keep the hub away from Transmission as well
+    sed -i 's/^# enabled = false\( *# never contact Transmission\)/enabled = false\1/' "$DIR/config.toml"
+  fi
   echo "Created config.toml - edit it (Ariston login, TMDB key, ...) then: sudo systemctl restart casa"
 fi
 
