@@ -300,3 +300,8 @@ button.icon.m-add { background: var(--ok); color: #fff; min-width: 32px; min-hei
           -webkit-box-orient: vertical; overflow: hidden; }
 .n-time { font-size: 12px; color: var(--muted); }
 .notif .n-x { margin: -6px -6px 0 0; opacity: .6; }
+
+/* iOS Safari zooms into any field under 16 px: never let one be smaller on touch screens */
+@media (pointer: coarse) {
+  input, select, textarea { font-size: 16px !important; }
+}
