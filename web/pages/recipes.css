@@ -220,3 +220,57 @@ button.w-filled, .w-row2 button, button.w-pickrow { white-space: normal; text-al
 .r-sub { color: var(--muted); font-size: 13px; }
 .r-cres > button { min-height: 44px; gap: 8px; }
 .r-cookcard { white-space: normal; }
+
+/* search field clear button */
+.r-input input[type=search]::-webkit-search-cancel-button { display: none; }
+.r-input input { padding-right: 44px; }
+.r-input .r-clear { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); width: 44px; height: 44px; padding: 0;
+  display: grid; place-items: center; }
+.r-input .r-clear[hidden] { display: none; }
+.r-input .r-clear svg { position: static; transform: none; width: 18px; height: 18px; }
+
+/* ideas for now */
+.r-nowhead { display: flex; align-items: center; justify-content: space-between; }
+.r-nowhead button { min-width: 44px; min-height: 44px; }
+.r-now-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
+.r-mini { cursor: pointer; min-width: 0; }
+.r-mini .img { aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: var(--surface-2); display: grid; place-items: center; }
+.r-mini img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.r-mini .t { font-size: 13px; font-weight: 600; line-height: 1.25; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; }
+.r-mini .y { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.r-mini.busy { opacity: .55; pointer-events: none; }
+
+/* structured recipe editor */
+.r-rows { display: flex; flex-direction: column; gap: 10px; }
+.r-row { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--surface); }
+.r-row.head { flex-direction: row; align-items: center; background: var(--surface-2); }
+.r-row.head input { flex: 1; min-width: 0; font-weight: 600; }
+.r-rq { display: flex; gap: 8px; align-items: center; }
+.r-rq select, .r-unit { flex: 1; min-width: 0; min-height: 44px; font-size: 16px; }
+.r-rn { display: flex; gap: 2px; align-items: center; }
+.r-rn .r-name { flex: 1; min-width: 0; min-height: 44px; }
+.r-note { min-height: 40px; font-size: 16px; }
+.r-qstep { display: flex; align-items: center; gap: 2px; }
+.r-qstep input { width: 76px; min-height: 44px; text-align: center; font-size: 16px; font-variant-numeric: tabular-nums; }
+.r-qstep button.icon, .r-mv { min-width: 44px; min-height: 44px; display: grid; place-items: center; padding: 0; }
+.r-mv.down svg { transform: rotate(180deg); }
+.r-mv.danger { color: var(--bad, #d33); }
+.r-stepcard { display: flex; gap: 8px; align-items: flex-start; padding: 10px; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--surface); }
+.r-stepcard .n { flex: none; width: 26px; height: 26px; margin-top: 9px; border-radius: 50%; background: var(--surface-2);
+  display: grid; place-items: center; font-size: 13px; font-weight: 600; }
+.r-stepta { flex: 1; min-width: 0; resize: none; overflow: hidden; min-height: 44px; font-size: 16px; line-height: 1.45; }
+.r-stepbtns { display: flex; flex-direction: column; }
+.r-adapt { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.r-adapt input { width: 72px; min-height: 44px; text-align: center; }
+.r-adapt button, .r-adaptbtn { min-height: 44px; }
+.r-adaptbtn { flex-basis: 100%; justify-self: start; }
+.r-portions .r-adaptbtn { flex-basis: auto; }
+
+/* tap-to-edit text on the recipe page */
+button.r-tap { all: unset; box-sizing: border-box; cursor: pointer; display: block; text-align: left; min-height: 44px; padding: 10px 0;
+  line-height: 1.45; flex: 1; min-width: 0; overflow-wrap: anywhere; -webkit-tap-highlight-color: transparent; }
+.r-step button.r-tap { padding: 0; min-height: 26px; }
+.r-ing .line button.r-tap { padding: 10px 0; }

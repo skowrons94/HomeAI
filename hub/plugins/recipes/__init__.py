@@ -19,6 +19,8 @@ from aiohttp import web
 from ...core import Plugin
 from ...i18n import _
 from . import pantry as pantry_mod
+from . import parse
+from . import suggest as suggest_mod
 from . import sources
 from .db import Book
 from .planner import Planner, monday
@@ -95,6 +97,7 @@ class RecipesPlugin(Plugin):
         return [
             web.get("/status", lambda r: _json(self.status())),
             web.get("/search", self.r_search),
+            web.get("/suggest", self.r_suggest),
             web.post("/import", self.r_import),
             web.get("/recipes", self.r_list),
             web.post("/recipes", self.r_create),
@@ -103,6 +106,8 @@ class RecipesPlugin(Plugin):
             web.put("/recipe/{id}", self.r_put),
             web.delete("/recipe/{id}", self.r_delete),
             web.post("/recipe/{id}/reset", self.r_reset),
+            web.post("/edit/parse", self.r_edit_parse),
+            web.post("/edit/rescale", self.r_edit_rescale),
             web.get("/image/{name}", self.r_image),
             web.get("/shopping", lambda r: _json(self.book.shopping())),
             web.post("/shopping", self.r_shop_add),
@@ -139,6 +144,21 @@ class RecipesPlugin(Plugin):
             sid = self.book.find_by_url(it["url"])
             it["saved"] = sid
         return _json(res)
+
+    async def r_suggest(self, request):
+        """Three ideas for the hour (saved recipes + web), stable within the hour; ?n= asks for another set."""
+        now = time.localtime()
+        n = int(request.query.get("n") or 0)
+        key = (time.strftime("%Y-%m-%d", now), now.tm_hour, n, self.book.lang)
+        cache = self.__dict__.setdefault("_suggest_cache", {})
+        if key not in cache:
+            cache.clear() if len(cache) > 20 else None
+            res = await suggest_mod.suggest(self.book, self.hub.http, self.sources, self.book.lang, now.tm_hour,
+                                            now.tm_mon, "|".join(map(str, key)), sources.search)
+            if len(res["items"]) < 3:  # partial answer (a source was down): don't pin it for the hour
+                return _json(res)
+            cache[key] = res
+        return _json(cache[key])
 
     async def r_import(self, request):
         b = await _body(request)
@@ -211,6 +231,23 @@ class RecipesPlugin(Plugin):
         rid = self._rid(request)
         self.book.reset(rid)
         return _json(self.book.view(rid))
+
+    async def r_edit_parse(self, request):
+        """Pasted text -> editor rows (same parser as the import)."""
+        b = await _body(request)
+        text = b.get("text", "")
+        lines = [x.strip() for x in (text.split("\n") if isinstance(text, str) else text) if str(x).strip()]
+        return _json({"rows": [parse.row_from_line(x) for x in lines]})
+
+    async def r_edit_rescale(self, request):
+        """Editor rows scaled by to/from servings, with cook-style rounding (nothing is saved)."""
+        b = await _body(request)
+        src, dst = float(b.get("from") or 0), float(b.get("to") or 0)
+        if src <= 0 or dst <= 0:
+            raise ValueError(_("Servings must be positive"))
+        lang = self.book.lang
+        lines = parse.rows_to_lines(b.get("rows") or [], lang)
+        return _json({"rows": [parse.row_from_line(x) for x in parse.rescale_lines(lines, dst / src, lang)]})
 
     async def r_image(self, request):
         name = request.match_info["name"]

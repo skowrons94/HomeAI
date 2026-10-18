@@ -540,3 +540,147 @@ def _compose(q: float, q2: float | None, unit: str, name: str, note: str, lang: 
     parts.append(name)
     txt = " ".join(parts)
     return f"{txt} ({note})" if note else txt
+
+
+# ----------------------------------------------------------------------------- editing: rows, rescale
+
+# Units the editor offers (canonical codes from UNIT_ALIASES); "" = no unit (3 eggs).
+EDIT_UNITS = ["g", "kg", "ml", "cl", "dl", "l", "tbsp", "tsp", "cup", "glass", "clove", "leaf", "pinch",
+              "handful", "pack", "slice", "bunch", "sprig", "can", "oz", "lb"]
+_METRIC = {"g", "kg", "ml", "cl", "dl", "l", "oz", "lb"}
+_CONTINUOUS = {"cup", "glass", "oz", "lb"}  # quarters make sense
+_SAME = ("qty", "qty2", "unit", "name", "note", "taste")
+
+
+def exact_qty(q: float) -> str:
+    """A quantity written so parse_ingredient reads back the same number (½, 1½, 2,5 ...)."""
+    q = round(float(q), 2)
+    whole = int(q)
+    frac = round(q - whole, 4)
+    for v, ch in _VULGAR.items():
+        if abs(frac - v) < 0.006:
+            return f"{whole}{ch}" if whole else ch
+    return str(int(q)) if q == int(q) else f"{q:.2f}".rstrip("0").replace(".", ",")
+
+
+def _fnum(v: Any) -> float | None:
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return to_num(str(v))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def row_from_line(line: str) -> dict:
+    """One stored line -> an editor row: {heading} or {qty, qty2, unit, name, note, taste, raw}."""
+    if line.startswith("# "):
+        return {"heading": line[2:].strip()}
+    p = parse_ingredient(line)
+    return {"qty": p["qty"], "qty2": p["qty2"], "unit": p["unit"], "name": p["name"], "note": p["note"],
+            "taste": p["taste"], "raw": line}
+
+
+def line_from_row(row: dict, lang: str = "it") -> str:
+    """An editor row -> the stored line. Untouched rows keep their original text exactly."""
+    if row.get("heading") is not None:
+        h = re.sub(r"\s+", " ", str(row["heading"])).strip()
+        return f"# {h}" if h else ""
+    name = re.sub(r"\s+", " ", str(row.get("name") or "")).strip()
+    note = re.sub(r"\s+", " ", str(row.get("note") or "")).strip()
+    qty, qty2 = _fnum(row.get("qty")), _fnum(row.get("qty2"))
+    unit = str(row.get("unit") or "")
+    taste = bool(row.get("taste")) and qty is None
+    raw = str(row.get("raw") or "").strip()
+    if raw:
+        p = parse_ingredient(raw)
+        same = (p["name"] == name and p["note"] == note and p["unit"] == (unit if qty is not None else p["unit"])
+                and p["taste"] == taste and (p["qty"] is None) == (qty is None)
+                and (qty is None or abs(p["qty"] - qty) < 0.005)
+                and ((p["qty2"] is None) == (qty2 is None) or qty is None)
+                and (qty2 is None or p["qty2"] is None or abs(p["qty2"] - qty2) < 0.005))
+        if same:
+            return raw
+    if not name:
+        return ""
+    if qty is None:
+        txt = f"{name} q.b." if taste else name
+    else:
+        qs = exact_qty(qty) + (f"-{exact_qty(qty2)}" if qty2 and qty2 != qty else "")
+        parts = [qs]
+        if unit:
+            parts.append(_unit_text(unit, qty2 or qty, lang))
+            if unit not in _METRIC or lang == "it":
+                parts.append("di" if lang == "it" else "of")
+        parts.append(name)
+        txt = " ".join(parts)
+    return f"{txt} ({note})" if note else txt
+
+
+def rows_to_lines(rows: list, lang: str = "it") -> list[str]:
+    out = []
+    for r in rows or []:
+        if isinstance(r, str):
+            out.append(r)
+        elif isinstance(r, dict):
+            line = line_from_row(r, lang)
+            if line:
+                out.append(line)
+    return out
+
+
+def _hu(x: float) -> int:
+    """Round half up (Python's round() is banker's: 12.5 -> 12)."""
+    return int(x + 0.5)
+
+
+def _round_qty(q: float, unit: str) -> tuple[float, str]:
+    """Round a rescaled quantity the way a cook would. Never 0 for a non-zero input."""
+    if unit in ("kg", "l", "cl", "dl"):
+        base, bu = normalize_unit(q, unit)
+        r, bu = _round_qty(base, bu)
+        if unit in ("kg", "l") and r >= 1000:
+            return round(r / 1000, 2), unit
+        if unit in ("kg", "l"):
+            return r, bu          # 0.5 kg -> 500 g
+        return round(r / (10 if unit == "cl" else 100), 1), unit
+    if unit in ("g", "ml"):
+        if q < 10:
+            return max(1.0, float(_hu(q))), unit
+        if q < 100:
+            return max(5.0, _hu(q / 5) * 5.0), unit
+        return _hu(q / 10) * 10.0, unit
+    if unit in ("tbsp", "tsp"):
+        return max(0.5, _hu(q * 2) / 2), unit
+    if unit in _CONTINUOUS:
+        return max(0.25, _hu(q * 4) / 4), unit
+    # countable: pieces, eggs, cloves, packs...
+    if q < 1:
+        return max(0.5, _hu(q * 2) / 2), unit
+    return float(max(1, int(q + 0.5))), unit
+
+
+def rescale_line(line: str, factor: float, lang: str = "it") -> str:
+    """Scale one stored line by `factor` (new servings / old servings) with cook-style rounding.
+    Headings, "q.b." and lines without a quantity come back unchanged."""
+    if line.startswith("# ") or factor <= 0 or abs(factor - 1) < 1e-9:
+        return line
+    p = parse_ingredient(line)
+    if p["qty"] is None or p["qty"] <= 0:
+        return line
+    q, unit = _round_qty(p["qty"] * factor, p["unit"])
+    q2 = None
+    if p["qty2"]:
+        q2, u2 = _round_qty(p["qty2"] * factor, p["unit"])
+        if u2 != unit:  # kg range falling back to g on one side: use the base unit for both
+            q, unit = _round_qty(normalize_unit(p["qty"] * factor, p["unit"])[0], normalize_unit(1, p["unit"])[1])
+            q2, _ = _round_qty(normalize_unit(p["qty2"] * factor, p["unit"])[0], normalize_unit(1, p["unit"])[1])
+        if q2 == q:
+            q2 = None
+    return line_from_row({"qty": q, "qty2": q2, "unit": unit, "name": p["name"], "note": p["note"]}, lang)
+
+
+def rescale_lines(lines: list[str], factor: float, lang: str = "it") -> list[str]:
+    return [rescale_line(x, factor, lang) for x in lines]

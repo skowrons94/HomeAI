@@ -2,6 +2,12 @@
 // Routes: #/recipes[/discover|week|mine|shopping|today|recipe/<id>]
 import { api, h, icon, toast, sheet, ensureCss, act, debounce, go, hasPlugin, t, locale, fmt, bus } from "../app.js";
 
+// Scopri starts fresh; only coming back (browser back / the recipe's back button) from a recipe opened
+// from the results restores the query. popstate marks "we arrived by going back".
+const ss = (k, v) => { try { v === undefined ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch {} };
+const sg = (k) => { try { return sessionStorage.getItem(k); } catch { return null; } };
+window.addEventListener("popstate", () => ss("r-pop", String(Date.now())));
+
 const P = (path, opts) => api(`p/recipes/${path}`, opts);
 const enc = encodeURIComponent;
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false && k !== ""));
@@ -25,6 +31,7 @@ export default {
     ensureCss(`/static/pages/recipes.css?v=${window.CASA_V}`);
     try { status = await P("status"); } catch (e) { fill(root, h("div.empty", e.message)); return; }
     const [view, id] = args;
+    if (view !== "recipe" && view !== "discover" && view) ss("r-from");
     if (view === "recipe") { await renderDetail(root, id); return; }
 
     const tab = TABS.includes(view) ? view : "discover";
@@ -52,11 +59,17 @@ function card(r, onclick, extra) {
 // ---------------------------------------------------------------- discover
 
 function renderDiscover(el) {
+  const restore = !!sg("r-from") && Date.now() - (+sg("r-pop") || 0) < 2000;
+  ss("r-pop");
+  if (!restore) { ss("r-q"); ss("r-from"); }
   const input = h("input", { type: "search", placeholder: t("Search or paste a link…"), enterkeyhint: "search",
-                             value: sessionStorage.getItem("r-q") || "" });
+                             value: restore ? sg("r-q") || "" : "" });
+  const clear = h("button.r-clear.icon.ghost", { type: "button", "aria-label": t("Clear"), onclick: () => {
+    input.value = ""; ss("r-q"); ss("r-from"); input.dispatchEvent(new Event("input")); intro(out, input, submit); input.focus();
+  } }, icon("x"));
   const out = h("div");
   const btn = h("button.primary", { type: "submit" });
-  const label = () => fill(btn, icon(isUrl(input.value) ? "download" : "search"), isUrl(input.value) ? t("Import") : t("Search"));
+  const label = () => { clear.hidden = !input.value; fill(btn, icon(isUrl(input.value) ? "download" : "search"), isUrl(input.value) ? t("Import") : t("Search")); };
   label();
   input.addEventListener("input", label);
   const submit = async (e) => {
@@ -64,21 +77,36 @@ function renderDiscover(el) {
     const q = input.value.trim();
     if (!q) return;
     input.blur();
-    try { sessionStorage.setItem("r-q", q); } catch {}
+    ss("r-q", q);
     if (isUrl(q)) return importRecipe({ url: q }, btn);
     fill(out, loading());
     try { showResults(out, await P(`search?q=${enc(q)}`), q); }
     catch (err) { fill(out, h("div.empty", err.message)); }
   };
-  fill(el, cookCard(el), h("form.r-search", { onsubmit: submit }, h("div.r-input", icon("search"), input), btn), out);
-  if (input.value.trim() && !isUrl(input.value)) submit(new Event("submit"));
+  fill(el, cookCard(el), h("form.r-search", { onsubmit: submit }, h("div.r-input", icon("search"), input, clear), btn), out);
+  if (restore && input.value.trim() && !isUrl(input.value)) submit(new Event("submit"));
   else intro(out, input, submit);
 }
 
 function intro(out, input, submit) {
   const ideas = [t("pasta"), t("risotto"), t("chicken"), t("vegetables"), t("desserts"), t("soups")];
   const recent = h("div");
-  fill(out, h("div.r-empty.r-intro", h("div.r-empty-ic", icon("utensils")),
+  const now = h("div.r-now");
+  let n = 0;
+  const loadNow = () => P(`suggest?n=${n}`).then((r) => {
+    if (!r.items?.length) return fill(now);
+    fill(now, h("div.r-nowhead", h("h2.r-sec", t("Ideas for now"), r.label ? ` · ${r.label}` : ""),
+      h("button.icon.ghost", { type: "button", "aria-label": t("Other ideas"), title: t("Other ideas"), onclick: () => { n++; loadNow(); } }, icon("refresh"))),
+      h("div.r-now-grid", r.items.map((x) => {
+        const c = h("div.r-mini", { title: x.title, onclick: () => (x.recipe_id ? go(`#/recipes/recipe/${x.recipe_id}`)
+          : (ss("r-from", "1"), importRecipe(x.mealdb ? { mealdb: x.mealdb } : { url: x.url }, c))) },
+          h("div.img", x.image ? h("img", { src: x.image, loading: "lazy", alt: "" }) : h("div.ph", icon("utensils"))),
+          h("div.t", x.title), h("div.y", x.source));
+        return c;
+      })));
+  }).catch(() => fill(now));
+  loadNow();
+  fill(out, now, h("div.r-empty.r-intro", h("div.r-empty-ic", icon("utensils")),
     h("p", t("Search for a recipe or paste a link: we save it in the app.")),
     h("div.r-ideas", ideas.map((w) => h("button.chipbtn", { onclick: () => { input.value = w; input.dispatchEvent(new Event("input")); submit(new Event("submit")); } }, w)))),
     recent);
@@ -101,7 +129,7 @@ function showResults(out, res, q) {
     const list = res.results.filter((r) => which === "all" || (which === "it" ? r.cuisine === "italian" : r.cuisine !== "italian"));
     fill(grid, ...(list.length ? list.map((r) => {
       const c = card({ image: r.image, title: r.title, meta: `${FLAG[r.lang] || ""} ${r.source || r.subtitle || r.site}` },
-        () => importRecipe(r.mealdb ? { mealdb: r.mealdb } : { url: r.url }, c),
+        () => { ss("r-from", "1"); importRecipe(r.mealdb ? { mealdb: r.mealdb } : { url: r.url }, c); },
         r.saved ? h("span.r-badge", icon("check")) : null);
       return c;
     }) : [emptyState("search", `${t("Nothing found.")} “${q}”`)]));
@@ -369,13 +397,13 @@ function paintDetail(view, rec, ctx) {
     h("div.stepper.big",
       h("button.icon", { onclick: () => step(-1), "aria-label": "-" }, icon("minus")), val,
       h("button.icon", { onclick: () => step(1), "aria-label": "+" }, icon("plus"))),
-    orig);
+    orig, adaptButton(rec, ctx));
 
-  const ingList = h("div.r-ings", rec.ingredients.map((i) => {
+  const ingList = h("div.r-ings", rec.ingredients.map((i, idx) => {
     if (i.heading) return h("div.r-sub", i.heading);
     const subs = i.subs?.length ? h("div.r-subs.hidden", h("b", `${t("Substitutions")}: `), i.subs.join(" · ")) : null;
     return h("div.r-ing",
-      h("div.line", h("span.txt", i.text),
+      h("div.line", h("button.txt.r-tap", { title: t("Edit ingredient"), onclick: () => quickIngredient(rec, idx, ctx) }, i.text),
         subs && h("button.icon.ghost", { title: t("Substitutions"), onclick: () => subs.classList.toggle("hidden") }, "⇄"),
         h("button.icon.ghost", { title: t("Add to shopping list"), onclick: (e) => act(async () => {
           await P("shopping", { body: { name: i.text } }); toast(t("Added to the shopping list"));
@@ -385,10 +413,10 @@ function paintDetail(view, rec, ctx) {
 
   const steps = [];
   let n = 0;
-  for (const s of rec.steps) {
-    if (s.startsWith("# ")) { steps.push(h("div.r-sub", s.slice(2))); continue; }
-    steps.push(h("div.r-step", h("span.n", ++n), h("p", s)));
-  }
+  rec.steps.forEach((s, idx) => {
+    if (s.startsWith("# ")) { steps.push(h("div.r-sub", s.slice(2))); return; }
+    steps.push(h("div.r-step", h("span.n", ++n), h("button.r-tap", { title: t("Edit step"), onclick: () => quickStep(rec, idx, ctx) }, s)));
+  });
 
   const notes = h("textarea", { rows: 3, placeholder: t("Your notes: tweaks, tips, family verdict…"), value: rec.notes });
   notes.addEventListener("change", () => act(async () => { await P(`recipe/${id}`, { method: "PUT", body: { notes: notes.value } }); rec.notes = notes.value; }));
@@ -398,7 +426,7 @@ function paintDetail(view, rec, ctx) {
 
   fill(view,
     h("div.r-hero", rec.image ? h("img", { src: rec.image, alt: "" }) : h("div.ph", icon("utensils")),
-      h("button.icon.back", { onclick: () => go("#/recipes/mine"), "aria-label": t("Back") }, icon("left"))),
+      h("button.icon.back", { onclick: () => (sg("r-from") ? (ss("r-pop", String(Date.now())), history.back()) : go("#/recipes/mine")), "aria-label": t("Back") }, icon("left"))),
     h("div.r-titlebar", h("h1", rec.title), heart),
     sv,
     h("div.row.wrap.small.muted", { style: { gap: "8px" } },
@@ -433,25 +461,274 @@ function paintDetail(view, rec, ctx) {
       h("label.field", t("Tags (comma separated)").split(" (")[0], tagInput)));
 }
 
+// ---------------------------------------------------------------- editing helpers
+
+const UNITS = () => [["", "–"], ["g", "g"], ["kg", "kg"], ["ml", "ml"], ["cl", "cl"], ["dl", "dl"], ["l", "l"],
+  ["tbsp", t("tablespoon")], ["tsp", t("teaspoon")], ["cup", t("cup")], ["glass", t("glass")], ["clove", t("clove")],
+  ["leaf", t("leaf")], ["pinch", t("pinch")], ["handful", t("handful")], ["pack", t("pack")], ["slice", t("slice")],
+  ["bunch", t("bunch")], ["sprig", t("sprig")], ["can", t("can")], ["oz", "oz"], ["lb", "lb"], ["qb", "q.b."]];
+
+const qtyText = (q, q2) => {
+  if (q == null) return "";
+  const f = (x) => String(Math.round(x * 100) / 100).replace(".", ",");
+  return q2 ? `${f(q)}-${f(q2)}` : f(q);
+};
+function parseQty(s) {
+  const one = (x) => {
+    x = x.trim().replace(",", ".");
+    const m = x.match(/^(?:(\d+)\s+)?(\d+)\/(\d+)$/);
+    if (m) return (+m[1] || 0) + (+m[2]) / (+m[3] || 1);
+    const n = parseFloat(x);
+    return x === "" || isNaN(n) ? null : n;
+  };
+  const m = String(s).match(/^\s*([\d.,/ ]+?)\s*[-–]\s*([\d.,/ ]+)\s*$/);
+  if (m) { const a = one(m[1]), b = one(m[2]); return a == null ? [null, null] : [a, b]; }
+  return [one(String(s)), null];
+}
+function qtyStep(unit, q) {
+  if (unit === "g" || unit === "ml") return q >= 100 ? 50 : q >= 10 ? 10 : 1;
+  if (unit === "kg" || unit === "l" || unit === "cup" || unit === "glass") return 0.25;
+  if (unit === "tbsp" || unit === "tsp") return 0.5;
+  if (unit === "cl" || unit === "dl") return q >= 10 ? 5 : 1;
+  return 1;
+}
+const unitValue = (row) => row.taste && row.qty == null ? "qb" : row.unit || "";
+
+/** Quantity (stepper + text, Italian comma accepted) + unit select for one row; edits `row` in place. */
+function qtyControls(row, onChange) {
+  const input = h("input.r-qty", { type: "text", inputmode: "decimal", value: qtyText(row.qty, row.qty2), placeholder: "–", "aria-label": t("Quantity") });
+  const sel = h("select.r-unit", { "aria-label": t("Unit") });
+  const opts = UNITS();
+  if (row.unit && !opts.some(([v]) => v === row.unit)) opts.push([row.unit, row.unit]); // unknown unit from the source
+  for (const [v, l] of opts) sel.append(h("option", { value: v }, l));
+  sel.value = unitValue(row);
+  const sync = () => {
+    const [q, q2] = parseQty(input.value);
+    row.qty = q; row.qty2 = q2;
+    if (sel.value === "qb") { row.taste = true; row.unit = ""; row.qty = null; row.qty2 = null; }
+    else { row.taste = false; row.unit = sel.value; }
+    onChange?.();
+  };
+  input.addEventListener("input", sync);
+  sel.addEventListener("change", () => { if (sel.value === "qb") input.value = ""; sync(); });
+  const step = (d) => {
+    const q = row.qty || 0;
+    const s = qtyStep(row.unit, d < 0 ? q - 0.001 : q);
+    const next = Math.max(0, Math.round((q + d * s) * 100) / 100);
+    row.qty = next || null; row.qty2 = null;
+    if (row.taste) { row.taste = false; sel.value = row.unit || ""; }
+    input.value = qtyText(row.qty);
+    onChange?.();
+  };
+  const stepper = h("div.r-qstep",
+    h("button.icon", { type: "button", onclick: () => step(-1), "aria-label": "-" }, icon("minus")), input,
+    h("button.icon", { type: "button", onclick: () => step(1), "aria-label": "+" }, icon("plus")));
+  return { stepper, sel };
+}
+
+const grow = (ta) => { ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight + 2}px`; };
+const growSoon = (ta) => requestAnimationFrame(() => grow(ta));
+const pasteParts = (text) => {
+  const paras = text.replace(/\r/g, "").split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+  if (paras.length > 1) return paras.map((x) => x.replace(/\s*\n\s*/g, " "));
+  return text.split("\n").map((x) => x.trim()).filter(Boolean);
+};
+const moveItem = (arr, i, d) => { const j = i + d; if (j < 0 || j >= arr.length) return; [arr[i], arr[j]] = [arr[j], arr[i]]; };
+const rowBtns = (arr, i, redraw) => [
+  h("button.icon.r-mv", { type: "button", "aria-label": t("Move up"), onclick: () => { moveItem(arr, i, -1); redraw(); } }, icon("up")),
+  h("button.icon.r-mv.down", { type: "button", "aria-label": t("Move down"), onclick: () => { moveItem(arr, i, 1); redraw(); } }, icon("up")),
+  h("button.icon.r-mv.danger", { type: "button", "aria-label": t("Remove"), onclick: () => { arr.splice(i, 1); redraw(); } }, icon("x")),
+];
+
+function ingredientEditor(rows, onChange) {
+  const box = h("div.r-rows");
+  let focusNext = -1;
+  const draw = () => {
+    fill(box, rows.map((row, i) => {
+      if (row.heading != null) {
+        const inp = h("input", { value: row.heading, placeholder: t("Section title"), "aria-label": t("Section title") });
+        inp.addEventListener("input", () => { row.heading = inp.value; onChange(); });
+        return h("div.r-row.head", inp, rowBtns(rows, i, redraw));
+      }
+      const { stepper, sel } = qtyControls(row, onChange);
+      const name = h("input.r-name", { value: row.name || "", placeholder: t("Ingredient"), "aria-label": t("Ingredient"), autocapitalize: "none" });
+      name.addEventListener("input", () => { row.name = name.value; onChange(); });
+      name.addEventListener("paste", (e) => {
+        const text = e.clipboardData?.getData("text") || "";
+        if (!/\n/.test(text.trim())) return;
+        e.preventDefault();
+        act(async () => {
+          const r = await P("edit/parse", { body: { text } });
+          const at = row.name ? i + 1 : i;
+          rows.splice(at, row.name ? 0 : 1, ...r.rows.map((x) => (x.heading != null ? x : { ...x, raw: "" })));
+          onChange(); redraw();
+        });
+      });
+      const note = h("input.r-note", { value: row.note || "", placeholder: t("Note (optional)"), "aria-label": t("Note (optional)") });
+      note.addEventListener("input", () => { row.note = note.value; onChange(); });
+      if (i === focusNext) setTimeout(() => name.focus(), 0);
+      return h("div.r-row", h("div.r-rq", stepper, sel), h("div.r-rn", name, rowBtns(rows, i, redraw)), note);
+    }));
+    focusNext = -1;
+  };
+  const redraw = () => { draw(); onChange(); };
+  draw();
+  const add = () => { rows.push({ qty: null, qty2: null, unit: "", name: "", note: "", taste: false }); focusNext = rows.length - 1; redraw(); };
+  const addHead = () => { rows.push({ heading: "" }); redraw(); };
+  return { el: h("div.stack", { style: { gap: "10px" } }, box,
+    h("div.row.wrap", { style: { gap: "8px" } },
+      h("button", { type: "button", onclick: add }, icon("plus"), t("Add ingredient")),
+      h("button", { type: "button", onclick: addHead }, icon("plus"), t("Add section")))), redraw };
+}
+
+function stepsEditor(items, onChange) {
+  const box = h("div.r-rows");
+  let focusNext = -1;
+  const draw = () => {
+    let n = 0;
+    fill(box, items.map((it, i) => {
+      const ta = h("textarea.r-stepta", { rows: 1, value: it.text, placeholder: it.heading ? t("Section title") : t("Describe this step…") });
+      ta.addEventListener("input", () => { it.text = ta.value; grow(ta); onChange(); });
+      if (!it.heading) ta.addEventListener("paste", (e) => {
+        const text = e.clipboardData?.getData("text") || "";
+        const parts = pasteParts(text);
+        if (parts.length < 2) return;
+        e.preventDefault();
+        const a = ta.selectionStart, b = ta.selectionEnd;
+        it.text = ta.value.slice(0, a) + parts[0] + ta.value.slice(b);
+        items.splice(i + 1, 0, ...parts.slice(1).map((x) => ({ text: x })));
+        redraw();
+      });
+      growSoon(ta);
+      if (i === focusNext) setTimeout(() => ta.focus(), 0);
+      if (it.heading) return h("div.r-row.head", ta, rowBtns(items, i, redraw));
+      return h("div.r-stepcard", h("span.n", ++n), ta, h("div.r-stepbtns", rowBtns(items, i, redraw)));
+    }));
+    focusNext = -1;
+  };
+  const redraw = () => { draw(); onChange(); };
+  draw();
+  const add = () => { items.push({ text: "" }); focusNext = items.length - 1; redraw(); };
+  return h("div.stack", { style: { gap: "10px" } }, box, h("button", { type: "button", onclick: add }, icon("plus"), t("Add step")));
+}
+
+const stepItems = (steps) => steps.map((s) => (s.startsWith("# ") ? { text: s.slice(2), heading: true } : { text: s }));
+const stepLines = (items) => items.filter((x) => x.text.trim()).map((x) => (x.heading ? `# ${x.text.trim()}` : x.text.trim()));
+
+/** Rescale rows to `n` servings on the server (same rounding rules as the Python tests). */
+const rescaleRows = (rows, from, to) => P("edit/rescale", { body: { rows, from, to } }).then((r) => r.rows);
+
 function editMode(view, rec, ctx) {
+  const rows = JSON.parse(JSON.stringify(rec.rows));
+  const items = stepItems(rec.steps);
   const title = h("input", { value: rec.title });
-  const sv = h("input", { type: "number", min: 1, step: 1, value: rec.base_servings });
+  const sv = h("input", { type: "number", min: 1, step: 1, value: rec.base_servings, inputmode: "decimal" });
   const orig = rec.kcal_est ? "" : String(rec.kcal || "");
   const kcal = h("input", { type: "number", min: 0, value: orig, placeholder: rec.kcal_est ? `~${rec.kcal}` : "" });
-  const ing = h("textarea.r-edit", { rows: Math.max(8, Math.min(24, rec.ingredient_lines.length + 3)), value: rec.ingredient_lines.join("\n") });
-  const steps = h("textarea.r-edit", { rows: Math.max(10, Math.min(30, rec.steps.length * 3 + 3)), value: rec.steps.join("\n") });
+  const snap = () => JSON.stringify([title.value, sv.value, kcal.value, rows, items]);
+  const start = snap();
+  const dirty = () => snap() !== start;
+  const ie = ingredientEditor(rows, () => {});
+  const se = stepsEditor(items, () => {});
+
+  const target = h("input", { type: "number", min: 1, step: 1, value: status.default_servings || 2, inputmode: "numeric", "aria-label": t("Servings") });
+  const adapt = h("button", { type: "button", onclick: (e) => act(async () => {
+    const to = Math.max(1, Math.round(+target.value || 0));
+    const from = +sv.value || rec.base_servings;
+    if (to === from) return;
+    const out = await rescaleRows(rows, from, to);
+    rows.splice(0, rows.length, ...out); sv.value = to;
+    ie.redraw();
+    toast(t("Quantities adapted to {n} servings", { n: to }));
+  }, e.currentTarget) }, icon("refresh"), t("Adapt quantities"));
+
+  let off = () => {};
+  const leave = () => { off(); ctx.paint(); };
+  const guardClick = (e) => {
+    if (!view.isConnected) { off(); return; }
+    const a = e.target.closest?.("a[href^='#']");
+    if (a && dirty() && !confirm(t("Leave without saving?"))) { e.preventDefault(); e.stopPropagation(); }
+  };
+  const guardUnload = (e) => { if (dirty()) { e.preventDefault(); e.returnValue = ""; } };
+  document.addEventListener("click", guardClick, true);
+  window.addEventListener("beforeunload", guardUnload);
+  off = () => { document.removeEventListener("click", guardClick, true); window.removeEventListener("beforeunload", guardUnload); };
+
   const bar = h("div.r-editbar",
-    h("button", { onclick: () => ctx.paint() }, t("Cancel")),
+    h("button", { onclick: () => { if (!dirty() || confirm(t("Leave without saving?"))) leave(); } }, t("Cancel")),
     h("button.primary", { onclick: (e) => act(async () => {
-      const patch = { title: title.value, servings: +sv.value, ingredients: ing.value, steps: steps.value };
+      const patch = { title: title.value, servings: +sv.value, ingredients: rows, steps: stepLines(items) };
       if (kcal.value !== orig) patch.kcal = kcal.value === "" ? null : +kcal.value;
       ctx.servings = +sv.value === rec.base_servings ? ctx.servings : +sv.value;
-      await ctx.reload(patch); ctx.paint();
+      await ctx.reload(patch); off(); ctx.paint(); toast(t("Saved"));
     }, e.currentTarget) }, icon("check"), t("Save")));
-  fill(view, bar, h("h1", t("Edit")), h("div.card.stack",
-    h("label.field", t("Title"), title), h("label.field", t("Servings in the original recipe"), sv),
-    h("label.field", t("Ingredients (one per line, '# Heading' for a group)"), ing), h("label.field", t("Method (one step per line)"), steps),
-    h("label.field", t("Calories per serving (empty = automatic)"), kcal)));
+  fill(view, bar, h("h1", t("Edit")),
+    h("div.card.stack", h("label.field", t("Title"), title), h("label.field", t("Servings in the original recipe"), sv),
+      h("div.r-adapt", h("span.lbl", t("Adapt to")), target, h("span", t("servings")), adapt),
+      h("p.small.muted", { style: { margin: 0 } }, t("Rescales every quantity with sensible rounding. \"Reset to original\" undoes it."))),
+    h("div.card.stack", h("h2", t("Ingredients")), ie.el),
+    h("div.card.stack", h("h2", t("Method")), se),
+    h("div.card.stack", h("label.field", t("Calories per serving (empty = automatic)"), kcal)));
+}
+
+// Quick edits from the recipe page: tap an ingredient or a step.
+function quickIngredient(rec, idx, ctx) {
+  const stored = rec.rows[idx];
+  const factor = rec.servings / rec.base_servings || 1;
+  const i = rec.ingredients[idx];
+  // The sheet shows what the page shows (scaled); an untouched quantity keeps its stored value.
+  const [shownQ] = parseQty(i.text.match(/^[\d.,/½¼¾⅓⅔ -]+/)?.[0]?.replace(/[½¼¾⅓⅔]/g, (c) => ({ "½": ".5", "¼": ".25", "¾": ".75", "⅓": ".33", "⅔": ".67" }[c])) ?? "");
+  const row = { ...stored };
+  if (stored.qty != null && factor !== 1) { row.qty = shownQ ?? stored.qty * factor; row.qty2 = null; }
+  const touched = { q: false };
+  const { stepper, sel } = qtyControls(row, () => { touched.q = true; });
+  const name = h("input", { value: row.name || "", "aria-label": t("Ingredient") });
+  const note = h("input", { value: row.note || "", placeholder: t("Note (optional)") });
+  const repl = h("input", { placeholder: t("Substitute with…"), "aria-label": t("Substitute with…") });
+  const save = async (r) => {
+    const lines = rec.ingredient_lines.map((x, k) => (k === idx ? r : x)).filter((x) => x != null);
+    await ctx.reload({ ingredients: lines }); ctx.paint(); s.close(); toast(t("Saved"));
+  };
+  const build = (nameVal) => {
+    const out = { ...stored, name: nameVal, note: note.value, unit: row.unit, taste: row.taste };
+    if (touched.q || row.taste !== stored.taste || row.unit !== stored.unit) {
+      out.qty = row.qty != null && factor !== 1 ? Math.round((row.qty / factor) * 1000) / 1000 : row.qty;
+      out.qty2 = null;
+    }
+    return out;
+  };
+  const s = sheet(t("Edit ingredient"), [
+    h("div.small.muted", factor !== 1 ? t("Quantities for {n} servings", { n: fmt.num(rec.servings, 1) }) : ""),
+    h("div.r-rq", stepper, sel),
+    h("label.field", t("Ingredient"), name), h("label.field", t("Note (optional)"), note),
+    h("button.primary.lg", { onclick: (e) => act(() => save(build(name.value)), e.currentTarget) }, icon("check"), t("Save")),
+    h("label.field", t("Substitute with…"), repl),
+    h("button", { onclick: (e) => repl.value.trim() ? act(() => save(build(repl.value.trim())), e.currentTarget) : repl.focus() }, icon("refresh"), t("Substitute")),
+    h("button.danger", { onclick: (e) => act(() => save(null), e.currentTarget) }, icon("trash"), t("Remove from recipe"))]);
+}
+
+function quickStep(rec, idx, ctx) {
+  const ta = h("textarea", { rows: 5, value: rec.steps[idx] });
+  const save = async (text) => {
+    const steps = rec.steps.map((x, k) => (k === idx ? text : x)).filter((x) => x && x.trim());
+    await ctx.reload({ steps }); ctx.paint(); s.close(); toast(t("Saved"));
+  };
+  const s = sheet(t("Edit step"), [ta,
+    h("button.primary.lg", { onclick: (e) => act(() => save(ta.value.trim()), e.currentTarget) }, icon("check"), t("Save")),
+    h("button.danger", { onclick: (e) => act(() => save(""), e.currentTarget) }, icon("trash"), t("Remove step"))]);
+  setTimeout(() => { ta.focus(); grow(ta); }, 50);
+}
+
+/** "Adapt to N servings" on the recipe page: permanent rescale, "Reset to original" undoes it. */
+function adaptButton(rec, ctx) {
+  if (!rec.servings || Math.abs(rec.servings - rec.base_servings) < 1e-6) return null;
+  const n = Math.round(rec.servings);
+  return h("button.r-adaptbtn", { onclick: (e) => act(async () => {
+    if (!confirm(t("Rewrite the recipe for {n} servings? You can undo with \"Reset to original\".", { n }))) return;
+    const rows = await rescaleRows(rec.rows, rec.base_servings, n);
+    ctx.servings = n;
+    await ctx.reload({ servings: n, ingredients: rows }); ctx.paint(); toast(t("Saved"));
+  }, e.currentTarget) }, icon("refresh"), t("Adapt recipe to {n} servings", { n }));
 }
 
 function logPortion(rec) {

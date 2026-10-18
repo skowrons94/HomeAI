@@ -149,7 +149,7 @@ class Book:
                          "subs": nutrition.substitutions(p["name"], self.lang)})
         return {
             **self._summary(r), "servings": sv, "base_servings": base, "ingredients": ings,
-            "ingredient_lines": lines, "steps": json.loads(r["steps"]), "kcal": kcal, "kcal_est": est,
+            "ingredient_lines": lines, "rows": [parse.row_from_line(x) for x in lines], "lang": lang, "steps": json.loads(r["steps"]), "kcal": kcal, "kcal_est": est,
             "notes": r["notes"], "has_original": bool(r["original"]),
             "description": "", "created": r["created"],
         }
@@ -210,7 +210,10 @@ class Book:
                 raise ValueError("servings must be positive")
             sets["servings"] = n
         if "ingredients" in patch:
-            sets["ingredients"] = json.dumps(_lines(patch["ingredients"]))
+            ing = patch["ingredients"]
+            if isinstance(ing, list) and any(isinstance(x, dict) for x in ing):  # editor rows
+                ing = parse.rows_to_lines(ing, r["lang"] or self.lang)
+            sets["ingredients"] = json.dumps(_lines(ing))
         if "steps" in patch:
             sets["steps"] = json.dumps(_lines(patch["steps"]))
         if "kcal" in patch:
