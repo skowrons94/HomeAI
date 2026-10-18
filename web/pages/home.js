@@ -491,9 +491,9 @@ function notesBlock(notes) {
 function shortcuts() {
   const items = [
     hasPlugin("recipes") && ["cart", t("Shopping list"), "#/recipes/shopping"],
-    hasPlugin("media") && ["heart", t("Favourites"), "#/media/watchlist"],
-    hasPlugin("recipes") && ["utensils", t("My recipes"), "#/recipes/mine"],
-    hasPlugin("media") && ["download", t("Downloads"), "#/media/downloads"],
+    hasPlugin("media") && ["heart", t("To watch"), "#/media/watchlist"],
+    hasPlugin("recipes") && ["utensils", t("Recipe book"), "#/recipes/mine"],
+    hasPlugin("media") && ["download", t("Coming in"), "#/media/downloads"],
   ].filter(Boolean);
   return items.length ? h("div.shortcuts", items.map(([ico, label, hash]) =>
     h("a.sc", { href: hash }, h("span.sc-ico", icon(ico)), h("span.sc-label", label)))) : null;

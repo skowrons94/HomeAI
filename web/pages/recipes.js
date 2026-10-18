@@ -16,7 +16,8 @@ const emptyState = (ic, text, ...actions) => h("div.empty.r-empty", h("div.r-emp
 const loading = () => h("div.empty", h("div.spin"));
 
 const fmtMin = (m) => !m ? "" : m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60}` : ""}` : `${m} ${t("min")}`;
-const kcalText = (r) => r.kcal ? `${r.kcal_est ? "~" : ""}${r.kcal} kcal` : "";
+const kcalText = (r) => r.kcal ? `${r.kcal} kcal` : "";
+const cardMeta = (r) => fmtMin(r.total_min) || r.site || "";
 const localDay = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const isUrl = (s) => /^https?:\/\/\S+$/i.test(s.trim());
 const FLAG = { it: "🇮🇹", en: "🇬🇧" };
@@ -24,7 +25,7 @@ const FLAG = { it: "🇮🇹", en: "🇬🇧" };
 let status = { language: "it", goal: 2000 };
 
 const TABS = ["discover", "week", "mine", "shopping", "today"];
-const TAB_LABEL = () => ({ discover: t("Discover"), week: t("Week"), mine: t("My recipes"), shopping: t("Shopping list"), today: t("Calories") });
+const TAB_LABEL = () => ({ discover: t("Discover"), week: t("Week"), mine: t("Recipe book"), shopping: t("Shopping"), today: t("Calories") });
 
 export default {
   async render(root, args) {
@@ -39,7 +40,7 @@ export default {
     fill(root,
       h("div.r-head", h("h1", t("Kitchen")),
         h("button.primary", { onclick: () => newRecipe() }, icon("plus"), t("New recipe"))),
-      h("div.tabs", TABS.map((k) =>
+      h("div.tabs.r-tabs", TABS.map((k) =>
         h(`button${k === tab ? ".active" : ""}`, { onclick: () => go(`#/recipes/${k}`) }, TAB_LABEL()[k]))),
       body);
     ({ discover: renderDiscover, week: renderWeek, mine: renderMine, shopping: renderShopping, today: renderToday })[tab](body);
@@ -88,16 +89,20 @@ function renderDiscover(el) {
   else intro(out, input, submit);
 }
 
+const NOW_TITLE = () => ({ dinner: t("Ideas for tonight"), lunch: t("Ideas for lunch"), breakfast: t("Ideas for breakfast"),
+  snack: t("Ideas for a snack"), quick: t("Something quick") });
+
 function intro(out, input, submit) {
   const ideas = [t("pasta"), t("risotto"), t("chicken"), t("vegetables"), t("desserts"), t("soups")];
   const recent = h("div");
   const now = h("div.r-now");
+  const first = h("div");
   let n = 0;
   const loadNow = () => P(`suggest?n=${n}`).then((r) => {
     if (!r.items?.length) return fill(now);
-    fill(now, h("div.r-nowhead", h("h2.r-sec", t("Ideas for now"), r.label ? ` · ${r.label}` : ""),
+    fill(now, h("div.r-nowhead", h("h2.r-sec", NOW_TITLE()[r.theme] || `${t("Ideas for now")}${r.label ? ` · ${r.label}` : ""}`),
       h("button.icon.ghost", { type: "button", "aria-label": t("Other ideas"), title: t("Other ideas"), onclick: () => { n++; loadNow(); } }, icon("refresh"))),
-      h("div.r-now-grid", r.items.map((x) => {
+      h("div.r-now-row", r.items.map((x) => {
         const c = h("div.r-mini", { title: x.title, onclick: () => (x.recipe_id ? go(`#/recipes/recipe/${x.recipe_id}`)
           : (ss("r-from", "1"), importRecipe(x.mealdb ? { mealdb: x.mealdb } : { url: x.url }, c))) },
           h("div.img", x.image ? h("img", { src: x.image, loading: "lazy", alt: "" }) : h("div.ph", icon("utensils"))),
@@ -106,17 +111,16 @@ function intro(out, input, submit) {
       })));
   }).catch(() => fill(now));
   loadNow();
-  fill(out, now, h("div.r-empty.r-intro", h("div.r-empty-ic", icon("utensils")),
+  const showIntro = () => fill(first, h("div.r-empty.r-intro", h("div.r-empty-ic", icon("utensils")),
     h("p", t("Search for a recipe or paste a link: we save it in the app.")),
-    h("div.r-ideas", ideas.map((w) => h("button.chipbtn", { onclick: () => { input.value = w; input.dispatchEvent(new Event("input")); submit(new Event("submit")); } }, w)))),
-    recent);
+    h("div.r-ideas", ideas.map((w) => h("button.chipbtn", { onclick: () => { input.value = w; input.dispatchEvent(new Event("input")); submit(new Event("submit")); } }, w)))));
+  fill(out, now, recent, first);
   P("recipes").then((items) => {
-    if (!items.length) return;
+    if (!items.length) return showIntro();
     items = [...items].sort((a, b) => (b.updated || 0) - (a.updated || 0) || b.id - a.id).slice(0, 6);
     fill(recent, h("h2.r-sec", t("Your latest recipes")),
-      h("div.r-grid", items.map((r) => card({ ...r, meta: [kcalText(r), fmtMin(r.total_min)].filter(Boolean).join(" · ") || r.site },
-        () => go(`#/recipes/recipe/${r.id}`)))));
-  }).catch(() => {});
+      h("div.r-grid", items.map((r) => card({ ...r, meta: cardMeta(r) }, () => go(`#/recipes/recipe/${r.id}`)))));
+  }).catch(showIntro);
 }
 
 function showResults(out, res, q) {
@@ -321,7 +325,7 @@ async function renderMine(el) {
     const items = await P(`recipes?fav=${state.fav ? 1 : 0}&tag=${enc(state.tag)}&q=${enc(state.q)}`);
     fill(list, items.length
       ? h(`div.r-grid${state.edit ? ".editing" : ""}`, items.map((r) => {
-        const c = card({ ...r, meta: [kcalText(r), fmtMin(r.total_min)].filter(Boolean).join(" · ") || r.site },
+        const c = card({ ...r, meta: cardMeta(r) },
           () => { if (!state.edit) go(`#/recipes/recipe/${r.id}`); },
           [r.fav && h("span.r-badge.fav", icon("heart")), r.edited && h("span.r-badge.ed", icon("edit")),
             state.edit && h("button.danger.r-cardel", { "aria-label": t("Delete"), onclick: (e) => {
@@ -378,18 +382,14 @@ function paintDetail(view, rec, ctx) {
   const stars = h("div.stars", [1, 2, 3, 4, 5].map((n) =>
     h(`button.star${n <= rec.rating ? ".on" : ""}`, { onclick: () => upd({ rating: rec.rating === n ? 0 : n }), "aria-label": `${n}` }, icon("star"))));
 
-  const meta = [
-    rec.prep_min && `${t("prep")} ${fmtMin(rec.prep_min)}`, rec.cook_min && `${t("cook")} ${fmtMin(rec.cook_min)}`,
-    !rec.prep_min && !rec.cook_min && rec.total_min && fmtMin(rec.total_min),
-  ].filter(Boolean).join(" · ");
-
-  const kcalChip = rec.kcal
-    ? h("span.chip.accent", { title: rec.kcal_est ? t("estimated from the ingredients") : "" }, `${rec.kcal_est ? "~" : ""}${rec.kcal} ${t("kcal per serving")}`)
-    : h("span.chip", t("calories unknown"));
+  const mins = rec.total_min || (rec.prep_min || 0) + (rec.cook_min || 0);
+  const metaLine = h("div.r-meta",
+    [mins ? fmtMin(mins) : "", rec.kcal ? `${rec.kcal_est ? "~" : ""}${rec.kcal} ${t("kcal per serving")}` : ""].filter(Boolean).join(" · "),
+    rec.source_url && [mins || rec.kcal ? " · " : "", h("a", { href: rec.source_url, target: "_blank", rel: "noopener" }, (rec.site || "").replace(/^(www|ricette)\./, "") || t("Source"))],
+    rec.edited && h("span.chip.warn", t("edited")));
 
   let target = rec.servings;
   const val = h("span.val", fmt.num(target, 1));
-  const orig = h("span.small.muted.r-orig", rec.base_servings !== rec.servings ? t("original recipe: {n}", { n: fmt.num(rec.base_servings, 1) }) : "");
   const apply = debounce(() => { ctx.servings = target; act(async () => { await ctx.reload(); ctx.paint(); }); }, 350);
   const step = (d) => { target = Math.max(1, Math.round(target) + d); val.textContent = fmt.num(target, 1); apply(); };
   const sv = h("div.r-portions",
@@ -397,18 +397,11 @@ function paintDetail(view, rec, ctx) {
     h("div.stepper.big",
       h("button.icon", { onclick: () => step(-1), "aria-label": "-" }, icon("minus")), val,
       h("button.icon", { onclick: () => step(1), "aria-label": "+" }, icon("plus"))),
-    orig, adaptButton(rec, ctx));
+    rec.base_servings !== rec.servings ? h("span.small.muted.r-orig", t("original recipe: {n}", { n: fmt.num(rec.base_servings, 1) })) : null);
 
   const ingList = h("div.r-ings", rec.ingredients.map((i, idx) => {
     if (i.heading) return h("div.r-sub", i.heading);
-    const subs = i.subs?.length ? h("div.r-subs.hidden", h("b", `${t("Substitutions")}: `), i.subs.join(" · ")) : null;
-    return h("div.r-ing",
-      h("div.line", h("button.txt.r-tap", { title: t("Edit ingredient"), onclick: () => quickIngredient(rec, idx, ctx) }, i.text),
-        subs && h("button.icon.ghost", { title: t("Substitutions"), onclick: () => subs.classList.toggle("hidden") }, "⇄"),
-        h("button.icon.ghost", { title: t("Add to shopping list"), onclick: (e) => act(async () => {
-          await P("shopping", { body: { name: i.text } }); toast(t("Added to the shopping list"));
-        }, e.currentTarget) }, icon("cart"))),
-      subs);
+    return h("div.r-ing", h("button.txt.r-tap", { title: t("Edit ingredient"), onclick: () => quickIngredient(rec, idx, ctx) }, i.text));
   }));
 
   const steps = [];
@@ -428,37 +421,113 @@ function paintDetail(view, rec, ctx) {
     h("div.r-hero", rec.image ? h("img", { src: rec.image, alt: "" }) : h("div.ph", icon("utensils")),
       h("button.icon.back", { onclick: () => (sg("r-from") ? (ss("r-pop", String(Date.now())), history.back()) : go("#/recipes/mine")), "aria-label": t("Back") }, icon("left"))),
     h("div.r-titlebar", h("h1", rec.title), heart),
-    sv,
-    h("div.row.wrap.small.muted", { style: { gap: "8px" } },
-      kcalChip, meta && h("span", meta), rec.edited && h("span.chip.warn", t("edited")),
-      rec.source_url && h("a", { href: rec.source_url, target: "_blank", rel: "noopener" }, icon("link"), " ", rec.site || t("Source"))),
-    h("div.row.wrap.r-actions", { style: { gap: "8px" } },
+    metaLine,
+    h("div.r-actions",
       h("button.primary", { onclick: () => addToMenu(rec) }, icon("calendar"), t("Add to the menu")),
-      h("button", { onclick: () => editMode(view, rec, ctx) }, icon("edit"), t("Edit")),
-      hasPlugin("sync") && h("button", { onclick: (e) => act(async () => {
-        const r = await api("p/sync/recipes/share", { body: { recipe_id: rec.id } });
-        const el = h("div.toast", `${t("Recipe shared.")} `, h("a", { href: `#/social/recipe/${encodeURIComponent(r.slug)}` }, t("View")));
-        document.getElementById("toasts").append(el);
-        setTimeout(() => el.remove(), 7000);
-      }, e.currentTarget) }, icon("users"), t("Share with friends")),
-      rec.has_original && rec.edited && h("button", { onclick: () => confirm(t("Go back to the original version? Your edits to title, ingredients and method will be lost.")) && act(async () => {
-        await P(`recipe/${id}/reset`, { body: {} }); mySessionServings.delete(id); ctx.servings = status.default_servings || 0; await ctx.reload(); ctx.paint();
-      }) }, icon("refresh"), t("Reset to original")),
-      h("button.danger.r-del", { onclick: () => confirm(t("Delete this recipe from your hub?")) && act(async () => {
-        await P(`recipe/${id}`, { method: "DELETE" }); toast(t("Recipe deleted")); go("#/recipes/mine");
-      }) }, icon("trash"), t("Delete"))),
-    h("div.row.wrap", { style: { gap: "14px" } }, stars, h("div.spacer"),
-      h("button", { onclick: () => logPortion(rec) }, icon("utensils"), t("Log a portion"))),
+      rec.steps.some((s) => !s.startsWith("# ")) ? h("button.r-cookbtn", { onclick: () => cookMode(rec) }, icon("utensils"), t("Cook!")) : null,
+      h("button.icon.r-more", { "aria-label": t("More"), title: t("More"), onclick: () => moreMenu(view, rec, ctx) }, icon("more"))),
+    sv,
     h("div.r-cols",
       h("div.card.stack", { style: { gap: "10px" } },
         h("h2", t("Ingredients")),
         ingList,
         h("button", { onclick: (e) => act(async () => {
           await P("shopping", { body: { recipe_id: rec.id, servings: rec.servings } }); toast(t("Added to the shopping list"));
-        }, e.currentTarget) }, icon("cart"), t("Add to shopping list"))),
+        }, e.currentTarget) }, icon("cart"), t("Add all to the shopping list"))),
       h("div.card.stack", { style: { gap: "10px" } }, h("h2", t("Method")), steps.length ? steps : h("div.muted", "–"))),
+    h("div.r-rate", h("span.lbl", t("Your rating")), stars),
     h("div.card.stack", { style: { gap: "8px" } }, h("h2", t("Personal notes")), notes,
       h("label.field", t("Tags (comma separated)").split(" (")[0], tagInput)));
+}
+
+/** The "⋯" sheet on the recipe page: everything that is not the main path. */
+function moreMenu(view, rec, ctx) {
+  const { id } = ctx;
+  const sh = sheet(rec.title, []);
+  const item = (ic, label, fn, cls = "") => h(`button.lg${cls}`, { onclick: (e) => { fn(e); } }, icon(ic), label);
+  const closeThen = (fn) => (e) => { sh.close(); fn(e); };
+  const adapt = adaptButton(rec, ctx, () => sh.close());
+  sh.el.replaceChildren(...[
+    item("edit", t("Edit"), closeThen(() => editMode(view, rec, ctx))),
+    adapt,
+    item("utensils", t("Log a portion"), closeThen(() => logPortion(rec))),
+    hasPlugin("sync") ? item("users", t("Share with friends"), (e) => act(async () => {
+      sh.close();
+      const r = await api("p/sync/recipes/share", { body: { recipe_id: rec.id } });
+      const el = h("div.toast", `${t("Recipe shared.")} `, h("a", { href: `#/social/recipe/${encodeURIComponent(r.slug)}` }, t("View")));
+      document.getElementById("toasts").append(el);
+      setTimeout(() => el.remove(), 7000);
+    }, e.currentTarget)) : null,
+    rec.has_original && rec.edited ? item("refresh", t("Reset to original"), closeThen(() => confirm(t("Go back to the original version? Your edits to title, ingredients and method will be lost.")) && act(async () => {
+      await P(`recipe/${id}/reset`, { body: {} }); mySessionServings.delete(id); ctx.servings = status.default_servings || 0; await ctx.reload(); ctx.paint();
+    }))) : null,
+    rec.source_url ? h("a.r-menulink", { href: rec.source_url, target: "_blank", rel: "noopener", onclick: () => sh.close() }, icon("link"), `${t("Source")}: ${rec.site || ""}`) : null,
+    item("trash", t("Delete"), closeThen(() => confirm(t("Delete this recipe from your hub?")) && act(async () => {
+      await P(`recipe/${id}`, { method: "DELETE" }); toast(t("Recipe deleted")); go("#/recipes/mine");
+    })), ".danger"),
+  ].filter(Boolean));
+}
+
+// ---------------------------------------------------------------- cooking mode
+
+/** Full-screen, one step per screen, big buttons + swipe, screen kept awake. */
+function cookMode(rec) {
+  const steps = [];
+  let head = "";
+  rec.steps.forEach((s) => { if (s.startsWith("# ")) head = s.slice(2); else steps.push({ text: s, head }); });
+  if (!steps.length) return;
+  // ingredients mentioned in a step: any word (>= 4 letters) of the stored name, matched by stem
+  const stem = (w) => (w.length > 4 ? w.slice(0, -1) : w);
+  const keys = rec.ingredients.map((i, idx) => {
+    if (i.heading) return null;
+    const words = norm(rec.rows?.[idx]?.name || "").split(/[^a-z]+/).filter((w) => w.length >= 4).map(stem);
+    return words.length ? words : null;
+  });
+  const related = (text) => {
+    const nt = norm(text);
+    return rec.ingredients.filter((i, idx) => keys[idx]?.some((w) => nt.includes(w))).slice(0, 6);
+  };
+  let at = 0, all = false, lock = null;
+  const body = h("div.r-cm-body"), count = h("span.r-cm-count");
+  const prev = h("button.r-cm-nav", { "aria-label": t("Previous step"), onclick: () => go_(-1) }, icon("left"));
+  const next = h("button.r-cm-nav.primary", { "aria-label": t("Next step"), onclick: () => (at === steps.length - 1 ? close() : go_(1)) });
+  const ingBtn = h("button.r-cm-ingbtn", { onclick: () => { all = !all; paint(); } });
+  const root = h("div.r-cm", { role: "dialog" },
+    h("div.r-cm-top", h("button.icon.ghost", { "aria-label": t("Close"), onclick: () => close() }, icon("x")), count, ingBtn), body,
+    h("div.r-cm-bar", prev, next));
+  function paint() {
+    const s = steps[at];
+    count.textContent = `${at + 1} / ${steps.length}`;
+    fill(ingBtn, icon("eye"), all ? t("Back to the step") : t("Ingredients"));
+    prev.disabled = at === 0;
+    fill(next, at === steps.length - 1 ? [icon("check"), t("Done")] : icon("right"));
+    if (all) return fill(body, h("h2", `${t("Ingredients")} · ${t("{n} people", { n: fmt.num(rec.servings, 1) })}`),
+      h("div.r-cm-ings", rec.ingredients.map((i) => (i.heading ? h("div.r-sub", i.heading) : h("div.r-cm-ing", i.text)))));
+    const rel = related(s.text);
+    fill(body, s.head ? h("div.r-cm-head", s.head) : null, h("p.r-cm-step", s.text),
+      rel.length ? h("div.r-cm-rel", rel.map((i) => h("span.r-cm-chip", i.text))) : null);
+    body.scrollTop = 0;
+  }
+  function go_(d) { at = Math.min(steps.length - 1, Math.max(0, at + d)); paint(); }
+  let sx = 0, sy = 0;
+  root.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }, { passive: true });
+  root.addEventListener("touchend", (e) => {
+    const dx = e.changedTouches[0].clientX - sx, dy = e.changedTouches[0].clientY - sy;
+    if (!all && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) go_(dx < 0 ? 1 : -1);
+  }, { passive: true });
+  const key = (e) => { if (e.key === "ArrowRight") go_(1); else if (e.key === "ArrowLeft") go_(-1); else if (e.key === "Escape") close(); };
+  const wake = async () => { try { lock = await navigator.wakeLock?.request("screen"); } catch { lock = null; } };
+  const vis = () => { if (document.visibilityState === "visible") wake(); };
+  function close() {
+    document.removeEventListener("keydown", key); document.removeEventListener("visibilitychange", vis);
+    window.removeEventListener("hashchange", close);
+    try { lock?.release(); } catch {}
+    root.remove();
+  }
+  document.addEventListener("keydown", key); document.addEventListener("visibilitychange", vis);
+  window.addEventListener("hashchange", close);
+  document.body.append(root);
+  wake(); paint();
 }
 
 // ---------------------------------------------------------------- editing helpers
@@ -699,6 +768,10 @@ function quickIngredient(rec, idx, ctx) {
   };
   const s = sheet(t("Edit ingredient"), [
     h("div.small.muted", factor !== 1 ? t("Quantities for {n} servings", { n: fmt.num(rec.servings, 1) }) : ""),
+    i.subs?.length ? h("div.r-subs", h("b", `${t("Substitutions")}: `), i.subs.join(" · ")) : null,
+    h("button", { onclick: (e) => act(async () => {
+      await P("shopping", { body: { name: i.text } }); s.close(); toast(t("Added to the shopping list"));
+    }, e.currentTarget) }, icon("cart"), t("Add to shopping list")),
     h("div.r-rq", stepper, sel),
     h("label.field", t("Ingredient"), name), h("label.field", t("Note (optional)"), note),
     h("button.primary.lg", { onclick: (e) => act(() => save(build(name.value)), e.currentTarget) }, icon("check"), t("Save")),
@@ -720,10 +793,11 @@ function quickStep(rec, idx, ctx) {
 }
 
 /** "Adapt to N servings" on the recipe page: permanent rescale, "Reset to original" undoes it. */
-function adaptButton(rec, ctx) {
+function adaptButton(rec, ctx, before) {
   if (!rec.servings || Math.abs(rec.servings - rec.base_servings) < 1e-6) return null;
   const n = Math.round(rec.servings);
-  return h("button.r-adaptbtn", { onclick: (e) => act(async () => {
+  return h("button.lg", { onclick: (e) => act(async () => {
+    before?.();
     if (!confirm(t("Rewrite the recipe for {n} servings? You can undo with \"Reset to original\".", { n }))) return;
     const rows = await rescaleRows(rec.rows, rec.base_servings, n);
     ctx.servings = n;
@@ -750,14 +824,44 @@ function logPortion(rec) {
 
 // ---------------------------------------------------------------- shopping
 
+// Aisles for the shopping list: simple Italian keyword rules, first match wins. A trailing "$" = whole word.
+const AISLES = () => [
+  [t("Dairy and eggs"), ["latte", "uov", "burro", "formaggi", "parmigian", "grana", "mozzarell", "ricott", "yogurt", "panna", "mascarpone",
+    "pecorino", "gorgonzola", "provol", "scamorz", "stracchino", "feta", "philadelphia"]],
+  [t("Meat and fish"), ["pollo", "manzo", "maial", "vitello", "salsicc", "prosciutt", "pancetta", "guanciale", "speck", "bacon", "tacchino",
+    "agnello", "macinato", "salmone", "gamberi", "pesce", "merluzzo", "acciughe", "cozze", "vongole", "calamari", "polpo", "salame",
+    "mortadella", "bresaola", "wurstel", "hamburger", "bistecca", "cotoletta", "arrosto", "branzino", "orata", "baccal"]],
+  [t("Bread and pasta"), ["pane", "pasta", "spaghetti", "penne", "riso", "farina", "pangrattato", "gnocchi", "lasagn", "fusilli", "rigatoni",
+    "tagliatelle", "pizza", "couscous", "tortilla", "grissini", "cracker", "biscott", "semola", "orzo", "farro", "fette biscottate"]],
+  [t("Pantry"), ["olio", "sale$", "pepe$", "zucchero", "aceto", "passata", "pelati", "scatola", "lenticchie", "ceci", "fagioli", "brodo", "dado",
+    "miele", "cioccolat", "cacao", "lievito", "vino", "spezie", "curry", "paprika", "origano", "noci", "mandorle", "pinoli", "conserva",
+    "salsa", "senape", "maionese", "caffe", "marmellata", "capperi", "olive", "tonno", "zafferano", "cannella", "vaniglia"]],
+  [t("Fruit and vegetables"), ["pomodor", "cipoll", "aglio", "carot", "zucchin", "patat", "melanzan", "peperon", "insalata", "lattuga", "spinac",
+    "basilico", "prezzemolo", "limon", "mela$", "mele$", "banan", "fung", "sedano", "rucola", "fragol", "arancia", "arance", "zucca", "cavol",
+    "broccol", "finocch", "pisell", "fagiolini", "porro", "porri", "scalogno", "rosmarino", "salvia", "timo", "menta", "verdur", "frutta",
+    "avocado", "pera$", "pere$", "uva", "carciof", "asparag", "radicchio", "cetriol", "pesca", "pesche", "kiwi", "lime", "zenzero", "erba cipollina"]],
+];
+const AISLE_RX = {};
+function aisleOf(text) {
+  const x = norm(text);
+  for (const [name, words] of AISLES()) {
+    const rx = AISLE_RX[name] ||= new RegExp(`\\b(?:${words.map((w) => (w.endsWith("$") ? `${w.slice(0, -1)}\\b` : w)).join("|")})`);
+    if (rx.test(x)) return name;
+  }
+  return t("Other");
+}
+
 async function renderShopping(el) {
   const list = h("div");
   const input = h("input", { placeholder: t("Add (e.g. milk)"), enterkeyhint: "done" });
   const addForm = h("form.r-search", { onsubmit: (e) => { e.preventDefault(); if (!input.value.trim()) return;
     act(async () => { const r = await P("shopping", { body: { name: input.value } }); input.value = ""; paint(r.items); }); } },
     h("div.r-input", icon("plus"), input), h("button.primary", { type: "submit" }, t("Add")));
-  fill(el, addForm, list);
+  fill(el, h("h2.r-sec.r-first", t("Shopping list")), addForm, list);
   const call = (path, opts) => act(async () => paint((await P(path, opts)).items));
+  const mon = mondayOf(localDay());
+  let planned = 0;
+  try { planned = (await P(`plan?week=${mon}`)).days.reduce((k, d) => k + (d.lunch?.recipe_id ? 1 : 0) + (d.dinner?.recipe_id ? 1 : 0), 0); } catch {}
 
   function paint(items) {
     const open = items.filter((i) => !i.checked), done = items.filter((i) => i.checked);
@@ -774,16 +878,28 @@ async function renderShopping(el) {
         subs && h("button.icon.ghost", { title: t("Substitutions"), onclick: () => subs.classList.toggle("hidden") }, "⇄"),
         h("button.icon.ghost", { onclick: () => call(`shopping/${i.id}`, { method: "DELETE" }), "aria-label": t("Delete") }, icon("x")));
     };
+    let openEl = open.length ? h("div.list", open.map(row)) : h("div.empty.r-allin", t("Everything taken!"));
+    if (open.length > 8) {
+      const groups = new Map([...AISLES().map(([n]) => n), t("Other")].map((n) => [n, []]));
+      for (const i of open) groups.get(aisleOf(i.text)).push(i);
+      openEl = [...groups].filter(([, g]) => g.length).map(([name, g]) => h("div",
+        h("h2.r-sec.r-aisle", name), h("div.list", g.map(row))));
+    }
     fill(list,
       items.length ? [
-        open.length ? h("div.list", open.map(row)) : h("div.empty.r-allin", t("Everything taken!")),
+        openEl,
         done.length ? h("div.r-donehead", h("h2.r-sec", `${t("Taken")} (${done.length})`),
           h("button", { onclick: () => call("shopping", { method: "DELETE" }) }, icon("trash"), t("Clear taken"))) : null,
         done.length ? h("div.list", done.map(row)) : null,
         h("div.row", { style: { marginTop: "12px" } },
           h("button.danger", { onclick: () => confirm(t("Clear all") + "?") && call("shopping?all=1", { method: "DELETE" }) }, icon("trash"), t("Clear all")))]
         : emptyState("cart", t("Nothing to buy. Open a recipe and add its ingredients."),
-          h("button.primary", { onclick: () => go("#/recipes/mine") }, icon("utensils"), t("My recipes"))));
+          planned ? h("button.primary", { onclick: (e) => act(async () => {
+            const r = await P("plan/shopping", { body: { week: mon } });
+            if (!r.added) return toast(t("Nothing to add: plan some recipes first"));
+            paint((await P("shopping")).items);
+          }, e.currentTarget) }, icon("calendar"), t("Add from the week")) : null,
+          h(`button${planned ? "" : ".primary"}`, { onclick: () => go("#/recipes/mine") }, icon("utensils"), t("Recipe book"))));
   }
   paint(await P("shopping"));
 }
@@ -886,13 +1002,14 @@ async function renderWeek(el) {
       h("div.w-label", weekLabel(mon)),
       h("button.icon", { "aria-label": t("Next week"), onclick: () => go_(addDays(mon, 7)) }, icon("right")),
       mon !== mondayOf(today) ? h("button.chipbtn", { onclick: () => go_(mondayOf(today)) }, t("Today")) : null);
-    const empty = plan.days.every((d) => !d.lunch && !d.dinner);
+    const dishes = plan.days.reduce((k, d) => k + (d.lunch?.recipe_id ? 1 : 0) + (d.dinner?.recipe_id ? 1 : 0), 0);
     fill(actions,
-      h("button.primary.lg.w-shop", { disabled: empty, onclick: (e) => act(async () => {
+      dishes ? h("button.primary.lg.w-shop", { onclick: (e) => act(async () => {
         const r = await P("plan/shopping", { body: { week: mon } });
         if (!r.added) return toast(t("Nothing to add: plan some recipes first"));
         toastLink(t("{n} ingredients on the list", { n: r.added }), t("Shopping list"), "#/recipes/shopping");
-      }, e.currentTarget) }, icon("cart"), t("Add everything to the shopping list")),
+      }, e.currentTarget) }, icon("cart"), dishes === 1 ? t("Add the ingredients of 1 dish to the shopping list")
+        : t("Add the ingredients of {n} dishes to the shopping list", { n: dishes })) : null,
       h("div.w-row2",
         h("button", { onclick: (e) => act(async () => {
           const r = await P("plan/fill", { body: { week: mon, meals: ["dinner"] } });
@@ -906,17 +1023,20 @@ async function renderWeek(el) {
           if (!r.copied) toast(t("Nothing to copy"));
         }, e.currentTarget) }, icon("calendar"), t("Copy last week"))));
     fill(days, plan.days.map((d) => h(`div.w-day${d.date === today ? ".today" : ""}`,
-      h("div.w-dayname", h("b", fmt.date(dateOf(d.date))), d.date === today ? h("span.chip.accent", t("Today")) : null),
+      h("div.w-dayname", h("b", fmt.date(dateOf(d.date))), d.date === today ? h("span.chip.accent", t("Today")) : null,
+        h("div.spacer"), d.lunch ? null : h("button.w-lunchadd", { onclick: () => pickDish(d.date, "lunch", load) }, `+ ${t("lunch").toLowerCase()}`)),
       ["lunch", "dinner"].map((m) => slotEl(d, m)))));
   }
 
   function slotEl(d, meal) {
     const s = d[meal];
     const lbl = h("span.w-meal", MEAL_LABEL()[meal]);
+    if (!s && meal === "lunch") return null;
     if (!s) return h("div.w-slot", lbl, h("button.w-add", { onclick: () => pickDish(d.date, meal, load) }, icon("plus"), t("Add")));
     const img = s.image ? h("img", { src: s.image, alt: "", loading: "lazy" }) : h("div.ph", icon("utensils"));
     return h("div.w-slot", lbl, h("button.w-filled", { onclick: () => slotSheet(s, load) },
-      h("span.w-img", img), h("span.w-title", s.title), h("span.chip", people(s.servings))));
+      h("span.w-img", img), h("span.w-title", s.title),
+      s.servings !== (status.default_servings || 2) ? h("span.chip", people(s.servings)) : null));
   }
   await load();
 }

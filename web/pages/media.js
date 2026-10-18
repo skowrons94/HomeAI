@@ -5,7 +5,7 @@ import { t, api, h, icon, toast, sheet, ensureCss, act, debounce, fmt, bus, go, 
 const P = (path, opts) => api(`p/media/${path}`, opts);
 const FLAG = { it: "🇮🇹", en: "🇬🇧", fr: "🇫🇷", es: "🇪🇸", de: "🇩🇪", ru: "🇷🇺", uk: "🇺🇦", ko: "🇰🇷",
                ja: "🇯🇵", hi: "🇮🇳", pt: "🇵🇹", pl: "🇵🇱", zh: "🇨🇳", nl: "🇳🇱" };
-const tabList = () => [["discover", t("Discover")], ["watchlist", t("Favourites")], ["downloads", t("Downloads")], ["library", t("Library")]];
+const tabList = () => [["discover", t("Discover")], ["watchlist", t("To watch")], ["downloads", t("Coming in")], ["library", t("Library")]];
 const enc = encodeURIComponent;
 // Cinemeta genres are English data (TMDB ones come already translated): namespaced keys,
 // since e.g. "History" is also a page title
@@ -13,6 +13,14 @@ const genreName = (n) => { const k = `genre: ${n}`, v = t(k); return v === k ? n
 const itemHash = (it) => `#/media/${it.type}/${enc(it.id)}`;
 // replaceChildren() would print "null" for skipped optional children
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false && k !== ""));
+// crude: is this plot English? (Cinemeta has no Italian text; we don't translate, we say so)
+const looksEnglish = (txt) => {
+  const w = ` ${String(txt).toLowerCase().replace(/[^a-zàèéìòù ]/g, " ")} `;
+  const n = (list) => list.reduce((a, x) => a + (w.split(` ${x} `).length - 1), 0);
+  return n(["the", "and", "his", "her", "with", "who", "their", "that", "into"]) > n(["il", "la", "che", "un", "una", "di", "con", "per", "della", "gli"]);
+};
+const INFUSE = "infuse://";
+const infuseLink = () => h("a.btn.ghost", { href: INFUSE }, t("Open in Infuse"));
 const flags = (langs) => (langs || []).map((l) => FLAG[l] || l.toUpperCase()).join(" ");
 
 let status = null;  // plugin status, refreshed on page load
@@ -82,8 +90,8 @@ export default {
 function warnings(el, s) {
   // the "add a TMDB key" hint lives in Settings' suggestions, not on every visit here
   const out = [];
-  if (s.transmission && s.transmission.ok === false) out.push(h("div.m-banner", "⚠️",
-    h("div", h("b", t("Transmission offline. ")), s.transmission.error, t(" - downloads can't start."))));
+  if (s.transmission && s.transmission.enabled !== false && s.transmission.ok === false)
+    out.push(h("div.m-banner", "⚠️", h("div", t("Downloads are unavailable at the moment."))));
   fill(el, ...out);
 }
 
@@ -96,10 +104,11 @@ function poster(it, clickable = true) {
     h("div.img", img,
       h("div.badges",
         it.in_library && h("span.badge.lib", { title: t("In your library") }, icon("check")),
-        it.favourite && h("span.badge.fav", { title: t("Favourite") }, icon("heart"))),
-      it.rating && h("span.rating", `★ ${fmt.num(it.rating, 1)}`)),
+        it.favourite && h("span.badge.fav", { title: t("To watch") }, icon("heart"))),
+      it.rating && h("span.rating", `★ ${fmt.num(it.rating, 1)}`),
+      it.type === "series" && h("span.kindtag", t("Series"))),
     h("div.t", it.title),
-    h("div.y", [it.year, it.type === "series" ? t("Series") : ""].filter(Boolean).join(" · ")));
+    it.year ? h("div.y", String(it.year)) : null);
 }
 
 // release rejection reasons come from hub/plugins/media/ranking.py (English codes)
@@ -121,6 +130,7 @@ function reason(r) {
 const loading = () => h("div.empty", h("div.spin"));
 
 // placeholder posters (same size as real ones) while a rail/grid loads
+const withImage = (items) => items.filter((it) => it.poster);
 const skeletons = (n = 4) => Array.from({ length: n }, () =>
   h("div.poster.skel", h("div.img"), h("div.t"), h("div.y")));
 const skelRail = () => [h("div.section", h("h2.skel-h", "\u00a0")), h("div.m-row", skeletons(4))];
@@ -167,8 +177,8 @@ async function renderDiscover(el, kind, genre) {
         if (mine !== token) return;
         page = r.page;
         grid.querySelectorAll(".skel").forEach((x) => x.remove());
-        grid.append(...r.items.map((it) => poster(it)));
-        if (!grid.children.length) box.replaceChildren(h("div.empty", t("Nothing found.")));
+        grid.append(...withImage(r.items).map((it) => poster(it)));
+        if (!grid.children.length && !r.has_more) box.replaceChildren(h("div.empty", t("Nothing found.")));
         else if (!r.has_more) box.remove();
       } catch (e) { grid.querySelectorAll(".skel").forEach((x) => x.remove()); toast(t("Couldn't load genre: {error}", { error: e.message }), true); }
       finally { busy = false; more.disabled = false; }
@@ -186,13 +196,22 @@ async function renderDiscover(el, kind, genre) {
   }
   async function rows(mine) {
     fill(out, skelRail(), skelRail());
+    const lib = Promise.all(["movies", "series"].map((k) => P(`library?kind=${k}`).then((r) =>
+      r.items.filter((x) => x.poster && x.meta_id).map((x) => ({ ...x, type: k === "movies" ? "movie" : "series", id: x.meta_id }))).catch(() => [])));
     let d;
     try { d = await P("discover"); } catch (e) { toast(e.message, true); d = { sections: [] }; }
+    const mineLib = (await lib).flat().sort((a, b) => (b.mtime || 0) - (a.mtime || 0)).slice(0, 20);
     if (mine !== token) return;
-    const secs = d.sections.filter((s) => s.items.length);
+    const by = (...keys) => keys.map((k) => d.sections.find((s) => s.key === k)).find((s) => s && withImage(s.items).length);
+    const secs = [
+      mineLib.length && { title: t("In your library"), items: mineLib.map((x) => ({ ...x, in_library: false })) },
+      by("movie_popular"), by("tv_popular"),
+      by("now_playing", "new_movies", "on_the_air", "new_series", "upcoming")
+        && { ...by("now_playing", "new_movies", "on_the_air", "new_series", "upcoming"), title: t("What's new") },
+    ].filter(Boolean);
     fill(out, ...secs.map((s) => [
       h("div.section", h("h2", s.title)),
-      h("div.m-row", s.items.map((it) => poster(it))),
+      h("div.m-row", withImage(s.items).map((it) => poster(it))),
     ]).flat());
     if (!secs.length) fill(out, h("div.empty", t("Couldn't reach the movie database.")));
   }
@@ -224,7 +243,7 @@ async function renderSearch(el, q, current = () => true) {
 
 async function renderDetail(root, type, id, on) {
   fill(root, loading());
-  const it = await P(`details/${type}/${enc(id)}`);
+  const [it] = await Promise.all([P(`details/${type}/${enc(id)}`), status ? null : P("status").then((s) => { status = s; }).catch(() => {})]);
   const body = h("div.detail-body");
   fill(root, 
     h("div.hero", { style: { backgroundImage: it.backdrop ? `url("${it.backdrop}")` : "" } },
@@ -235,27 +254,27 @@ async function renderDetail(root, type, id, on) {
           h("h1", it.title),
           h("div.row.wrap.small.muted",
             [it.year, typeof it.runtime === "number" ? t("{n} min", { n: it.runtime }) : it.runtime, it.type === "series" ? t("Series") : t("Movie"),
-             ...(it.genres || []).slice(0, 3)].filter(Boolean).join(" · "),
-            it.rating && h("span.chip", `★ ${fmt.num(it.rating, 1)}`),
-            it.in_library && h("span.chip.ok", icon("check"), t("In library")))))),
+             ...(it.genres || []).slice(0, 3).map(genreName)].filter(Boolean).join(" · "),
+            it.rating && h("span.chip", `★ ${fmt.num(it.rating, 1)}`))))),
     body);
 
-  const favBtn = h("button", { onclick: () => toggleFav() });
+  const favBtn = h("button.m-tow", { onclick: () => toggleFav() });
   const autoSw = h("input", { type: "checkbox" });
   const favRow = h("div.row.small");
   const paint = () => {
     const w = it.watch;
-    fill(favBtn, icon("heart"), w ? t("Favourite") : t("Add to favourites"));
-    favBtn.className = w ? "on" : "";
+    fill(favBtn, icon("heart"), t("To watch"));
+    favBtn.className = `m-tow${w ? " on" : ""}`;
+    favBtn.setAttribute("aria-pressed", w ? "true" : "false");
     fill(favRow, ...(w ? [
-      h("label.row", { style: { gap: "6px" } }, autoSw, t("Download automatically when found")),
+      h("label.row", { style: { gap: "6px", minHeight: "44px" } }, autoSw, t("Download automatically when found")),
       w.note && h("span.chip.accent", w.note)] : [
-      h("span.muted", t("Favourites are checked every few hours; you get a notification when a good release shows up."))]));
+      h("span.muted", t("I'll let you know when it's available in Italian."))]));
     autoSw.checked = !!w?.auto_download;
   };
   async function toggleFav() {
     await act(async () => {
-      if (it.watch) { await P(`watchlist/${enc(`${type}:${it.id}`)}`, { method: "DELETE" }); it.watch = null; toast(t("Removed from favourites")); }
+      if (it.watch) { await P(`watchlist/${enc(`${type}:${it.id}`)}`, { method: "DELETE" }); it.watch = null; toast(t("Removed from your list")); }
       else { it.watch = await P("watchlist", { body: { type, id: it.id } }); toast(t("❤️ Added - I'll keep an eye on it")); }
       paint();
     }, favBtn);
@@ -266,26 +285,37 @@ async function renderDetail(root, type, id, on) {
   });
   paint();
 
-  const actions = h("div.row.wrap", favBtn,
-    type === "movie" && !it.in_library && h("button.primary", { onclick: (e) => quickDownload(it, {}, e.currentTarget) },
-      icon("download"), t("Download best")),
-    type === "movie" && h("button", { onclick: () => openReleases(it, {}) }, icon("search"), t("Find releases")),
-    type === "movie" && it.in_library && it.library_path && subsButton(it),
-    it.trailer && h("a.btn", { href: it.trailer, target: "_blank", rel: "noopener" }, icon("play"), t("Trailer")));
+  const stateLine = h("div.m-state");
+  const getBtn = type === "movie" && !it.in_library ? h("button.primary", { onclick: (e) => quickDownload(it, {}, e.currentTarget) },
+    icon("download"), t("Download this")) : null;
+  const actions = h("div.row.wrap.m-actions", getBtn,
+    type === "movie" && h("button.ghost.small", { onclick: () => openReleases(it, {}) }, t("Choose version")),
+    h("div.spacer"),
+    it.trailer && h("a.btn.icon", { href: it.trailer, target: "_blank", rel: "noopener", title: t("Trailer"), "aria-label": t("Trailer") }, icon("play")),
+    favBtn);
 
   const dlBox = h("div");
   const paintDl = (items) => {
     const mine = items.filter((d) => d.key === `${type}:${it.id}` && !["imported", "removed"].includes(d.state));
-    fill(dlBox, ...(mine.length ? [h("div.list", mine.map(dlRow))] : []));
+    const pct = mine.length ? Math.round(mine.reduce((a, d) => a + d.progress, 0) / mine.length * 100) : null;
+    fill(stateLine,
+      it.in_library ? h("div.row.wrap", h("span.chip.ok", icon("check"), t("In your library")), infuseLink())
+        : pct != null ? h("div.row.wrap", h("span.chip.accent", t("Downloading · {pct}%", { pct }))) : null);
+    if (getBtn) getBtn.hidden = pct != null;
+    fill(dlBox, ...(type === "series" && mine.length ? [h("div.list", mine.map(dlRow))] : []));
   };
   paintDl(it.downloads || []);
   on((e) => e.detail.kind === "downloads" && paintDl(e.detail.items));
 
-  body.append(actions, favRow, dlBox,
-    it.overview && h("p.overview", it.overview),
+  const english = it.overview && (status?.metadata !== "tmdb" || looksEnglish(it.overview));
+  fill(body, stateLine, actions,
+    type === "movie" && it.in_library && it.library_path && subsButton(it),
+    favRow, dlBox,
+    it.overview && h("div.stack", { style: { gap: "4px" } }, h("p.overview", { style: { margin: 0 } }, it.overview),
+      english && h("span.small.muted", t("Plot in English"))),
     it.cast?.length && h("div.small.muted", t("With "), it.cast.slice(0, 6).join(", ")));
 
-  if (hasPlugin("sync")) sharedBlock(it, type).then((el) => el && actions.after(el)).catch(() => {});
+  if (hasPlugin("sync")) sharedBlock(it, type).then((el) => el && favRow.after(el)).catch(() => {});
   if (type === "series") body.append(await seasonsView(it, on));
 }
 
@@ -468,7 +498,7 @@ async function renderWatchlist(el, on) {
                           t("Discover movies"), "#/media"));
       return;
     }
-    fill(el, h("div.section", h("h2", t("Favourites")), h("span.muted", items.length)),
+    fill(el, h("div.section", h("h2", t("To watch")), h("span.muted", items.length)),
       h("div.list", items.map((w) => h("div.item",
         w.poster ? h("img", { src: w.poster, style: { width: "46px", height: "69px", borderRadius: "6px", objectFit: "cover" } }) : null,
         h("div.stack", { style: { gap: "4px", flex: 1, minWidth: 0, cursor: "pointer" }, onclick: () => go(`#/media/${w.type}/${enc(w.id)}`) },
@@ -500,13 +530,12 @@ function dlRow(d) {
   return h("div.item.dl",
     d.data?.poster ? h("img", { src: d.data.poster, alt: "" }) : h("div.tile", h("div.ico", icon("film"))),
     h("div", { style: { flex: 1, minWidth: 0 } },
-      h("div.row", h("b.ellipsis", d.title + what), h(`span.chip${DSTATE[d.state] ? "." + DSTATE[d.state] : ""}`, dlabel(d.state))),
-      h("div.small.muted.ellipsis", d.name),
+      h("div.row", h("b.ellipsis", d.title + what),
+        h(`span.chip${DSTATE[d.state] ? "." + DSTATE[d.state] : ""}`, d.state === "imported" ? t("Ready to watch") : dlabel(d.state))),
+      d.state === "imported" ? h("div.row", { style: { marginTop: "4px" } }, infuseLink()) : null,
       active && h("div.progress", { style: { marginTop: "8px" } }, h("div", { style: { width: `${(d.progress * 100).toFixed(1)}%` } })),
       h("div.row2",
-        h("span", `${(d.progress * 100).toFixed(d.progress < 1 ? 1 : 0)}%`),
-        d.size ? h("span", fmt.bytes(d.size)) : null,
-        active && d.rate ? h("span", `${fmt.bytes(d.rate)}/s`) : null,
+        active ? h("span", `${Math.round(d.progress * 100)}%`) : null,
         active && d.eta > 0 ? h("span", t("ETA {time}", { time: fmt.duration(d.eta) })) : null,
         d.error ? h("span", { style: { color: "var(--bad)" } }, d.error) : null)),
     d.state === "downloading" && h("button.icon.ghost", { title: t("Pause"), onclick: (e) => dlAct(d, "pause", e) }, icon("pause")),
@@ -540,7 +569,7 @@ async function renderLibrary(el) {
   fill(el, loading());
   let kind = "movies";
   const grid = h("div");
-  const stats = h("div.grid");
+  const stats = h("div.m-libstat");
   const scanBtn = h("button", { onclick: () => act(async () => { await P("library/scan", { body: {} }); toast(t("Library rescanned")); load(); }, scanBtn) },
     icon("refresh"), t("Rescan"));
   const seg = h("div.seg");
@@ -549,32 +578,35 @@ async function renderLibrary(el) {
   async function load() {
     const r = await P(`library?kind=${kind}`);
     const s = r.stats;
-    fill(stats, 
-      h("div.card.stat", h("b", String(s.movies)), h("span.muted.small", t("movies"))),
-      h("div.card.stat", h("b", String(s.shows)), h("span.muted.small", t("series"))),
-      h("div.card.stat", h("b", String(s.episodes)), h("span.muted.small", t("episodes"))),
-      h("div.card.stat", h("b", fmt.bytes(s.size)), h("span.muted.small", s.last_scan ? t("scanned {when}", { when: fmt.ago(s.last_scan) }) : t("never scanned"))));
+    stats.textContent = `${t("{n} films", { n: s.movies })} · ${t("{n} series", { n: s.shows })}`;
     const missing = [!s.movies_dir_ok && t("movies folder not found: {dir}", { dir: s.movies_dir || t("(not set)") }),
                      !s.series_dir_ok && t("series folder not found: {dir}", { dir: s.series_dir || t("(not set)") })].filter(Boolean);
     fill(grid, 
       missing.length ? h("div.m-banner", "📁", h("div", missing.join(" · "), t(" - is the NAS mounted?"))) : null,
       r.items.length ? h("div.m-grid", r.items.map((x) => poster({
         ...x, type: kind === "movies" ? "movie" : "series", id: x.meta_id,
-        in_library: false, title: x.title, year: [x.year, x.episodes ? t("{n} ep", { n: x.episodes }) : x.quality].filter(Boolean).join(" · "),
+        in_library: false, title: x.title, year: x.year,
       }, !!x.meta_id))) : emptyState("film", t("Your library is empty. Films you download will show up here."),
                                                                        t("Discover movies"), "#/media"));
   }
+  const tech = await sourcesPanel();
+  const down = status?.transmission && status.transmission.enabled !== false && status.transmission.ok === false;
+  const noSources = tech.info.enabled.length && tech.info.enabled.every((n) => tech.info.health?.[n]?.ok === false);
   fill(el, 
-    h("div.section", h("h2", t("Your library")), h("div.spacer"), scanBtn), stats,
+    h("div.section", h("h2", t("Your library"))), stats,
+    (noSources && !down) ? h("div.m-banner", "⚠️", h("div", t("Downloads are unavailable at the moment."))) : null,
     h("div.section", seg), grid,
-    h("div.section", h("h2", t("Sources"))), await sourcesPanel());
+    h("details.m-tech", h("summary", t("Technical details")),
+      h("div.stack", { style: { marginTop: "10px" } }, h("div.row", scanBtn), tech.box)));
   paintSeg();
   await load();
 }
 
 async function sourcesPanel() {
   const box = h("div.stack");
+  const out = { box, info: await P("indexers") };
   const paint = (info) => {
+    out.info = info;
     const hl = info.health || {};
     fill(box, 
       h("div.list",
@@ -593,6 +625,6 @@ async function sourcesPanel() {
   };
   const testBtn = h("button", { onclick: () => act(async () => paint(await P("indexers/test", { body: {} })), testBtn) },
     icon("refresh"), t("Test sources"));
-  paint(await P("indexers"));
-  return box;
+  paint(out.info);
+  return out;
 }
