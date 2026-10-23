@@ -56,9 +56,10 @@ else
   echo "  python3 $BIN/casa_deck_agent.py --port $PORT --token-file $CONF/token"
 fi
 
-IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+# SteamOS has no hostname command: fall back to ip (and never let this end the script)
+IP="$( (hostname -I 2>/dev/null || ip -4 -o route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p') | awk '{print $1}' || true)"
 say "Done. In Casa → Settings → Games enter:"
-echo "  Steam Deck address : ${IP:-$(hostname).local}   (or $(hostname).local)"
+echo "  Steam Deck address : ${IP:-$(uname -n).local}   (or $(uname -n).local)"
 echo "  Agent port         : $PORT"
 echo "  Deck token         : $(cat "$CONF/token")"
 echo
