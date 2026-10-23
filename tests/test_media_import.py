@@ -90,7 +90,43 @@ def test_movie_copy_single_file_from_pack():
         assert os.path.exists(f"{tmp}/dl/{files[0]}")      # copy keeps the seed
 
 
+class AnimeMeta:
+    """TMDB-style: seasons of 2 and 3 episodes, numbered absolutely (season 2 = 3-5)."""
+    async def details(self, type_, id_):
+        return {"seasons": [{"season": 1}, {"season": 2}]}
+
+    async def episodes(self, type_, id_, season):
+        return [{"episode": n, "title": f"Ep {n}"} for n in ([1, 2] if season == 1 else [3, 4, 5])]
+
+
+def test_anime_absolute_numbers():
+    from hub.plugins.media.ranking import absolute_episode
+    assert absolute_episode("[Anime Time] Naruto Shippuden - 033 - The Rasengan.mkv") == 33
+    assert absolute_episode("Naruto Shippuden Episode 414 On the Brink of Death.mkv") == 414
+    assert absolute_episode("[Anime Time] The Last - Naruto The Movie 07 (2014).mkv") is None
+    assert absolute_episode("Show - 2014 - Special.mkv") is None
+    with tempfile.TemporaryDirectory() as tmp:
+        pack = "[Anime Time] Show Complete (001-005 + Movies) [1080p]"
+        files = [f"{pack}/Season 01/[Anime Time] Show - 002 - Two.mkv",
+                 f"{pack}/Season 02/[Anime Time] Show - 004 - Four.mkv",
+                 f"{pack}/Movies/[Anime Time] Show The Movie (2010).mkv"]
+        for f in files:
+            touch(f"{tmp}/dl/{f}", 30_000_000)
+        d = make(tmp, "copy")
+        d.plugin.metadata = AnimeMeta()
+        row = {"hash": "z", "type": "series", "title": "Show", "year": 2007, "season": None,
+               "episode": None, "file_idx": None, "quality": "1080p",
+               "data": {"titles": ["Show"], "id": "tmdb:1"}}
+        t = {"downloadDir": f"{tmp}/dl",
+             "files": [{"name": f, "length": 30_000_000} for f in files]}
+        out = asyncio.run(d._do_import(row, t))
+        assert sorted(os.path.relpath(p, f"{tmp}/series") for p in out) == [
+            "Show/Season 1/Show - S01E02 - Ep 2.mkv",
+            "Show/Season 2/Show - S02E04 - Ep 4.mkv"], out
+
+
 if __name__ == "__main__":
     test_series_pack_move()
     test_movie_copy_single_file_from_pack()
-    print("2 tests passed")
+    test_anime_absolute_numbers()
+    print("3 tests passed")

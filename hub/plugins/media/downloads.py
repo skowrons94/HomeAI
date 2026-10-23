@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from .library import SUB_EXT, VIDEO_EXT
-from .ranking import parse
+from .ranking import absolute_episode, parse
 from .transmission import TransmissionError
 from ...i18n import _
 
@@ -280,10 +280,18 @@ class Downloads:
             show = self.plugin.library.find_show(row["data"].get("titles") or [row["title"]])
             show_dir = show["path"] if show else os.path.join(self.series_dir, safe_name(row["title"]))
             ep_titles = await self._episode_titles(row)
+            absolute = None  # {absolute number: (season, episode, title)}, fetched when needed
             for _i, f in videos:
                 p = parse(Path(f["name"]).name)
                 season = p.season if p.season is not None else row["season"]
                 ep = p.episode if p.episode is not None else row["episode"]
+                n = absolute_episode(Path(f["name"]).name) if p.episode is None else None
+                if n:  # "Show - 033 - Title.mkv" in a complete-series pack
+                    if absolute is None:
+                        absolute = await self._absolute_episodes(row)
+                    if n in absolute:
+                        season, ep, title = absolute[n]
+                        ep_titles[(season, ep)] = title
                 if season is None or ep is None:
                     log.warning("can't tell the episode of %s, skipped", f["name"])
                     continue
@@ -351,6 +359,21 @@ class Downloads:
                     out[(s, e["episode"])] = e["title"]
         except Exception as err:
             log.debug("episode titles: %s", err)
+        return out
+
+    async def _absolute_episodes(self, row) -> dict:
+        """Absolute episode number -> (season, episode, title), counting through the seasons.
+        Works whether the metadata restarts numbering each season or keeps it absolute
+        (TMDB's Naruto Shippuden: season 2 = episodes 33-53)."""
+        out, n = {}, 0
+        try:
+            sid = row["data"]["id"]
+            for s in (await self.plugin.metadata.details("series", sid)).get("seasons") or []:
+                for e in await self.plugin.metadata.episodes("series", sid, s["season"]):
+                    n += 1
+                    out[n] = (s["season"], e["episode"], e.get("title") or "")
+        except Exception as err:
+            log.warning("absolute episode numbers: %s", err)
         return out
 
     # -- actions --------------------------------------------------------------------------

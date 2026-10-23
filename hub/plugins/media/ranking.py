@@ -203,6 +203,23 @@ def parse(name: str) -> Parsed:
     return p
 
 
+ABS_RE = [
+    re.compile(r"\b(?:episode|episodio|ep)[ ._]?(\d{1,4})\b", re.I),  # Episode 414, Ep.12
+    re.compile(r"\s-\s(\d{1,4})(?:v\d)?(?=\s|\.|\[|\(|$)"),           # Show - 033 - Title
+]
+
+
+def absolute_episode(name: str) -> int | None:
+    """Anime-style absolute number of a file without SxxEyy: 'Naruto Shippuden - 033 - X.mkv'."""
+    stem = re.sub(r"\.\w{2,4}$", "", name)
+    for rx in ABS_RE:
+        for m in rx.finditer(stem):
+            n = int(m.group(1))
+            if 0 < n and not (len(m.group(1)) == 4 and YEAR_RE.fullmatch(m.group(1))):
+                return n
+    return None
+
+
 # ---------------------------------------------------------------- ranking
 
 @dataclass
