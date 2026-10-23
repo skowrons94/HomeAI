@@ -21,15 +21,16 @@ def discover(extra_dir: str = "") -> dict[str, Provider]:
     """Built-in providers plus any ``*.py`` in ``extra_dir`` that exports ``SOURCE``."""
     found: dict[str, Provider] = {}
 
-    def add(mod, where):
+    def add(mod, where, kind):
         cls = getattr(mod, "SOURCE", None)
         if not (isinstance(cls, type) and issubclass(cls, Provider) and cls.id):
             return
-        found[cls.id] = cls()
+        found[cls.id] = inst = cls()
+        inst.kind = kind
         log.debug("provider %s from %s", cls.id, where)
 
     for m in pkgutil.iter_modules(sources.__path__):
-        add(importlib.import_module(f"{sources.__name__}.{m.name}"), m.name)
+        add(importlib.import_module(f"{sources.__name__}.{m.name}"), m.name, "builtin")
     if extra_dir:
         for f in sorted(Path(extra_dir).expanduser().glob("*.py")):
             if f.name.startswith("_"):
@@ -38,7 +39,7 @@ def discover(extra_dir: str = "") -> dict[str, Provider]:
                 spec = importlib.util.spec_from_file_location(f"casa_torrent_src_{f.stem}", f)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                add(mod, str(f))
+                add(mod, str(f), "file")
             except Exception:  # a broken user provider must not take the others down
                 log.exception("could not load provider %s", f)
     return found
@@ -91,13 +92,14 @@ class Engine:
         if wait > 0:
             status.update(kind="rate_limited", error="rate limited, retry in %ds" % (wait + 1))
             return status, []
+        t0 = time.monotonic()
         try:
             raw = await asyncio.wait_for(p.search(session, query, page, page_size, self.timeout),
                                          self.timeout + 2)
             if not isinstance(raw, list):
                 raise ProviderError("malformed", "provider returned %s, not a list" % type(raw).__name__)
             items = [c for c in (clean(r) for r in raw if isinstance(r, Result)) if c]
-            status.update(ok=True, count=len(items), raw=len(raw))
+            status.update(ok=True, count=len(items), raw=len(raw), ms=int((time.monotonic() - t0) * 1000))
             return status, items
         except ProviderError as err:
             if err.kind == "rate_limited":

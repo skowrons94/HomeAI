@@ -14,3 +14,14 @@
 .tr-warn, .tr-error { border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; margin-bottom: 8px;
   border: 1px solid var(--line); overflow-wrap: anywhere; }
 .tr-error { border-color: #d9534f; }
+.tr-searched { gap: 6px; margin-bottom: 10px; font-size: 13px; }
+.tr-trk .row { align-items: flex-start; }
+.tr-trk-name { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.tr-url { font-size: 12px; overflow-wrap: anywhere; }
+.tr-health { font-size: 13px; overflow-wrap: anywhere; }
+.tr-health.ok { color: var(--ok); }
+.tr-health.bad { color: var(--bad); }
+.tr-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted, inherit); }
+.tr-field input { font-size: 16px; min-height: 44px; }
+.tr-hint { font-size: 13px; }
+.tr-add, .tr-trk button { min-height: 44px; }

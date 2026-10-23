@@ -14,6 +14,7 @@ from hub.plugins.torrents import PLUGIN, TorrentsPlugin  # noqa: E402
 from hub.plugins.torrents import engine as E  # noqa: E402
 from hub.plugins.torrents.model import Provider, ProviderError, Result, clean, fetch_json  # noqa: E402
 from hub.plugins.torrents.sources.internetarchive import InternetArchive  # noqa: E402
+from hub.plugins.torrents.torznab import TorznabProvider, clean_url  # noqa: E402
 
 H1 = "a" * 40
 
@@ -230,6 +231,216 @@ def test_contract_and_route():
     assert [r["title"] for r in o["flt"]["results"]] == ["Beta"]
     assert o["down"]["results"] == [] and o["down"]["error"] and o["down"]["providers"][0]["kind"] == "unavailable"
     assert o["none"]["error"]
+
+
+TZ = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>
+<item><title>Ubuntu 24.04 ISO</title><link>http://jk/dl/1?apikey=SECRET</link>
+<enclosure url="http://jk/dl/1?apikey=SECRET" length="5000" type="application/x-bittorrent"/>
+<torznab:attr name="seeders" value="40"/><torznab:attr name="peers" value="55"/>
+<torznab:attr name="size" value="6000"/><torznab:attr name="infohash" value="%s"/></item>
+<item><title>Other</title><enclosure url="http://jk/dl/2" length="77"/>
+<torznab:attr name="magneturl" value="magnet:?xt=urn:btih:%s&amp;dn=o"/><torznab:attr name="seeders" value="x"/></item>
+<item><title></title></item></channel></rss>""" % (H1, "b" * 40)
+
+
+class TextResp(Resp):
+    async def text(self, errors=None):
+        return self._t
+
+
+def tz_search(body, status=200, **kw):
+    prov = TorznabProvider("tz1", "My JK", "http://jk/api", "SECRET")
+    sess = Sess(TextResp(status, text=body))
+    seen = {}
+    orig = sess.get
+    sess.get = lambda url, **k: (seen.update(k, url=url), orig(url, **k))[1]
+    out = asyncio.run(prov.search(sess, "ubuntu", 2, 10, 5))
+    return out, seen
+
+
+def test_torznab_parsing():
+    out, seen = tz_search(TZ)
+    assert seen["params"] == {"t": "search", "q": "ubuntu", "offset": 10, "limit": 10, "apikey": "SECRET"}
+    assert [r.title for r in out] == ["Ubuntu 24.04 ISO", "Other"]
+    a, b = out
+    assert (a.seeders, a.leechers, a.size, a.hash) == (40, 15, 6000, H1) and a.source == "My JK"
+    assert a.magnet.startswith("magnet:?xt=urn:btih:" + H1) and a.url is None    # key-carrying link dropped
+    assert b.magnet.startswith("magnet:?xt=urn:btih:" + "b" * 40) and b.seeders is None and b.size == 77
+    assert b.url == "http://jk/dl/2" and all(clean(r) for r in out)
+    for body, kind in (('<error code="100" description="Wrong key"/>', "error"), ("<html/>", "malformed"),
+                       ("nope", "malformed"), ('<!DOCTYPE x [<!ENTITY a "b">]><rss/>', "malformed")):
+        try:
+            tz_search(body)
+        except ProviderError as err:
+            assert err.kind == kind, (body, err.kind)
+        else:
+            raise AssertionError(body)
+    try:
+        tz_search("", 429)
+    except ProviderError as err:
+        assert err.kind == "rate_limited"
+    try:
+        tz_search("", 401)
+    except ProviderError as err:
+        assert "API key" in str(err)
+    assert clean_url("http://h:9117/a/b?apikey=K&t=x&foo=1") == ("http://h:9117/a/b?foo=1", "K")
+    for bad in ("ftp://x", "javascript:1", "", "http://"):
+        try:
+            clean_url(bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+
+
+class FakeIx:
+    """Stands in for media.indexers.Indexers: no network."""
+    def __init__(self, cfg):
+        self.cfg, self.health, self.opened, self.calls = cfg, {}, False, []
+
+    async def open(self):
+        self.opened = True
+
+    async def close(self):
+        self.opened = False
+
+    async def _probe_one(self, name):
+        ok = name != "yts"
+        self.health[name] = {"ok": ok, "mirror": "http://m/" + name if ok else None,
+                             "error": None if ok else "unreachable", "checked": 1e12}
+
+    async def _s_knaben(self, base, q):
+        self.calls.append((base, q.titles, q.type, q.imdb_id))
+        return [{"name": "Low", "hash": "C" * 40, "size": 5, "seeders": 1, "leechers": 0, "source": "x"},
+                {"name": "High", "hash": H1.upper(), "size": "9", "seeders": 30, "leechers": 4, "url": "https://d/1"},
+                {"name": "", "hash": H1}]
+
+
+def test_media_adapter_maps_and_isolates():
+    from hub.plugins.torrents import media_adapter as M
+    be = M.MediaBackend({"proxy": {"url": "http://p:1"}, "mirrors": {"knaben": ["http://z"]}}, FakeIx)
+    assert be.idx.cfg["indexers"] == list(M.SITES) and "torrentio" not in M.SITES and "eztv" not in M.SITES
+    prov = M.MediaProvider(be, "knaben")
+    out = asyncio.run(prov.search(None, "my query", 1, 20, 5))
+    assert be.idx.opened and be.idx.calls == [("http://m/knaben", ["my query"], "movie", None)]
+    assert [r.title for r in out] == ["High", "Low"] and out[0].rank == 0 and out[0].source == "Knaben"
+    assert out[0].hash == H1 and out[0].magnet.startswith("magnet:?xt=urn:btih:" + H1) and out[0].url == "https://d/1"
+    assert (out[0].size, out[0].seeders, out[0].leechers) == (9, 30, 4)
+    assert asyncio.run(prov.search(None, "q", 2, 20, 5)) == []
+    try:
+        asyncio.run(M.MediaProvider(be, "yts").search(None, "q", 1, 20, 5))
+    except ProviderError as err:
+        assert err.kind == "unavailable" and "unreachable" in str(err)
+    else:
+        raise AssertionError
+
+
+class JReq:
+    def __init__(self, body=None, id=None, query=None):
+        self._b, self.match_info, self.query = body, {"id": id}, query or {}
+
+    async def json(self):
+        return self._b
+
+
+def test_tracker_management_persists_in_store():
+    with tempfile.TemporaryDirectory() as d:
+        async def go():
+            hub = Hub({"homekit": {"enabled": False}}, Path(d))
+            p = TorrentsPlugin(hub, {"providers": ["internetarchive"]})
+            await p.start()
+            try:
+                st, lst = (await p.r_trackers(None)).status, json.loads((await p.r_trackers(None)).text)["trackers"]
+                ids = {t["id"]: t for t in lst}
+                assert {"internetarchive", "knaben", "apibay", "yts", "ilcorsaronero", "1337x"} <= set(ids)
+                assert "torrentio" not in ids and "eztv" not in ids
+                assert ids["internetarchive"]["enabled"] and not ids["knaben"]["enabled"]
+                assert ids["knaben"]["kind"] == "media" and ids["internetarchive"]["kind"] == "builtin"
+                # toggle without restart; persisted in the store
+                r = await p.r_edit(JReq({"enabled": True}, "knaben"))
+                assert json.loads(r.text)["enabled"] and "knaben" in p.enabled_ids()
+                assert "knaben" in hub.store.get("torrents.enabled")
+                # add (api key moved out of the URL), never echoed
+                r = await p.r_add(JReq({"name": " My  JK ", "url": "http://jk:9117/api?apikey=SECRET"}))
+                new = json.loads(r.text)
+                assert r.status == 201 and new["name"] == "My JK" and new["has_key"] and "SECRET" not in r.text
+                assert new["enabled"] and new["url"] == "http://jk:9117/api" and new["kind"] == "torznab"
+                tid = new["id"]
+                assert "SECRET" not in (await p.r_trackers(None)).text
+                assert hub.store.get("torrents.trackers")[0]["key"] == "SECRET"
+                # edit keeps the key when the field is empty, replaces it otherwise
+                r = await p.r_edit(JReq({"name": "Renamed", "url": "https://jk2/api", "key": ""}, tid))
+                assert json.loads(r.text)["name"] == "Renamed" and p.engine.providers[tid].key == "SECRET"
+                assert p.engine.providers[tid].url == "https://jk2/api"
+                await p.r_edit(JReq({"key": "NEW"}, tid))
+                assert hub.store.get("torrents.trackers")[0]["key"] == "NEW"
+                await p.r_edit(JReq({"enabled": False}, tid))
+                assert tid not in p.enabled_ids()
+                # validation
+                for bad in ({"name": "x", "url": "ftp://h"}, {"name": "", "url": "http://h"}, {"url": "http://h"}, []):
+                    try:
+                        await p.r_add(JReq(bad))
+                        raise AssertionError(bad)
+                    except ValueError:
+                        pass
+                for fn, body in ((p.r_edit, {"name": "x"}), (p.r_delete, None)):
+                    try:
+                        await fn(JReq(body, "knaben"))
+                        raise AssertionError
+                    except ValueError:
+                        pass
+                try:
+                    await p.r_delete(JReq(None, "nope"))
+                    raise AssertionError
+                except KeyError:
+                    pass
+                # a fresh plugin (restart) sees the same state
+                await p.stop()
+                p = TorrentsPlugin(hub, {"providers": ["internetarchive"]})
+                await p.start()
+                assert tid in p.engine.providers and "knaben" in p.enabled_ids() and tid not in p.enabled_ids()
+                await p.r_delete(JReq(None, tid))
+                assert tid not in p.engine.providers and hub.store.get("torrents.trackers") == []
+                assert tid not in hub.store.get("torrents.enabled")
+                # disabling everything gives the "no tracker" message, searches only enabled ones
+                for i in list(p.enabled_ids()):
+                    await p.r_edit(JReq({"enabled": False}, i))
+                out = json.loads((await p.r_search(Req({"q": "ubuntu"}))).text)
+                assert out["error"] and out["providers"] == []
+                p.engine.providers["f1"] = Fake("f1", lambda: [R("A")])
+                p.engine.providers["f2"] = Fake("f2", lambda: [R("B")])
+                await p.r_edit(JReq({"enabled": True}, "f1"))
+                out = json.loads((await p.r_search(Req({"q": "ubuntu"}))).text)
+                assert [s["id"] for s in out["providers"]] == ["f1"] and out["providers"][0]["ms"] is not None
+                assert json.loads((await p.r_trackers(None)).text)["trackers"][0] is not None
+                return True
+            finally:
+                await p.stop()
+        assert asyncio.run(go())
+
+
+def test_tracker_test_route_and_draft():
+    with tempfile.TemporaryDirectory() as d:
+        async def go():
+            p = TorrentsPlugin(Hub({"homekit": {"enabled": False}}, Path(d)), {})
+            await p.start()
+            try:
+                p.engine.providers["ok"] = Fake("ok", lambda: [R("x")])
+                p.engine.providers["bad"] = Fake("bad", lambda: ProviderError("unavailable", "HTTP 502"))
+                ok = json.loads((await p.r_test(JReq({}, "ok"))).text)
+                bad = json.loads((await p.r_test(JReq({}, "bad"))).text)
+                assert ok["ok"] and ok["count"] == 1 and bad["error"] == "HTTP 502" and not bad["ok"]
+                hl = {t["id"]: t["health"] for t in json.loads((await p.r_trackers(None)).text)["trackers"]}
+                assert hl["ok"]["ok"] and not hl["bad"]["ok"]
+                try:
+                    await p.r_test_draft(JReq({"url": "nope"}))
+                    raise AssertionError
+                except ValueError:
+                    pass
+                return True
+            finally:
+                await p.stop()
+        assert asyncio.run(go())
 
 
 if __name__ == "__main__":

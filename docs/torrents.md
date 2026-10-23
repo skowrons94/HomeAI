@@ -23,6 +23,27 @@ The page appears at `#/torrents` while the plugin runs.
 |---|---|---|
 | `internetarchive` | archive.org `advancedsearch` (documented, keyless) | Public-domain / freely licensed items with an official torrent. Gives size and a `.torrent` URL; no seeder counts (shown as unknown). |
 
+Sites of the Media plugin that take a free-text query are offered too (off until you enable them,
+same mirrors and proxy as `[plugins.media]`): `knaben`, `apibay` (The Pirate Bay), `yts`,
+`ilcorsaronero`, `1337x`. `torrentio` and `eztv` need an IMDb id and are not exposed. These sites
+answer a single page and may be blocked in your country; use the Test button in the Trackers menu.
+
+## Trackers menu
+
+The **Trackers** button in the page header lists every source: name, kind (Built-in, Torznab, File),
+an on/off switch, last health (OK + latency, or the error) and **Test** (a tiny search for "ubuntu").
+Toggling needs no restart. The enabled set and the custom trackers are kept in the hub store
+(`torrents.enabled`, `torrents.trackers`), not in `config.toml`; the `providers` config list is only
+the initial default (empty = every built-in and file provider, no media site or Torznab entry).
+
+**Add tracker** takes a name, a Torznab URL and an API key: Jackett
+(`http://host:9117/api/v2.0/indexers/all/results/torznab/`), Prowlarr (`http://host:9696/<id>/api`)
+or any Torznab API (`?t=search&q=…&apikey=…&offset=&limit=`). An `apikey=` typed inside the URL is
+moved to the key field. The key is stored in the store and never sent back to the client
+(`has_key: true`); leave the field empty when editing to keep it. Results use `torznab:attr`
+`seeders`/`peers`/`size`/`infohash`/`magneturl` and the `enclosure` link. A download link that
+contains your key is hidden whenever a magnet is available.
+
 ## Add your own provider
 
 Drop a `.py` file in `extra_dir` (outside the repo, so `update.sh` never touches it) and restart
@@ -66,8 +87,13 @@ timeouts, HTTP 429/503 (`Retry-After`), other HTTP errors and invalid JSON. Miss
 ## API
 
 `GET /api/p/torrents/search?q=…&sort=&order=&page=&min_seeders=&min_size=&max_size=&providers=a,b`
-→ `{query, page, results[], providers[{id,name,ok,count,error,kind}], has_more, error}`.
-`GET /api/p/torrents/providers` → `[{id, name}]`.
+→ `{query, page, results[], providers[{id,name,ok,count,ms,error,kind}], has_more, error}`.
+`GET /api/p/torrents/providers` → enabled `[{id, name}]`.
+
+Trackers: `GET /trackers` → `{trackers: [{id, name, kind, enabled, editable, has_key, url, health}]}`;
+`POST /trackers {name, url, key}` (add, 201); `PUT /trackers/{id} {enabled?, name?, url?, key?}`
+(only `enabled` for non-Torznab); `DELETE /trackers/{id}` (Torznab only); `POST /trackers/{id}/test`
+→ `{ok, count, ms, error, kind}`; `POST /trackers/test {url, key, id?}` tries an unsaved endpoint.
 
 ## Test
 

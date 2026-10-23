@@ -113,6 +113,11 @@ def _game_dir(entry: Path) -> tuple[Path, str]:
     return entry, ""
 
 
+def _finish(games: list[dict]) -> None:
+    for g in games:
+        g["platform"] = platform(g)
+
+
 def scan(root: str) -> tuple[list[dict], list[dict]]:
     """→ (games, problems). Public fields only; internal ones start with ``_``."""
     games: list[dict] = []
@@ -154,7 +159,7 @@ def scan(root: str) -> tuple[list[dict], list[dict]]:
             add({"id": "pc-" + slug(str(man.get("title") or title)), "title": str(man.get("title") or title),
                  "version": str(man.get("version") or dir_version or name_version), "kind": kind, "system": "",
                  "size": size, "files": len(files), "exe": exe, "folder": "",
-                 "cover": bool(_cover(gdir) or _cover(entry)),
+                 "cover": bool(_cover(gdir) or _cover(entry)), "added": _mtime(entry, gdir),
                  "_dir": str(gdir), "_cover": _cover(gdir) or _cover(entry), "_list": files,
                  "path": str(gdir.relative_to(base))})
         except OSError as err:
@@ -190,11 +195,27 @@ def scan(root: str) -> tuple[list[dict], list[dict]]:
                         break
                 add({"id": f"{system}-" + slug(title), "title": title, "version": version, "kind": "rom",
                      "system": system, "size": size, "files": len(files), "exe": "", "folder": folder,
-                     "cover": bool(cov), "_dir": str(gdir), "_cover": cov, "_list": files,
+                     "cover": bool(cov), "added": _mtime(entry), "_dir": str(gdir), "_cover": cov, "_list": files,
                      "path": str(entry.relative_to(base))})
             except OSError as err:
                 problems.append({"path": f"{sysdir.name}/{entry.name}", "reason": str(err)})
+    _finish(games)
     return games, problems
+
+
+def platform(g: dict) -> str:
+    """Filter key in the app: ``pc`` (Windows), ``linux`` or the emulator system (``snes``, ``psx``…)."""
+    return g["system"] if g["kind"] == "rom" else ("linux" if g["kind"] == "native" else "pc")
+
+
+def _mtime(*paths: Path) -> float:
+    best = 0.0
+    for p in paths:
+        try:
+            best = max(best, p.stat().st_mtime)
+        except OSError:
+            pass
+    return best
 
 
 def public(g: dict) -> dict:

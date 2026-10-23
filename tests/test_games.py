@@ -68,8 +68,25 @@ def test_scan():
         assert (s["kind"], s["system"], s["version"], s["folder"], s["cover"]) == ("rom", "snes", "1.1", "", True)
         assert (p["system"], p["folder"], p["files"]) == ("psx", "Disc Game", 2)
         assert [x["path"] for x in problems] == ["Mystery"]
+        assert (c["platform"], by["pc-penguin"]["platform"], s["platform"], p["platform"]) == ("pc", "linux", "snes", "psx")
+        assert all(g["added"] > 1e9 for g in games) and "_list" not in library.public(c) and "added" in library.public(c)
+        assert c["path"] == "pc/Celeste v1.4" and s["path"] == "emu/snes/Super Game (v1.1).sfc"
         assert library.split_name("Fallout 4") == ("Fallout 4", "") and library.split_name("Hades (v1.38)") == ("Hades", "1.38")
         assert library.scan(d + "/missing")[0] == [] and library.scan(d + "/missing")[1]
+
+
+def test_missing_library_is_reported():
+    with tempfile.TemporaryDirectory() as d:
+        async def go():
+            hub = Hub({"homekit": {"enabled": False}}, Path(d))
+            p = GamesPlugin(hub, {"library": d + "/nope"})
+            await p.start()
+            async with TestClient(TestServer(casa_app(p))) as c:
+                lib = await (await c.get("/api/p/games/library")).json()
+                assert lib["exists"] is False and lib["games"] == [] and lib["systems"] == [] and lib["problems"]
+                assert lib["deck"]["configured"] is False
+            await p.stop()
+        asyncio.run(go())
 
 
 def test_safe_file_blocks_escapes():
@@ -191,6 +208,11 @@ def test_full_install_flow():
                 d0 = await (await c.get("/api/p/games/library")).json()
                 assert d0["deck"]["online"] and len(d0["games"]) == 7 and all(g["state"] == "not_installed" for g in d0["games"])
                 assert not any(k.startswith("_") for k in d0["games"][0])
+                assert d0["exists"] is True and d0["deck"]["configured"] and d0["deck"]["host"] == "127.0.0.1"
+                assert {x["key"]: x["count"] for x in d0["systems"]} == {"pc": 4, "linux": 1, "snes": 1, "psx": 1}, d0["systems"]
+                assert d0["systems"][0]["key"] == "pc"                                  # biggest first
+                tr = await (await c.post("/api/p/games/test", json={})).json()
+                assert tr["ok"] is True and tr["error"] is None and tr["pending"] == 0
                 assert (await c.get("/api/p/games/cover/pc-celeste")).status == 200
                 assert (await c.get("/api/p/games/cover/pc-hades")).status == 404
 
@@ -288,6 +310,8 @@ def test_deck_errors_are_reported():
                 lib = await (await c.get("/api/p/games/library")).json()
                 assert lib["deck"]["online"] is False and expect in lib["deck"]["error"], lib["deck"]
                 assert len(lib["games"]) == 7                                       # the library still lists
+                tr = await (await c.post("/api/p/games/test", json={})).json()
+                assert tr["ok"] is False and expect in tr["error"]
                 r = await c.post("/api/p/games/install", json={"id": "pc-celeste"})
                 assert r.status == 400 and expect in (await r.json())["error"]
             await p.stop()

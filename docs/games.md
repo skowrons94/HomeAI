@@ -35,6 +35,15 @@ Optional `game.json` next to the files: `{"title": "…", "version": "1.2", "kin
 folder (or `<rom name>.jpg` next to a ROM) is shown in the app. A folder Casa can't classify is listed
 under "items skipped" with the reason; nothing is guessed.
 
+### The Games page
+Search by title, filter by platform chip (PC, Linux and each emulator system, with counts) and by status
+(installed / not installed / update available / installing), sort A-Z, recently added (folder date), size or
+system; the choice is remembered on each device. Tap a game for its details (version, size, files, NAS
+folder, installed version, progress) and the actions. The gear opens the settings sheet: games folder, Deck
+address/port/token (empty token = keep), hub address, *Test connection*, *Rescan library*, *Apply to Steam*
+and the list of skipped items. Browsing works even when the Deck is offline. Extra routes:
+`GET /library` (adds `systems`, `exists`, per-game `platform`/`added`) and `POST /test`.
+
 ## 2. Install the agent on the Deck
 
 In Desktop Mode, in a terminal:

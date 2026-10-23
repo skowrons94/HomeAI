@@ -113,6 +113,7 @@ class Provider:
 
     id = ""
     name = ""
+    kind = ""   # builtin | file | media | torznab (set by the loader)
 
     async def search(self, session, query: str, page: int, page_size: int,
                      timeout: float) -> list[Result]:

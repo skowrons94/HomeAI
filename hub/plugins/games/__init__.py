@@ -145,6 +145,7 @@ class GamesPlugin(Plugin):
         return [
             web.get("/library", self.r_library),
             web.post("/rescan", self.r_rescan),
+            web.post("/test", self.r_test),
             web.post("/install", self.r_install),
             web.post("/uninstall", self.r_uninstall),
             web.post("/apply", self.r_apply),
@@ -167,11 +168,27 @@ class GamesPlugin(Plugin):
             raise KeyError(_("Game not found"))
         return g
 
+    def _systems(self) -> list[dict]:
+        """[{key, count}] per platform (pc, linux, snes…), biggest first."""
+        counts: dict[str, int] = {}
+        for g in self.games.values():
+            k = library.platform(g)
+            counts[k] = counts.get(k, 0) + 1
+        return [{"key": k, "count": n} for k, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
     async def r_library(self, request):
         st = await self._deck_state()
         items = [{**library.public(g), **self._state(g, st)} for g in self.games.values()]
         return _json({"games": items, "problems": self.problems, "root": self.root, "scanned": self.scanned,
-                      "deck": {k: st.get(k) for k in ("online", "error", "pending", "steam_running")}})
+                      "exists": os.path.isdir(os.path.expanduser(self.root)), "systems": self._systems(),
+                      "deck": {**{k: st.get(k) for k in ("online", "error", "pending", "steam_running")},
+                               "configured": self.deck.configured, "host": self.deck.host}})
+
+    async def r_test(self, request):
+        """Ask the Deck agent right now (no cache) and say what is wrong, if anything."""
+        st = await self._deck_state(fresh=True)
+        return _json({"ok": bool(st["online"]), "error": st.get("error"), "pending": st.get("pending", 0),
+                      "steam_running": bool(st.get("steam_running")), "installed": len(st.get("installed") or {})})
 
     async def r_rescan(self, request):
         await self._scan()

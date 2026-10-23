@@ -140,7 +140,7 @@ url = ""
 
 [plugins.torrents]
 # Search box over the providers you enable (docs/torrents.md). "internetarchive" works out of the box.
-providers = ["internetarchive"]
+providers = ["internetarchive"]   # initial default only; the Trackers menu in the page overrides it
 # extra_dir = "/home/pi/casa-sources"   # your own provider .py files
 # timeout = 10
 # page_size = 20
