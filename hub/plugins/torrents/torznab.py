@@ -17,6 +17,7 @@ import aiohttp
 from .model import HEX40, Provider, ProviderError, Result, to_int
 
 MAX_BODY = 5 * 1024 * 1024
+CATEGORIES = {"games": "4000,1000"}   # Torznab: PC, Console
 
 
 def local(tag) -> str:
@@ -99,8 +100,10 @@ class TorznabProvider(Provider):
         t = str(text)
         return t.replace(self.key, "***") if self.key else t
 
-    async def search(self, session, query, page, page_size, timeout):
+    async def search(self, session, query, page, page_size, timeout, category=""):
         params = {"t": "search", "q": query, "offset": max(page - 1, 0) * page_size, "limit": page_size}
+        if CATEGORIES.get(category):
+            params["cat"] = CATEGORIES[category]
         if self.key:
             params["apikey"] = self.key
         try:

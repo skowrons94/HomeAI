@@ -44,6 +44,30 @@ address/port/token (empty token = keep), hub address, *Test connection*, *Rescan
 and the list of skipped items. Browsing works even when the Deck is offline. Extra routes:
 `GET /library` (adds `systems`, `exists`, per-game `platform`/`added`) and `POST /test`.
 
+## Metadata, covers and finding games
+
+**Metadata and art.** Optional keys in Settings → Games: IGDB (`igdb.client_id`, `igdb.client_secret`, a free Twitch
+developer app) gives description, genres, release date, rating, developer and screenshots; SteamGridDB
+(`steamgriddb.key`) gives covers, banners and logos. After a scan Casa looks up new games one at a time in the
+background (titles are cleaned: version, `[Repack]`, `(USA)` and `[!]` tags removed; the platform is used to pick the
+right edition). Wrong match? Search IGDB by hand and pick the right one (`GET /meta/search`, `POST /meta/match`);
+`POST /meta/refresh` refetches. Records live in the store (`games.meta.<id>`), images in `data/games-art` (capped at
+200 MB, oldest removed first). A `cover.jpg` in the game folder always wins. Without keys nothing is fetched.
+
+**Cover art on the Deck.** Installing a portable/native game sends the grid, wide, hero and logo images we have
+(PNG/JPEG, each up to 1.5 MB, 4 MB in total) to the agent, which writes them to `userdata/<id>/config/grid/` when you
+*Apply to Steam*. Update the agent on the Deck (version 1.1) to get this; an old agent ignores the art and an old hub
+sends none.
+
+**Find and download.** `GET /find?q=&platform=pc|<system>` searches the trackers enabled in Torrent search (needs that
+plugin running; Torznab trackers are asked for the games categories 4000 and 1000). `POST /find/download` adds the
+magnet/URL to Transmission (the Media plugin's instance) in `<games>/pc` or `<games>/emu/<system>`;
+`GET /find/downloads` shows progress, `DELETE /find/downloads/<hash>` cancels (and deletes the partial data) or forgets
+a finished entry. When a download finishes the torrent leaves Transmission (files stay), `.zip` files are unpacked in
+place (paths outside the folder and zip bombs are refused) and removed, `.rar`/`.7z` need `7z`, `unar` or `unrar`
+on the hub (otherwise the entry says `needs_extraction`), ISOs and ROMs are left as they are, then the library is rescanned.
+Nothing outside the games folder is touched.
+
 ## 2. Install the agent on the Deck
 
 In Desktop Mode, in a terminal:

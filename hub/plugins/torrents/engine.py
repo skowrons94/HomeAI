@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
+import inspect
 import logging
 import pkgutil
 import time
@@ -86,7 +87,16 @@ class Engine:
         self.providers, self.timeout = providers, timeout
         self.cooldown: dict[str, float] = {}   # provider id → monotonic time it may be asked again
 
-    async def _one(self, session, p: Provider, query, page, page_size):
+    @staticmethod
+    def _takes_category(p: Provider) -> bool:
+        """Old providers (and user files) have no ``category`` parameter: they are simply not given one."""
+        try:
+            params = inspect.signature(p.search).parameters
+        except (TypeError, ValueError):
+            return False
+        return "category" in params or any(x.kind is inspect.Parameter.VAR_KEYWORD for x in params.values())
+
+    async def _one(self, session, p: Provider, query, page, page_size, category: str = ""):
         status = {"id": p.id, "name": p.name, "ok": False, "count": 0, "error": None, "kind": None}
         wait = self.cooldown.get(p.id, 0) - time.monotonic()
         if wait > 0:
@@ -94,7 +104,8 @@ class Engine:
             return status, []
         t0 = time.monotonic()
         try:
-            raw = await asyncio.wait_for(p.search(session, query, page, page_size, self.timeout),
+            extra = {"category": category} if category and self._takes_category(p) else {}
+            raw = await asyncio.wait_for(p.search(session, query, page, page_size, self.timeout, **extra),
                                          self.timeout + 2)
             if not isinstance(raw, list):
                 raise ProviderError("malformed", "provider returned %s, not a list" % type(raw).__name__)
@@ -112,9 +123,9 @@ class Engine:
             status.update(kind="error", error="%s: %s" % (type(err).__name__, err))
         return status, []
 
-    async def search(self, session, query: str, page: int, page_size: int, ids=None):
+    async def search(self, session, query: str, page: int, page_size: int, ids=None, category: str = ""):
         chosen = [p for i, p in self.providers.items() if not ids or i in ids]
-        done = await asyncio.gather(*(self._one(session, p, query, page, page_size) for p in chosen))
+        done = await asyncio.gather(*(self._one(session, p, query, page, page_size, category) for p in chosen))
         statuses = [s for s, _ in done]
         merged = dedupe([r for _, items in done for r in items])
         has_more = any(s.get("raw", 0) >= page_size for s in statuses)

@@ -15,6 +15,8 @@ Run:  casa_deck_agent.py [--port 8765] [--token-file ~/.config/casa-deck/token]
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hmac
 import json
 import os
@@ -33,9 +35,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-VERSION = "1.0"
+VERSION = "1.1"
 SYSTEM_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 MAX_BODY = 8 * 1024 * 1024
+MAX_ART = 3 * 1024 * 1024                 # per image, after decoding
+ART_KINDS = ("grid", "wide", "hero", "logo")
 
 
 # ------------------------------------------------------------------ binary VDF (shortcuts.vdf)
@@ -167,6 +171,43 @@ def run_srm(cmd: str) -> bool:
 
 # ------------------------------------------------------------------ helpers
 
+def image_ext(raw: bytes) -> str | None:
+    """'.png' / '.jpg' from the magic bytes; None for anything else."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    return None
+
+
+def decode_art(art) -> dict:
+    """{"grid": base64, …} → {"grid": (bytes, ext), …}; raises ValueError on anything odd."""
+    if art is None:
+        return {}
+    if not isinstance(art, dict):
+        raise ValueError("bad art")
+    out = {}
+    for kind, b64 in art.items():
+        if kind not in ART_KINDS:
+            raise ValueError("bad art kind")
+        if not isinstance(b64, str) or len(b64) > MAX_ART * 4 // 3 + 8:
+            raise ValueError("art too large")
+        try:
+            raw = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("art is not valid base64")
+        ext = image_ext(raw)
+        if not ext or len(raw) > MAX_ART:
+            raise ValueError("art must be a PNG or JPEG")
+        out[kind] = (raw, ext)
+    return out
+
+
+def art_names(appid: int) -> dict:
+    """File names Steam looks for in userdata/<id>/config/grid/ (without extension)."""
+    return {"grid": "%dp" % appid, "wide": "%d" % appid, "hero": "%d_hero" % appid, "logo": "%d_logo" % appid}
+
+
 def safe_rel(p) -> str | None:
     if not isinstance(p, str) or not p or p.startswith("/") or "\\" in p or "\x00" in p:
         return None
@@ -243,11 +284,13 @@ class Agent:
             raise ValueError("no executable")
         if not str(job.get("base", "")).startswith(("http://", "https://")):
             raise ValueError("bad base url")
+        raw_art = job.pop("art", None)
+        art = decode_art(raw_art) if kind in ("portable", "native") else {}
         with self.lock:
             cur = self.jobs.get(gid)
             if cur and cur["state"] in ("queued", "downloading", "finalizing"):
                 raise ValueError("already installing")
-            job = {**job, "state": "queued", "done": 0.0, "message": "queued"}
+            job = {**job, "state": "queued", "done": 0.0, "message": "queued", "_art": art}
             self.jobs[gid] = job
         self.q.put(gid)
 
@@ -334,10 +377,12 @@ class Agent:
             if job["kind"] == "native":
                 exe.chmod(exe.stat().st_mode | 0o111)
             entry["exe"] = str(exe)
+            staged = self._stage_art(job)
             with self.lock:
                 p = self.pending()
                 p["shortcuts"] = [s for s in p["shortcuts"] if s["exe"] != str(exe)] + [
-                    {"name": job["title"], "exe": str(exe), "startdir": str(exe.parent)}]
+                    {"name": job["title"], "exe": str(exe), "startdir": str(exe.parent),
+                     **({"art": staged} if staged else {})}]
                 self._save(self.pend_file, p)
             note = "Apply to Steam to add the shortcut." + (
                 " Pick a Proton version for it once (Properties → Compatibility)." if str(exe).lower().endswith(".exe") else "")
@@ -357,6 +402,46 @@ class Agent:
                 reg[job["id"]] = entry
                 self._save(self.reg_file, reg)
         self._set(job, state=state, done=1.0, message=note or "installed")
+
+    def _stage_art(self, job: dict) -> dict:
+        """Keep the cover art until Steam is stopped and the shortcut is applied."""
+        out = {}
+        d = self.data_dir / "art"
+        for kind, (raw, ext) in (job.get("_art") or {}).items():
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                f = d / ("%s-%s%s" % (job["id"], kind, ext))
+                f.write_bytes(raw)
+                out[kind] = str(f)
+            except OSError:
+                pass
+        return out
+
+    def _write_art(self, s: dict, files: list[Path]) -> int:
+        """Copy a shortcut's staged art into every Steam user's grid folder; returns files written."""
+        art = s.get("art") or {}
+        if not art:
+            return 0
+        names = art_names(shortcut_appid('"%s"' % s["exe"], s["name"]))
+        n = 0
+        for vdf in files:
+            grid = vdf.parent / "grid"
+            for kind, src in art.items():
+                if kind not in names:
+                    continue
+                try:
+                    raw = Path(src).read_bytes()
+                    ext = image_ext(raw)
+                    if not ext:
+                        continue
+                    grid.mkdir(parents=True, exist_ok=True)
+                    for old in grid.glob(names[kind] + ".*"):    # one image per slot, whatever its extension
+                        old.unlink()
+                    (grid / (names[kind] + ext)).write_bytes(raw)
+                    n += 1
+                except OSError:
+                    continue
+        return n
 
     # -- steam
     def _shortcut_files(self) -> list[Path]:
@@ -383,6 +468,12 @@ class Agent:
                 for s in p["shortcuts"]:
                     for f in files:
                         added += add_shortcut(f, s["name"], s["exe"], s["startdir"])
+                    self._write_art(s, files)
+                    for src in (s.get("art") or {}).values():
+                        try:
+                            Path(src).unlink()
+                        except OSError:
+                            pass
                 if p["srm"] and self.srm:
                     ran_srm = run_srm(self.srm)
                 self._save(self.pend_file, {"shortcuts": [], "srm": bool(p["srm"] and not (self.srm and ran_srm))})
@@ -417,6 +508,13 @@ class Agent:
                     except OSError:
                         pass
             p = self.pending()
+            for s in p["shortcuts"]:
+                if s["exe"] == e.get("exe"):
+                    for src in (s.get("art") or {}).values():
+                        try:
+                            Path(src).unlink()
+                        except OSError:
+                            pass
             p["shortcuts"] = [s for s in p["shortcuts"] if s["exe"] != e.get("exe")]
             self._save(self.pend_file, p)
             removed = False

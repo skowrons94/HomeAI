@@ -335,6 +335,37 @@ def test_media_adapter_maps_and_isolates():
         raise AssertionError
 
 
+TZ_EMPTY = '<rss version="2.0"><channel></channel></rss>'
+
+
+def test_category_hint_only_reaches_providers_that_take_it():
+    class Cat(Provider):
+        id, name = "cat", "Cat"
+
+        def __init__(self):
+            self.got = []
+
+        async def search(self, session, query, page, page_size, timeout, category=""):
+            self.got.append(category)
+            return [R("a")]
+
+    old, cat = Fake("old", lambda: [R("b")]), Cat()
+    eng = E.Engine({"old": old, "cat": cat})
+    merged, st, _more = asyncio.run(eng.search(None, "x", 1, 10, category="games"))
+    assert cat.got == ["games"] and old.calls == 1 and all(s["ok"] for s in st) and len(merged) == 2
+    asyncio.run(eng.search(None, "x", 1, 10))
+    assert cat.got == ["games", ""]
+    # Torznab turns it into cat=4000,1000 (PC, Console), and sends nothing without it
+    prov = TorznabProvider("tz1", "JK", "http://jk/api", "SECRET")
+    for cat_arg, want in (("games", "4000,1000"), ("", None)):
+        sess = Sess(TextResp(200, text=TZ_EMPTY))
+        seen = {}
+        orig = sess.get
+        sess.get = lambda url, _o=orig, **k: (seen.update(k), _o(url, **k))[1]
+        asyncio.run(prov.search(sess, "q", 1, 10, 5, category=cat_arg))
+        assert seen["params"].get("cat") == want
+
+
 class JReq:
     def __init__(self, body=None, id=None, query=None):
         self._b, self.match_info, self.query = body, {"id": id}, query or {}

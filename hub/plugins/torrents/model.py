@@ -109,6 +109,9 @@ class Provider:
     ``search`` returns raw ``Result`` objects (``clean`` is applied by the engine), best match
     first, for page ``page`` (1-based) of ``page_size`` items, and raises ``ProviderError``.
     A module exports its class as ``SOURCE``. See docs/torrents.md.
+
+    Optional: a provider whose ``search`` also takes ``category=""`` is given a hint such as
+    ``"games"`` when the caller wants one kind of content; the others are not given it.
     """
 
     id = ""
