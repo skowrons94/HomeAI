@@ -1,0 +1,76 @@
+# Torrent search
+
+A search box over the providers **you** enable. The hub fans the query out, normalises the answers,
+removes duplicates and lets you sort and filter. It never downloads anything by itself: each
+card gives you a magnet / `.torrent` link to copy or open in your client.
+
+## Enable
+
+```toml
+[plugins.torrents]
+providers = ["internetarchive"]   # ids to search; empty = every provider found
+# extra_dir = "/home/pi/casa-sources"   # your own providers (below)
+# timeout = 10                          # seconds per provider
+# page_size = 20                        # results per provider and page
+```
+
+Or use Settings → Torrent search. No API key and no new dependency (aiohttp is already required).
+The page appears at `#/torrents` while the plugin runs.
+
+## Built in
+
+| id | Source | Notes |
+|---|---|---|
+| `internetarchive` | archive.org `advancedsearch` (documented, keyless) | Public-domain / freely licensed items with an official torrent. Gives size and a `.torrent` URL; no seeder counts (shown as unknown). |
+
+## Add your own provider
+
+Drop a `.py` file in `extra_dir` (outside the repo, so `update.sh` never touches it) and restart
+the plugin from Settings. A broken file is logged and skipped; it can't take other providers down.
+
+```python
+from hub.plugins.torrents.model import Provider, ProviderError, Result, fetch_json
+
+class MySource(Provider):
+    id = "mysource"
+    name = "My source"
+
+    async def search(self, session, query, page, page_size, timeout):
+        data = await fetch_json(session, "https://example.org/api", {"q": query, "page": page}, timeout)
+        try:
+            return [Result(title=i["name"], size=i["bytes"], seeders=i["seeds"], leechers=i["peers"],
+                           magnet=i["magnet"], source=self.name, rank=n)
+                    for n, i in enumerate(data["items"])]
+        except (KeyError, TypeError) as err:
+            raise ProviderError("malformed", "unexpected answer shape") from err
+
+SOURCE = MySource
+```
+
+Contract: return `Result`s best match first (`rank` = position), raise `ProviderError(kind, msg)`
+(`timeout | rate_limited | unavailable | malformed | error`) and use `fetch_json`, which already maps
+timeouts, HTTP 429/503 (`Retry-After`), other HTTP errors and invalid JSON. Missing numbers are `None`.
+
+## What the hub does for you
+
+- **Schema**: `title, size (bytes), seeders, leechers, source, magnet, url, hash`; results without a
+  magnet or http(s) link are dropped, numbers are coerced, the infohash is read from the magnet.
+- **Dedupe**: same infohash, else same normalised title + size; the best-seeded copy wins and the
+  `sources` of all copies are kept.
+- **Sort / filter**: `sort=relevance|seeders|size`, `order=asc|desc`, `min_seeders`, `min_size`,
+  `max_size` (bytes). Unknown values sort last.
+- **Pagination**: `page` is passed to every provider; `has_more` is true if any returned a full page.
+- **Errors**: each provider has its own status in `providers[]`; a timeout, crash or bad answer in
+  one never hides the others. A rate-limited provider is skipped until its `Retry-After` passes.
+
+## API
+
+`GET /api/p/torrents/search?q=…&sort=&order=&page=&min_seeders=&min_size=&max_size=&providers=a,b`
+→ `{query, page, results[], providers[{id,name,ok,count,error,kind}], has_more, error}`.
+`GET /api/p/torrents/providers` → `[{id, name}]`.
+
+## Test
+
+```sh
+python tests/test_torrents.py      # no network: fake sessions and providers
+```

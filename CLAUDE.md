@@ -60,6 +60,7 @@ hub/plugins/     one module or package per integration, exports PLUGIN
 web/             ES modules, no build step; pages in web/pages/*.js
 docs/sync.md     shared feed contract
 deploy/          Pi installer, VPN script, macOS launchd
+deploy/deck/     Steam Deck agent (stdlib only, runs on the Deck) + installer
 ```
 
 ### Plugin contract

@@ -32,6 +32,8 @@ again* in Settings re-opens the wizard.
 | `recipes` | Italian blogs (GialloZafferano, Misya, Benedetta, …), world cuisines (RecipeTin Eats, Hebbar's, …), TheMealDB, any recipe URL | Search or import recipes (stored locally, with images); favourites, notes, your own edits (with reset); shopping list with substitutions; calories per serving and a daily log against a goal |
 | `notes` | This hub (SQLite) | Shared notes and small checklists for the household: colours, pinned notes, tick items on the card, phone notification for new notes |
 | `media` | TMDB / Cinemeta, Torrentio, Knaben, TPB, EZTV (+ YTS, ilCorSaRoNeRo, 1337x via proxy/VPN), Transmission, NAS | Discover, search, one-click download, watchlist + notifications, library on the NAS |
+| `torrents` | Providers you enable (Internet Archive built in; add your own, see docs/torrents.md) | Search box with sorting, filters, dedupe, per-provider errors; copy/open magnet or `.torrent` |
+| `games` | NAS games folder + the agent on the Steam Deck (`deploy/deck/`) | Browse games, one-tap install/update/remove on the Deck (PC, Linux, ROMs), Steam shortcuts, resumable downloads. See docs/games.md |
 
 ## Layout
 

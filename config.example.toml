@@ -137,3 +137,19 @@ url = "http://127.0.0.1:9091/transmission/rpc"
 # (ilCorSaRoNeRo, 1337x, YTS mirrors). socks5h = DNS resolved by the proxy.
 # url = "socks5h://user:pass@host:1080"   or   "http://host:3128"
 url = ""
+
+[plugins.torrents]
+# Search box over the providers you enable (docs/torrents.md). "internetarchive" works out of the box.
+providers = ["internetarchive"]
+# extra_dir = "/home/pi/casa-sources"   # your own provider .py files
+# timeout = 10
+# page_size = 20
+
+[plugins.games]
+# Games on the NAS -> Steam Deck (docs/games.md). Needs the agent on the Deck (deploy/deck/).
+# library = "/mnt/nas/games"        # default: <NAS mount>/games, with pc/ and emu/<system>/
+# base_url = "http://casa.local:8080"   # only if the Deck can't reach the address you use in the app
+[plugins.games.deck]
+host = "steamdeck.local"
+token = ""                           # printed by deploy/deck/install-deck.sh
+# port = 8765

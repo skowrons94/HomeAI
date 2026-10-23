@@ -44,6 +44,11 @@ def _json(data, status=200):
     return web.json_response(data, status=status, dumps=lambda o: json.dumps(o, default=str))
 
 
+# Plugin routes that carry their own credential (the Steam Deck agent has no login cookie: the
+# games plugin checks a signed, expiring link on every request to /dl/).
+PUBLIC_PREFIXES = ("/api/p/games/dl/",)
+
+
 class WebServer:
     def __init__(self, hub, cfg: dict, static_dir: Path):
         self.hub = hub
@@ -162,6 +167,7 @@ class WebServer:
     async def _auth(self, request, handler):
         if (self.password and request.path.startswith("/api/")
                 and request.path not in ("/api/login", "/api/i18n")
+                and not request.path.startswith(PUBLIC_PREFIXES)
                 and not hmac.compare_digest(request.cookies.get(COOKIE, ""), self.token)):
             return _json({"error": "login required"}, 401)
         return await handler(request)

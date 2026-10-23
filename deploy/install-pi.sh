@@ -92,6 +92,7 @@ ls "$MOUNT" >/dev/null && echo "NAS mounted: $(ls "$MOUNT" | tr '\n' ' ')" \
   || echo "!! NAS not mounted yet - check $CRED and the share name, then: sudo mount $MOUNT"
 [ "$TRANSMISSION" = 1 ] && sudo usermod -aG debian-transmission "$USER_NAME"
 mkdir -p "$DOWNLOAD_DIR" 2>/dev/null || true
+mkdir -p "$MOUNT/games/pc" "$MOUNT/games/emu" 2>/dev/null || true   # games plugin library (docs/games.md)
 else
   [ "$TRANSMISSION" = 1 ] && sudo usermod -aG debian-transmission "$USER_NAME"
   sudo mkdir -p "$MOUNT"

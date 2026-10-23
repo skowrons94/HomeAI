@@ -1,0 +1,16 @@
+.tr-form { display: flex; gap: 8px; margin-bottom: 10px; }
+.tr-form input { flex: 1; min-width: 0; min-height: 44px; }
+.tr-form button, .tr-actions .button, .tr-actions button, .tr-more { min-height: 44px; }
+.tr-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+.tr-filters label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted, inherit); }
+.tr-filters select, .tr-filters input { min-height: 40px; }
+@media (min-width: 700px) { .tr-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.tr-list { display: flex; flex-direction: column; gap: 8px; }
+.tr-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow); padding: 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.tr-title { font-weight: 600; overflow-wrap: anywhere; line-height: 1.3; }
+.tr-meta { font-size: 13px; opacity: .75; }
+.tr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.tr-warn, .tr-error { border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; margin-bottom: 8px;
+  border: 1px solid var(--line); overflow-wrap: anywhere; }
+.tr-error { border-color: #d9534f; }
