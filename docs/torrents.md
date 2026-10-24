@@ -84,6 +84,27 @@ timeouts, HTTP 429/503 (`Retry-After`), other HTTP errors and invalid JSON. Miss
 - **Errors**: each provider has its own status in `providers[]`; a timeout, crash or bad answer in
   one never hides the others. A rate-limited provider is skipped until its `Retry-After` passes.
 
+## Download into the right library
+
+Every result has a **Download** button. The hub guesses what it is from the name
+(`hub/plugins/torrents/identify.py`: film, series, music or game, plus title/year, season/episode,
+artist/album, game platform), the sheet lets you correct it — for films and series you pick the
+TMDB match — and shows where it will go. The release is then handed to the plugin that owns that
+library, which downloads it with Transmission and files it exactly as from its own page:
+
+| Kind | Plugin | Folder |
+|---|---|---|
+| film / series | `media` (`accept_download`) | `movies/Title (year)/`, `series/Show/Season N/` |
+| game | `games` (`finder.add`) | `games/pc`, `games/emu/<system>` |
+| music | `music` (`accept_download`) | `music/Artist/Album (year)/` |
+
+`POST /api/p/torrents/identify {title, kind?, query?}` → `{kind, confidence, guess, candidates[], available}`;
+`POST /api/p/torrents/download {result, kind, guess}` → `{ok, kind, hash}`;
+`GET /api/p/torrents/downloads` → what is in progress, whichever page started it.
+
+The Media plugin also searches your own Torznab trackers (Jackett, Prowlarr…) on every film/series
+page, next to its built-in sites.
+
 ## API
 
 `GET /api/p/torrents/search?q=…&sort=&order=&page=&min_seeders=&min_size=&max_size=&providers=a,b`

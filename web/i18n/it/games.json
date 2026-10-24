@@ -105,5 +105,22 @@
   "The torrent is no longer in Transmission": "Il torrent non è più in Transmission",
   "The downloaded files were not found": "I file scaricati non sono stati trovati",
   "Could not unpack: {err}": "Impossibile estrarre: {err}",
-  "Archive {name} needs 7z, unar or unrar on the hub to unpack": "L'archivio {name} richiede 7z, unar o unrar sul hub per essere estratto"
+  "Archive {name} needs 7z, unar or unrar on the hub to unpack": "L'archivio {name} richiede 7z, unar o unrar sul hub per essere estratto",
+  "IGDB: check the client id and secret": "IGDB: controlla client id e secret",
+  "IGDB unreachable: {err}": "IGDB non raggiungibile: {err}",
+  "IGDB keys not set": "Chiavi IGDB non impostate",
+  "IGDB rate limit, try again later": "Limite di richieste IGDB, riprova più tardi",
+  "IGDB answered HTTP {code}": "IGDB ha risposto HTTP {code}",
+  "IGDB refused the token": "IGDB ha rifiutato il token",
+  "SteamGridDB: check the API key": "SteamGridDB: controlla la chiave API",
+  "too many files in the archive": "troppi file nell'archivio",
+  "unsafe path in the archive: {name}": "percorso non sicuro nell'archivio: {name}",
+  "the archive looks like a zip bomb": "l'archivio sembra una zip bomb",
+  "the archive is too large": "l'archivio è troppo grande",
+  "not a valid zip: {err}": "zip non valido: {err}",
+  "not enough free space to unpack": "spazio insufficiente per estrarre",
+  "could not unpack {name}: {err}": "impossibile estrarre {name}: {err}",
+  "unpacking took too long": "l'estrazione ha impiegato troppo tempo",
+  "{tool} failed (exit {code})": "{tool} non riuscito (uscita {code})",
+  "outside the games folder": "fuori dalla cartella dei giochi"
 }

@@ -1,6 +1,6 @@
 // Torrent search: one box over the providers enabled in Settings (hub/plugins/torrents/).
 // Route: #/torrents. Results are normalised by the hub; filters and sorting run server-side.
-import { api, h, icon, toast, ensureCss, fmt, t, sheet } from "../app.js";
+import { api, h, icon, toast, ensureCss, fmt, t, sheet, act } from "../app.js";
 
 const state = { q: "", sort: "relevance", order: "desc", minSeeders: 0, maxGb: 0, page: 1, results: [], ids: new Set() };
 let seq = 0;          // ignore answers of superseded searches
@@ -29,9 +29,10 @@ function card(r) {
     h("div.tr-title", r.title),
     h("div.tr-meta", meta),
     h("div.tr-actions",
+      h("button.primary", { onclick: () => downloadSheet(r) }, icon("download"), t("Download")),
       r.magnet ? h("button", { onclick: () => copy(r.magnet) }, t("Copy magnet")) : null,
-      r.magnet ? h("a.button", { href: r.magnet }, t("Open magnet")) : null,
-      r.url ? h("a.button", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, t("Torrent file")) : null));
+      r.magnet ? h("a.btn", { href: r.magnet }, t("Open magnet")) : null,
+      r.url ? h("a.btn", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, t("Torrent file")) : null));
 }
 
 function status(list) {
@@ -193,6 +194,122 @@ async function run(append = false) {
   }
 }
 
+// -- one Download button for every library ---------------------------------------------------
+// The hub guesses film / series / music / game from the name; the user confirms or corrects it,
+// then the owning plugin downloads it with Transmission and files it in its library folder.
+
+const KIND_LABEL = () => ({ movie: t("Film"), series: t("Series"), music: t("Music"), game: t("Game") });
+let gamePlatforms = null;   // [[key, label]] from the Games plugin: one list for every page
+async function platformsList() {
+  if (!gamePlatforms) {
+    try { gamePlatforms = (await api("p/games/find/platforms")).map((p) => [p.key, p.label]); }
+    catch { gamePlatforms = [["pc", "PC"]]; }
+  }
+  return gamePlatforms;
+}
+
+function downloadSheet(r) {
+  const st = { kind: null, guess: {}, candidates: [], pick: null, available: {}, query: "" };
+  const s = sheet(t("Download"), h("div.muted", t("Working out what it is…")));
+  const field = (label, value, set, attrs = {}) => h("label.tr-field", label,
+    h("input", { value: value ?? "", oninput: (e) => set(e.target.value), ...attrs }));
+
+  async function load(kind, query) {
+    const d = await api("p/torrents/identify", { body: { title: r.title, kind, query } });
+    Object.assign(st, { kind: d.kind, guess: d.guess || {}, candidates: d.candidates || [], available: d.available || {} });
+    if (st.kind === "game") st.platforms = await platformsList();
+    st.pick = st.candidates[0] || null;
+    st.query = st.guess.query || st.query;
+    draw();
+  }
+
+  function dest() {
+    const g = st.guess;
+    if (st.kind === "movie") return st.pick ? `movies/${st.pick.title}${st.pick.year ? ` (${st.pick.year})` : ""}` : "movies/";
+    if (st.kind === "series") return st.pick ? `series/${st.pick.title}` : "series/";
+    if (st.kind === "game") return g.platform && g.platform !== "pc" ? `games/emu/${g.platform}` : "games/pc";
+    return `music/${g.artist || "?"}${g.album ? `/${g.album}${g.year ? ` (${g.year})` : ""}` : ""}`;
+  }
+
+  function details() {
+    const g = st.guess;
+    if (st.kind === "movie" || st.kind === "series") {
+      const search = h("form.row.tr-idsearch", { onsubmit: (e) => { e.preventDefault(); act(() => load(st.kind, st.query)); } },
+        h("input", { type: "search", value: st.query, enterkeyhint: "search", placeholder: t("Title"),
+                     oninput: (e) => { st.query = e.target.value; } }),
+        h("button", { type: "submit", "aria-label": t("Search") }, icon("search")));
+      const list = st.candidates.length
+        ? h("div.tr-cands", st.candidates.map((c) => h(`button.tr-cand${st.pick?.id === c.id ? ".on" : ""}`,
+            { onclick: () => { st.pick = c; draw(); } },
+            c.poster ? h("img", { src: c.poster, alt: "", loading: "lazy" }) : h("div.tr-noposter", icon("film")),
+            h("div.tr-cand-t", h("b", c.title), h("span.muted", c.year || "")))))
+        : h("p.muted", t("Nothing found: try another title."));
+      const se = st.kind === "series" ? h("div.row.wrap",
+        field(t("Season"), g.season, (v) => { g.season = v === "" ? null : +v; }, { type: "number", min: 0, inputmode: "numeric" }),
+        field(t("Episode"), g.episode, (v) => { g.episode = v === "" ? null : +v; }, { type: "number", min: 0, inputmode: "numeric" }))
+        : null;
+      return [search, list, se];
+    }
+    if (st.kind === "game") return [
+      field(t("Title"), g.title, (v) => { g.title = v; }),
+      h("label.tr-field", t("Platform"), h("select", { onchange: (e) => { g.platform = e.target.value; draw(); } },
+        (st.platforms || [["pc", "PC"]]).map(([k, l]) => h("option", { value: k, selected: (g.platform || "pc") === k }, l))))];
+    return [
+      field(t("Artist"), g.artist, (v) => { g.artist = v; draw(false); }),
+      field(t("Album"), g.album, (v) => { g.album = v; draw(false); }),
+      field(t("Year"), g.year, (v) => { g.year = v ? +v : null; draw(false); }, { type: "number", inputmode: "numeric" })];
+  }
+
+  let destEl;
+  function draw(full = true) {
+    if (!full && destEl) { destEl.textContent = dest(); return; }
+    const labels = KIND_LABEL();
+    const seg = h("div.seg.tr-kinds", ["movie", "series", "music", "game"].map((k) =>
+      h(`button${st.kind === k ? ".active" : ""}`, { type: "button", disabled: st.available[k] === false,
+        onclick: () => k !== st.kind && act(() => load(k)) }, labels[k])));
+    destEl = h("b", dest());
+    const missing = st.available[st.kind] === false;
+    const ok = !missing && ((st.kind !== "movie" && st.kind !== "series") || st.pick);
+    const go = h("button.primary.tr-go", { disabled: !ok, onclick: (e) => act(async () => {
+      const guess = st.kind === "movie" || st.kind === "series"
+        ? { id: st.pick.id, season: st.guess.season ?? null, episode: st.guess.episode ?? null }
+        : st.guess;
+      await api("p/torrents/download", { body: { result: r, kind: st.kind, guess } });
+      toast(t("Downloading: {what}", { what: dest() }));
+      s.close();
+      loadDownloads();
+    }, e.currentTarget) }, icon("download"), t("Download"));
+    s.el.replaceChildren(
+      h("div.tr-title", r.title),
+      h("div.tr-meta", [r.size != null ? fmt.bytes(r.size) : null, r.seeders != null ? `▲ ${r.seeders}` : null]
+        .filter(Boolean).join(" · ")),
+      seg,
+      missing ? h("p.tr-warn", t("Turn on the {name} plugin to download this", { name: t(st.kind === "game" ? "Games" : st.kind === "music" ? "Music" : "Media") })) : null,
+      ...details(),
+      h("p.tr-dest", t("It will go to"), " ", destEl),
+      go);
+  }
+
+  act(() => load()).then(() => { if (!st.kind) s.close(); });
+}
+
+// downloads started from any page, shown on top while something is in progress
+let dlTimer = null;
+async function loadDownloads() {
+  clearTimeout(dlTimer);
+  if (!els.downloads?.isConnected) return;
+  let list = [];
+  try { list = await api("p/torrents/downloads"); } catch { list = []; }
+  const labels = KIND_LABEL();
+  els.downloads.replaceChildren(...(list.length ? [
+    h("h3.tr-h", t("In progress")),
+    h("div.tr-dl", list.map((d) => h("a.tr-dlrow", { href: d.page || "#/torrents" },
+      h("div.tr-dl-top", h("span.chip", labels[d.kind] || d.kind), h("span.tr-dl-t", d.title || d.name)),
+      h("div.tr-bar", h("i", { style: `width:${Math.round((d.progress || 0) * 100)}%` })),
+      h(`div.tr-dl-s${d.error ? ".bad" : ""}`, d.error || `${Math.round((d.progress || 0) * 100)}% · ${d.state || ""}`))))] : []));
+  if (list.length) dlTimer = setTimeout(loadDownloads, 4000);
+}
+
 const option = (value, label, cur) => h("option", { value, selected: value === cur }, label);
 
 export default {
@@ -201,7 +318,7 @@ export default {
     const input = h("input", { type: "search", placeholder: t("Search…"), value: state.q, maxlength: 100,
                                enterkeyhint: "search", oninput: (e) => { state.q = e.target.value; } });
     els = { go: h("button.primary", { type: "submit" }, icon("search"), t("Search")),
-            status: h("div.tr-status"), searched: h("div.row.wrap.tr-searched"), list: h("div.tr-list") };
+            status: h("div.tr-status"), downloads: h("div.tr-downloads"), searched: h("div.row.wrap.tr-searched"), list: h("div.tr-list") };
     const again = () => state.q && run();
     root.replaceChildren(
       h("div.row", h("h1", t("Torrents")), h("div.spacer"),
@@ -217,8 +334,9 @@ export default {
           onchange: (e) => { state.minSeeders = Math.max(0, +e.target.value || 0); again(); } })),
         h("label", t("Max size (GB)"), h("input", { type: "number", min: 0, step: "0.5", value: state.maxGb,
           onchange: (e) => { state.maxGb = Math.max(0, +e.target.value || 0); again(); } }))),
-      els.searched, els.status, els.list);
+      els.downloads, els.searched, els.status, els.list);
     draw();
     loadEnabled();
+    loadDownloads();
   },
 };

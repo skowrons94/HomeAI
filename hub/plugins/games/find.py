@@ -31,9 +31,10 @@ TOOL_TIMEOUT = 3600
 
 PLATFORMS = [
     ("pc", "PC"), ("nes", "NES"), ("snes", "Super Nintendo"), ("n64", "Nintendo 64"), ("gb", "Game Boy"),
-    ("gbc", "Game Boy Color"), ("gba", "Game Boy Advance"), ("nds", "Nintendo DS"), ("3ds", "Nintendo 3DS"),
-    ("gc", "GameCube"), ("wii", "Wii"), ("psx", "PlayStation"), ("ps2", "PlayStation 2"),
-    ("psp", "PlayStation Portable"), ("genesis", "Sega Genesis / Mega Drive"), ("mastersystem", "Sega Master System"),
+    ("gbc", "Game Boy Color"), ("gba", "Game Boy Advance"), ("nds", "Nintendo DS"), ("n3ds", "Nintendo 3DS"),
+    ("gc", "GameCube"), ("wii", "Wii"), ("wiiu", "Wii U"), ("switch", "Nintendo Switch"),
+    ("psx", "PlayStation"), ("ps2", "PlayStation 2"), ("psp", "PlayStation Portable"), ("psvita", "PlayStation Vita"),
+    ("genesis", "Sega Genesis / Mega Drive"), ("mastersystem", "Sega Master System"),
     ("gamegear", "Sega Game Gear"), ("saturn", "Sega Saturn"), ("dreamcast", "Sega Dreamcast"),
     ("arcade", "Arcade"), ("neogeo", "Neo Geo"), ("atari2600", "Atari 2600"), ("pcengine", "PC Engine"),
 ]
@@ -61,30 +62,30 @@ def zip_plan(zf: zipfile.ZipFile, dest: Path) -> list[tuple[zipfile.ZipInfo, Pat
     """Validate every member (zip-slip, symlinks, absurd sizes) → [(member, target path)]."""
     infos = zf.infolist()
     if len(infos) > MAX_ENTRIES:
-        raise UnpackError("too many files in the archive")
+        raise UnpackError(_("too many files in the archive"))
     base = dest.resolve()
     plan, total = [], 0
     for info in infos:
         name = info.filename.replace("\\", "/")
         if name.startswith("/") or re.match(r"^[A-Za-z]:", name) or "\x00" in name:
-            raise UnpackError("unsafe path in the archive: %s" % info.filename)
+            raise UnpackError(_("unsafe path in the archive: {name}", name=info.filename))
         parts = [p for p in name.split("/") if p not in ("", ".")]
         if ".." in parts:
-            raise UnpackError("unsafe path in the archive: %s" % info.filename)
+            raise UnpackError(_("unsafe path in the archive: {name}", name=info.filename))
         if not parts:
             continue
         if (info.external_attr >> 16) & 0o170000 == 0o120000:      # symlink member
             continue
         target = (base.joinpath(*parts)).resolve()
         if not _inside(base, target):
-            raise UnpackError("unsafe path in the archive: %s" % info.filename)
+            raise UnpackError(_("unsafe path in the archive: {name}", name=info.filename))
         if not info.is_dir():
             total += info.file_size
             if info.file_size > (1 << 20) and info.file_size > max(info.compress_size, 1) * MAX_RATIO:
-                raise UnpackError("the archive looks like a zip bomb")
+                raise UnpackError(_("the archive looks like a zip bomb"))
         plan.append((info, target))
     if total > MAX_UNPACKED:
-        raise UnpackError("the archive is too large")
+        raise UnpackError(_("the archive is too large"))
     return plan
 
 
@@ -93,13 +94,13 @@ def unzip(archive: Path, dest: Path) -> int:
     try:
         zf = zipfile.ZipFile(archive)
     except (zipfile.BadZipFile, OSError) as err:
-        raise UnpackError("not a valid zip: %s" % err)
+        raise UnpackError(_("not a valid zip: {err}", err=err))
     with zf:
         plan = zip_plan(zf, dest)
         need = sum(i.file_size for i, _t in plan if not i.is_dir())
         dest.mkdir(parents=True, exist_ok=True)
         if shutil.disk_usage(dest).free < need * 1.02 + (100 << 20):
-            raise UnpackError("not enough free space to unpack")
+            raise UnpackError(_("not enough free space to unpack"))
         n = 0
         for info, target in plan:
             if info.is_dir():
@@ -115,11 +116,11 @@ def unzip(archive: Path, dest: Path) -> int:
                             break
                         written += len(chunk)
                         if written > info.file_size:          # the header lied
-                            raise UnpackError("the archive looks like a zip bomb")
+                            raise UnpackError(_("the archive looks like a zip bomb"))
                         out.write(chunk)
             except (zipfile.BadZipFile, RuntimeError, OSError) as err:
                 target.unlink(missing_ok=True)
-                raise UnpackError("could not unpack %s: %s" % (info.filename, err))
+                raise UnpackError(_("could not unpack {name}: {err}", name=info.filename, err=err))
             except UnpackError:
                 target.unlink(missing_ok=True)
                 raise
@@ -182,35 +183,61 @@ async def run_tool(cmd: list[str], archive: Path, dest: Path) -> None:
         code = await asyncio.wait_for(proc.wait(), TOOL_TIMEOUT)
     except asyncio.TimeoutError:
         proc.kill()
-        raise UnpackError("unpacking took too long")
+        raise UnpackError(_("unpacking took too long"))
+    except asyncio.CancelledError:   # plugin reload: don't leave a second extractor running
+        proc.kill()
+        raise
     if code != 0:
-        raise UnpackError("%s failed (exit %d)" % (base, code))
+        raise UnpackError(_("{tool} failed (exit {code})", tool=base, code=code))
+
+
+_UNPACKING: set[str] = set()   # archives being unpacked (process-wide: survives a plugin reload)
+
+
+def _unzip_marked(arc: Path, dest: Path, key: str) -> None:
+    try:
+        unzip(arc, dest)
+    finally:            # in the worker thread: cleared when the unzip really ends, even after a cancel
+        _UNPACKING.discard(key)
 
 
 async def unpack_payload(payload: Path, root: Path) -> str:
     """Unpack every archive of a finished download in place. → "" when done, else a reason it needs a hand."""
     root = root.resolve()
     if not _inside(root, payload.resolve()) or payload.resolve() == root:
-        raise UnpackError("outside the games folder")
+        raise UnpackError(_("outside the games folder"))
+    if _inside(root / "emu", payload.resolve()):
+        return ""   # ROMs: emulators read .zip/.7z directly, and arcade/Neo Geo sets must stay zipped
     loop = asyncio.get_running_loop()
-    for arc in find_archives(payload):
+    for arc in await loop.run_in_executor(None, find_archives, payload):   # NAS walk: off the event loop
         if not _inside(root, arc.resolve()):
+            continue
+        key = str(arc.resolve())
+        while key in _UNPACKING:        # the same archive from before a reload: let it finish
+            await asyncio.sleep(2)
+        if not await loop.run_in_executor(None, arc.exists):
             continue
         in_pc = arc.parent.resolve() == root / "pc"        # a bare archive straight in pc/
         name = arc.name.lower()
         if name.endswith(".zip"):
             if in_pc:
-                dest = arc.parent if zip_single_top(arc) else arc.parent / arc.stem
+                single = await loop.run_in_executor(None, zip_single_top, arc)
+                dest = arc.parent if single else arc.parent / arc.stem
             else:
                 dest = arc.parent
-            await loop.run_in_executor(None, unzip, arc, dest)
+            _UNPACKING.add(key)
+            await loop.run_in_executor(None, _unzip_marked, arc, dest, key)
         else:
             cmd = tool_for(name)
             if not cmd:
                 return _("Archive {name} needs 7z, unar or unrar on the hub to unpack", name=arc.name)
             dest = arc.parent / arc.stem if in_pc else arc.parent
-            await run_tool(cmd, arc, dest)
-        arc.unlink()
+            _UNPACKING.add(key)
+            try:
+                await run_tool(cmd, arc, dest)
+            finally:
+                _UNPACKING.discard(key)
+        await loop.run_in_executor(None, arc.unlink)
     return ""
 
 

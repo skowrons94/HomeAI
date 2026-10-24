@@ -305,3 +305,4 @@ button.icon.m-add { background: var(--ok); color: #fff; min-width: 32px; min-hei
 @media (pointer: coarse) {
   input, select, textarea { font-size: 16px !important; }
 }
+.page-root { display: contents; }

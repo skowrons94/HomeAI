@@ -26,7 +26,9 @@ Transmission downloads into the NAS library, favourites with notifications.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import time
 from datetime import date
@@ -43,6 +45,8 @@ from .ranking import Profile, Want, parse, rank
 from .subtitles import Subtitles, Video
 from .transmission import Transmission
 from .watcher import Watcher
+
+log = logging.getLogger("hub.media")
 
 
 def _json(data, status=200):
@@ -225,7 +229,11 @@ class MediaPlugin(Plugin):
         want = Want(titles=q.titles, year=item.get("year") if item["type"] == "movie" else None,
                     type=item["type"], season=season, episode=episode,
                     original_language=item.get("original_language") or "en")
-        releases, stats = await self.indexers.search(q)
+        (releases, stats), (extra, extra_stats) = await asyncio.gather(self.indexers.search(q),
+                                                                       self._tracker_releases(q))
+        seen = {r["hash"] for r in releases}
+        releases += [r for r in extra if r["hash"] not in seen]
+        stats.update(extra_stats)
         profile = self.profile
         if show_all:
             profile = Profile(**{**profile.__dict__, "show_all": True})
@@ -239,6 +247,27 @@ class MediaPlugin(Plugin):
             self._releases[r["hash"]] = (now, r)
         best = next((r for r in ranked if not r["rejected"]), None)
         return {"releases": ranked[:120], "stats": stats, "best": best}
+
+    async def _tracker_releases(self, q: Query) -> tuple[list[dict], dict]:
+        """Also ask the user's own trackers (Torznab: Jackett, Prowlarr…) added in Torrents →
+        Trackers. The Media sites there are the ones searched above, so they are skipped."""
+        t = self.hub.plugins.get("torrents")
+        if t is None or not getattr(t, "engine", None):
+            return [], {}
+        ids = sorted(i for i in t.enabled_ids() if getattr(t.engine.providers.get(i), "kind", None) == "torznab")
+        if not ids:
+            return [], {}
+        try:
+            merged, statuses, _more = await t.engine.search(t.session, q.text(q.titles[0]), 1, 50, ids)
+        except Exception as err:
+            log.warning("tracker search: %s", err)
+            return [], {}
+        rels = [{"name": r.title, "hash": r.hash.lower(), "size": r.size or 0, "seeders": r.seeders or 0,
+                 "leechers": r.leechers or 0, "source": r.source}
+                for r in merged if r.hash and len(r.hash) == 40]   # media needs an infohash (magnet)
+        stats = {st["name"]: ({"count": st.get("count", 0)} if st.get("ok") else {"error": st.get("error")})
+                 for st in statuses}
+        return rels, stats
 
     # -- routes ----------------------------------------------------------------------------
 
@@ -352,6 +381,24 @@ class MediaPlugin(Plugin):
                 return _json({"error": _("no acceptable release found")}, 404)
         result = await self.downloads.add(item, rel, season, episode)
         return _json({"ok": True, **result, "release": rel})
+
+    async def accept_download(self, result: dict, guess: dict) -> dict:
+        """A release picked in the general Torrents search: ``guess`` names the TMDB/IMDb item
+        ({type, id, season?, episode?}); the usual import files it under movies/ or series/."""
+        if guess.get("type") not in ("movie", "series") or not guess.get("id"):
+            raise ValueError(_("Pick the film or series first"))
+        item = await self.metadata.details(guess["type"], str(guess["id"]))
+        p = parse(result.get("title") or "")
+        season = guess.get("season", p.season) if item["type"] == "series" else None
+        episode = guess.get("episode", p.episode) if item["type"] == "series" else None
+        quality = " ".join(x for x in [f"{p.resolution}p" if p.resolution else "", p.source or ""] if x)
+        release = {"name": result.get("title") or item["title"], "magnet": result.get("magnet") or result.get("url"),
+                   "hash": (result.get("hash") or "").lower(), "size": result.get("size"), "quality": quality,
+                   "pack": item["type"] == "series" and episode is None, "file_idx": None,
+                   "language": None, "audio": sorted(p.audio)}
+        if not release["magnet"] and not release["hash"]:
+            raise ValueError(_("Give a magnet link or a torrent URL"))
+        return await self.downloads.add(item, release, season, episode)
 
     async def r_watchlist(self, request):
         return _json(self.watcher.items())

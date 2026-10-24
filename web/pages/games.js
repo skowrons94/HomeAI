@@ -291,22 +291,25 @@ async function loadPlatforms() {
   drawPlat();
 }
 
+let findSeq = 0;   // ignore answers of superseded searches (trackers can take 10 s)
 async function search(fresh = true) {
   const q = fx.q.trim();
   if (q.length < 2) { fx.error = t("Type at least 2 characters"); drawResults(); return; }
+  const my = ++findSeq, plat = view.fplat;
   if (fresh) { fx.page = 1; fx.results = []; } else fx.page += 1;
   fx.loading = true; fx.error = ""; fx.off = false; fx.searched = true;
   drawResults();
   try {
-    const d = await P(`find?q=${encodeURIComponent(q)}&platform=${encodeURIComponent(view.fplat)}&page=${fx.page}`);
-    if (d.disabled || d.enabled === false || d.torrents === false) fx.off = true;
+    const d = await P(`find?q=${encodeURIComponent(q)}&platform=${encodeURIComponent(plat)}&page=${fx.page}`);
+    if (my !== findSeq) return;
+    fx.off = !!d.disabled;
+    fx.plat = plat;   // the platform these results were searched for: downloads go there
     fx.results = fresh ? (d.results || []) : fx.results.concat(d.results || []);
     fx.providers = d.providers || [];
     fx.more = !!d.has_more;
     fx.error = d.error || "";
-    if (!fx.results.length && !fx.providers.length && /torrent/i.test(fx.error) && /(enable|disabled|off|no tracker|turn)/i.test(fx.error)) fx.off = true;
   } catch (e) {
-    if (/torrent/i.test(e.message) || /HTTP (404|501|503)/.test(e.message)) fx.off = true;
+    if (my !== findSeq) return;
     fx.error = e.message;
   }
   fx.loading = false;
@@ -314,13 +317,14 @@ async function search(fresh = true) {
 }
 
 function confirmDownload(r) {
-  const dest = view.fplat === "pc" ? "games/pc" : `games/emu/${view.fplat}`;
+  const plat = fx.plat || view.fplat;
+  const dest = plat === "pc" ? "games/pc" : `games/emu/${plat}`;
   const s = sheet(t("Download"), [
     h("div.gm-dtitle", { style: { fontSize: "17px" } }, r.title),
     h("div.gm-meta", [r.size ? fmt.bytes(r.size) : "", r.seeders != null ? t("{n} seeders", { n: r.seeders }) : ""].filter(Boolean).join(" · ")),
     h("div.gm-banner.info", icon("nas"), h("span", t("Downloads to {dest} on the NAS", { dest }))),
     h("button.primary.lg", { onclick: (e) => act(async () => {
-      await P("find/download", { body: { title: r.title, platform: view.fplat, magnet: r.magnet, url: r.url } });
+      await P("find/download", { body: { title: r.title, platform: plat, magnet: r.magnet, url: r.url } });
       toast(t("Download started")); s.close(); await loadDownloads(); schedule();
     }, e.currentTarget) }, icon("download"), t("Download")),
   ]);
@@ -596,7 +600,7 @@ export default {
       h("div.gm-chipwrap", els.chips));
     els.libPane = h("div", els.banner, els.tools, els.grid);
 
-    els.fq = h("input", { type: "search", placeholder: t("Search a game…"), autocomplete: "off", enterkeyhint: "search",
+    els.fq = h("input", { type: "search", value: fx.q, placeholder: t("Search a game…"), autocomplete: "off", enterkeyhint: "search",
       "aria-label": t("Search"), oninput: (e) => { fx.q = e.target.value; } });
     els.fplat = h("div.gm-chips");
     els.results = h("div");

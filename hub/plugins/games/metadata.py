@@ -18,6 +18,8 @@ from urllib.parse import quote
 
 import aiohttp
 
+from ...i18n import _
+
 log = logging.getLogger("hub.games")
 
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
@@ -65,7 +67,7 @@ PLATFORMS = {
     "pc": {"pc", "win", "pc (microsoft windows)"}, "linux": {"linux", "pc", "win"},
     "nes": {"nes", "famicom"}, "snes": {"snes", "sfam", "super famicom"}, "n64": {"n64"},
     "gb": {"gb", "game boy"}, "gbc": {"gbc", "game boy color"}, "gba": {"gba", "game boy advance"},
-    "nds": {"nds", "nintendo ds"}, "3ds": {"3ds", "nintendo 3ds"}, "gc": {"ngc", "gc", "nintendo gamecube"},
+    "nds": {"nds", "nintendo ds"}, "3ds": {"3ds", "nintendo 3ds"}, "n3ds": {"3ds", "nintendo 3ds"}, "gc": {"ngc", "gc", "nintendo gamecube"},
     "gamecube": {"ngc", "gc", "nintendo gamecube"}, "wii": {"wii"}, "wiiu": {"wiiu", "wii u"},
     "switch": {"switch", "nintendo switch"},
     "psx": {"ps", "ps1", "psx", "playstation"}, "ps2": {"ps2", "playstation 2"}, "ps3": {"ps3", "playstation 3"},
@@ -190,7 +192,7 @@ class ImageCache:
             files = [(f.stat().st_mtime, f.stat().st_size, f) for f in self.dir.iterdir() if f.is_file()]
         except OSError:
             return 0
-        total, n = sum(s for _, s, _ in files), 0
+        total, n = sum(s for _p, s, _t in files), 0
         for _m, size, f in sorted(files, key=lambda x: x[0]):
             if total <= self.cap:
                 break
@@ -266,15 +268,15 @@ class Metadata:
                     timeout=aiohttp.ClientTimeout(total=15)) as r:
                 data = await r.json(content_type=None)
                 if r.status >= 400 or not isinstance(data, dict) or not data.get("access_token"):
-                    raise MetaError("IGDB: check the client id and secret")
+                    raise MetaError(_("IGDB: check the client id and secret"))
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise MetaError("IGDB unreachable: %s" % (str(err) or type(err).__name__))
+            raise MetaError(_("IGDB unreachable: {err}", err=str(err) or type(err).__name__))
         self._token, self._token_exp = data["access_token"], time.time() + float(data.get("expires_in") or 3600)
         return self._token
 
     async def _igdb(self, body: str) -> list[dict]:
         if not self.igdb:
-            raise MetaError("IGDB keys not set")
+            raise MetaError(_("IGDB keys not set"))
         for attempt in (0, 1):
             token = await self._auth()
             async with self._gap:               # serialised, with a pause: 4 req/s limit
@@ -288,18 +290,18 @@ class Metadata:
                         status = r.status
                         data = await r.json(content_type=None) if status < 400 else None
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
-                    raise MetaError("IGDB unreachable: %s" % (str(err) or type(err).__name__))
+                    raise MetaError(_("IGDB unreachable: {err}", err=str(err) or type(err).__name__))
                 finally:
                     self._last = time.monotonic()
             if status == 401 and attempt == 0:
                 self._token = ""
                 continue
             if status == 429:
-                raise MetaError("IGDB rate limit, try again later")
+                raise MetaError(_("IGDB rate limit, try again later"))
             if status >= 400 or not isinstance(data, list):
-                raise MetaError("IGDB answered HTTP %d" % status)
+                raise MetaError(_("IGDB answered HTTP {code}", code=status))
             return data
-        raise MetaError("IGDB refused the token")
+        raise MetaError(_("IGDB refused the token"))
 
     @staticmethod
     def _q(s: str) -> str:
@@ -329,7 +331,7 @@ class Metadata:
         name = name_base + ext
         if not SAFE_NAME.match(name):
             return None
-        self.cache.put(name, data)
+        await asyncio.get_running_loop().run_in_executor(None, self.cache.put, name, data)
         return name
 
     async def _sgdb(self, path: str) -> list[dict]:
@@ -337,7 +339,7 @@ class Metadata:
             async with self.session.get(SGDB_URL + path, headers={"Authorization": "Bearer " + self.sgdb_key},
                                         timeout=aiohttp.ClientTimeout(total=20)) as r:
                 if r.status in (401, 403):
-                    raise MetaError("SteamGridDB: check the API key")
+                    raise MetaError(_("SteamGridDB: check the API key"))
                 if r.status >= 400:
                     return []
                 data = await r.json(content_type=None)
@@ -407,7 +409,7 @@ class Metadata:
                 meta.pop(k, None)
             meta.update(files=files, fetched=time.time())
             self._save(gid, meta)
-            self.cache.evict()
+            await asyncio.get_running_loop().run_in_executor(None, self.cache.evict)
             self.error = ""
             return meta
         except MetaError as err:

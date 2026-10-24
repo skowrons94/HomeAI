@@ -448,7 +448,10 @@ export function pinnedTabs() {
   return ids.filter((id) => ok.has(id)).slice(0, MAX_TABS);
 }
 
+let navSeq = 0;   // a newer navigation supersedes a render still awaiting
+
 async function render() {
+  const my = ++navSeq;
   const [id = "home", ...args] = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
   const page = PAGES.find((p) => p.id === id) || PAGES[0];
   const pinned = pinnedTabs();
@@ -462,11 +465,18 @@ async function render() {
   cleanup = null;
   try {
     loaded[page.id] ??= (await import(`./pages/${page.id}.js?v=${window.CASA_V}`)).default;
-    main.replaceChildren();
-    cleanup = await loaded[page.id].render(main, args);
+    if (my !== navSeq) return;
+    // each render gets its own root: a slow page that finishes after the user moved on writes
+    // into a detached element instead of under the new page, and its cleanup runs at once
+    const root = h("div.page-root");
+    main.replaceChildren(root);
+    const done = await loaded[page.id].render(root, args);
+    if (my !== navSeq) { if (typeof done === "function") { try { done(); } catch {} } return; }
+    cleanup = done;
   } catch (e) {
     console.error(e);
-    main.replaceChildren(h("div.empty", t("Couldn't load {page}: {error}", { page: t(page.title), error: e.message })));
+    if (my === navSeq)
+      main.replaceChildren(h("div.empty", t("Couldn't load {page}: {error}", { page: t(page.title), error: e.message })));
   }
 }
 

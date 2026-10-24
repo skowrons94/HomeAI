@@ -57,5 +57,21 @@
   "Torznab URL": "URL Torznab",
   "Jackett, Prowlarr or any Torznab endpoint.": "Jackett, Prowlarr o qualsiasi endpoint Torznab.",
   "Save": "Salva",
-  "Cancel": "Annulla"
+  "Cancel": "Annulla",
+  "Working out what it is…": "Capisco di cosa si tratta…",
+  "Film": "Film",
+  "Music": "Musica",
+  "Game": "Gioco",
+  "Nothing found: try another title.": "Nessun risultato: prova un altro titolo.",
+  "Season": "Stagione",
+  "Episode": "Episodio",
+  "Platform": "Piattaforma",
+  "Artist": "Artista",
+  "Album": "Album",
+  "Year": "Anno",
+  "Turn on the {name} plugin to download this": "Attiva il plugin {name} per scaricarlo",
+  "It will go to": "Finirà in",
+  "Downloading: {what}": "Download avviato: {what}",
+  "Pick the film or series first": "Prima scegli il film o la serie",
+  "Pick what it is: film, series, music or game": "Scegli cos'è: film, serie, musica o gioco"
 }

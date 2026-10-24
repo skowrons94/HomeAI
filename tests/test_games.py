@@ -82,6 +82,7 @@ def test_missing_library_is_reported():
             hub = Hub({"homekit": {"enabled": False}}, Path(d))
             p = GamesPlugin(hub, {"library": d + "/nope"})
             await p.start()
+            await p._scan()          # start() scans in the background
             async with TestClient(TestServer(casa_app(p))) as c:
                 lib = await (await c.get("/api/p/games/library")).json()
                 assert lib["exists"] is False and lib["games"] == [] and lib["systems"] == [] and lib["problems"]
@@ -204,6 +205,7 @@ def test_full_install_flow():
             cfg = {"library": str(lib), "deck": {"host": "127.0.0.1", "port": deck.port, "token": TOKEN}}
             p = GamesPlugin(hub, cfg)
             await p.start()
+            await p._scan()          # start() scans in the background
             async with TestClient(TestServer(casa_app(p))) as c:
                 post = lambda path, body: c.post("/api/p/games" + path, json=body)
                 d0 = await (await c.get("/api/p/games/library")).json()
@@ -306,6 +308,7 @@ def test_deck_errors_are_reported():
             hub = Hub({"homekit": {"enabled": False}}, tmp / "hubdata")
             p = GamesPlugin(hub, {"library": str(tmp / "lib"), "deck": cfg_deck})
             await p.start()
+            await p._scan()          # start() scans in the background
             expect = expect()          # translated: the language is set once a Hub exists
             async with TestClient(TestServer(casa_app(p))) as c:
                 lib = await (await c.get("/api/p/games/library")).json()
@@ -340,6 +343,7 @@ def test_download_route_works_through_the_real_web_server_with_a_password():
             hub = Hub({"homekit": {"enabled": False}}, tmp / "hubdata")
             p = GamesPlugin(hub, {"library": str(tmp / "lib")})
             await p.start()
+            await p._scan()          # start() scans in the background
             hub.plugins["games"] = p
             ws = WebServer(hub, {"password": "secret"}, tmp / "static")
             async with TestClient(TestServer(ws.build())) as c:
@@ -471,6 +475,7 @@ def test_library_has_meta_cover_priority_and_art_for_the_deck():
         async def go():
             p = GamesPlugin(hub, {"library": str(lib)})
             await p.start()
+            await p._scan()          # start() scans in the background
             try:
                 assert not p.meta.configured and p._meta_queue == {}      # no keys: nothing is fetched
                 p.meta = FakeMeta(hub.store, p.session, tmp / "art", "id", "secret", "")
@@ -585,6 +590,7 @@ def test_find_and_download_flow():
         async def go():
             p = GamesPlugin(hub, {"library": str(lib)})
             await p.start()
+            await p._scan()          # start() scans in the background
             try:
                 async with TestClient(TestServer(casa_app(p))) as c:
                     r = await c.get("/api/p/games/find?q=celeste&platform=pc")

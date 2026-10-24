@@ -305,10 +305,14 @@ class Agent:
     def _worker(self) -> None:
         while True:
             gid = self.q.get()
+            with self.lock:
+                job = self.jobs.get(gid)
+            if job is None:           # removed while queued
+                continue
             try:
-                self._run(self.jobs[gid])
+                self._run(job)
             except Exception as err:  # never kill the worker
-                self._set(self.jobs[gid], state="failed", message=str(err) or type(err).__name__)
+                self._set(job, state="failed", message=str(err) or type(err).__name__)
 
     def _set(self, job: dict, **kw) -> None:
         with self.lock:
@@ -485,6 +489,9 @@ class Agent:
     def uninstall(self, gid: str) -> dict:
         """Delete the files this agent installed (never anything else, saves next to them stay)."""
         with self.lock:
+            cur = self.jobs.get(gid)
+            if cur and cur.get("state") in ("queued", "downloading", "finalizing"):
+                raise ValueError("still installing: wait for it to finish")
             reg = self.registry()
             e = reg.pop(gid, None)
             if not e:

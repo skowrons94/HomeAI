@@ -84,7 +84,13 @@ class GamesPlugin(Plugin):
 
     async def start(self):
         self.session = aiohttp.ClientSession()
-        self.secret = secrets.token_bytes(32)
+        # kept across restarts: saving Settings must not break a Deck install in progress
+        sec = self.hub.store.get("games.dl_secret")
+        if not isinstance(sec, str) or len(sec) < 64:
+            sec = secrets.token_hex(32)
+            self.hub.store.set("games.dl_secret", sec)
+        self.secret = bytes.fromhex(sec)
+        self._scan_lock = asyncio.Lock()
         self.games: dict[str, dict] = {}
         self.problems: list[dict] = []
         self.scanned = 0.0
@@ -100,8 +106,7 @@ class GamesPlugin(Plugin):
         self._meta_queue: dict[str, bool] = {}      # game id → force
         self._meta_task: asyncio.Task | None = None
         self._meta_busy = False
-        await self._scan()
-        self.hub.every(RESCAN, self._scan, name="games-rescan")
+        self.hub.every(RESCAN, self._scan, name="games-rescan", initial_delay=0)   # first scan off start()
         self.hub.every(5, self.finder.poll, name="games-downloads")
         self.hub.spawn(self.finder.resume(), name="games-resume")
 
@@ -121,11 +126,12 @@ class GamesPlugin(Plugin):
         return os.path.join(nas.get("mount_point") or DEFAULT_MOUNT, "games")
 
     async def _scan(self):
-        loop = asyncio.get_running_loop()
-        self.games, self.problems = {}, []
-        games, self.problems = await loop.run_in_executor(None, library.scan, self.root)
-        self.games = {g["id"]: g for g in games}
-        self.scanned = time.time()
+        # swap in the new list only when complete: a Deck download running during a rescan
+        # must keep finding its game (a 404 aborts the install)
+        async with self._scan_lock:
+            games, problems = await asyncio.get_running_loop().run_in_executor(None, library.scan, self.root)
+            self.games, self.problems = {g["id"]: g for g in games}, problems
+            self.scanned = time.time()
         if self.meta.configured:
             for gid in self.games:
                 if self.meta.get(gid) is None:
@@ -305,7 +311,7 @@ class GamesPlugin(Plugin):
     async def r_install(self, request):
         g = self._game((await self._body(request)).get("id"))
         exp = int(time.time()) + TTL
-        art = self._art(g)
+        art = await asyncio.get_running_loop().run_in_executor(None, self._art, g)   # up to 4 MB from disk
         job = {"id": g["id"], "title": g["title"], "version": g["version"], "kind": g["kind"],
                "system": g["system"], "exe": g["exe"], "folder": g["folder"] or g["title"] if g["kind"] != "rom" else g["folder"],
                "files": g["_list"], "base": self._base(request), "exp": exp, "sig": self._sig(g["id"], exp)}

@@ -16,6 +16,7 @@ from aiohttp import web
 from ...core import Plugin
 from ...i18n import _
 from .engine import SORTS, Engine, discover, refine
+from .identify import KINDS, identify
 from .model import Provider, to_int
 from .torznab import TorznabProvider, clean_url
 
@@ -145,7 +146,9 @@ class TorrentsPlugin(Plugin):
                 web.get("/trackers", self.r_trackers), web.post("/trackers", self.r_add),
                 web.post("/trackers/test", self.r_test_draft),
                 web.put("/trackers/{id}", self.r_edit), web.delete("/trackers/{id}", self.r_delete),
-                web.post("/trackers/{id}/test", self.r_test)]
+                web.post("/trackers/{id}/test", self.r_test),
+                web.post("/identify", self.r_identify), web.post("/download", self.r_download),
+                web.get("/downloads", self.r_downloads)]
 
     async def r_providers(self, request):
         en = self.enabled_ids()
@@ -255,6 +258,92 @@ class TorrentsPlugin(Plugin):
         error = None if any(s["ok"] for s in statuses) else _("Every provider failed. See details below.")
         return _json({"query": query, "page": page, "results": [r.to_dict() for r in results],
                       "providers": statuses, "has_more": has_more, "error": error})
+
+    # -- one Download button for every library ------------------------------------------------
+    # The release is handed to the plugin that owns its library: media (movies/, series/),
+    # games (games/pc, games/emu/<system>), music (music/<Artist>/<Album>). Each one downloads it
+    # with Transmission and files it when done, exactly as from its own page.
+
+    def _owner(self, kind: str):
+        name = {"movie": "media", "series": "media", "game": "games", "music": "music"}[kind]
+        p = self.hub.plugins.get(name)
+        if p is None:
+            raise ValueError(_("Turn on the {name} plugin to download this",
+                               name=_({"media": "Media", "games": "Games", "music": "Music"}[name])))
+        return p
+
+    async def r_identify(self, request):
+        b = await request.json()
+        title = str(b.get("title") or "")[:500]
+        out = identify(title)
+        kind = b.get("kind") if b.get("kind") in KINDS else out["kind"]
+        out["kind"] = kind
+        out["available"] = {k: self.hub.plugins.get(n) is not None
+                            for k, n in (("movie", "media"), ("series", "media"), ("game", "games"), ("music", "music"))}
+        out["candidates"] = []
+        if kind in ("movie", "series") and out["available"][kind]:
+            g = out["guess"] if out["guess"].get("query") else identify(title)["guess"]
+            query = str(b.get("query") or g.get("query") or title)[:MAX_QUERY]
+            try:
+                found = await self.hub.plugins["media"].metadata.search(query)
+            except Exception as err:
+                log.warning("identify %r: %s", query, err)
+                found = []
+            year = g.get("year")
+            found = [i for i in found if i.get("type") == kind] or found
+            found.sort(key=lambda i: 0 if year and i.get("year") == year else 1)   # stable: keeps TMDB order
+            out["candidates"] = [{k: i.get(k) for k in ("id", "type", "title", "year", "poster", "overview")}
+                                 for i in found[:6]]
+        return _json(out)
+
+    async def r_download(self, request):
+        b = await request.json()
+        r = b.get("result") or {}
+        kind, guess = b.get("kind"), b.get("guess") or {}
+        if kind not in KINDS:
+            raise ValueError(_("Pick what it is: film, series, music or game"))
+        magnet, url = str(r.get("magnet") or ""), str(r.get("url") or "")
+        if not magnet.startswith("magnet:") and not url.startswith(("http://", "https://")):
+            raise ValueError(_("Give a magnet link or a torrent URL"))
+        res = {"title": str(r.get("title") or "")[:500], "magnet": magnet, "url": url,
+               "hash": str(r.get("hash") or ""), "size": to_int(r.get("size"))}
+        owner = self._owner(kind)
+        if kind in ("movie", "series"):
+            out = await owner.accept_download(res, {**guess, "type": kind})
+        elif kind == "game":
+            title = str(guess.get("title") or res["title"])
+            out = {"hash": await owner.finder.add(title, str(guess.get("platform") or "pc"), magnet, url)}
+        else:
+            if not hasattr(owner, "accept_download"):
+                raise ValueError(_("Turn on the {name} plugin to download this", name=_("Music")))
+            out = await owner.accept_download(res, guess)
+        return _json({"ok": True, "kind": kind, "hash": (out or {}).get("hash")})
+
+    async def r_downloads(self, request):
+        """Everything in progress, whichever page started it."""
+        out = []
+        media = self.hub.plugins.get("media")
+        if media is not None and getattr(media, "downloads", None):
+            for r in media.downloads.rows(active_only=True):
+                out.append({"kind": r.get("type"), "title": r.get("title") or r.get("name"), "name": r.get("name"),
+                            "progress": r.get("progress") or 0, "state": r.get("state"), "error": r.get("error"),
+                            "page": "#/media"})
+        games = self.hub.plugins.get("games")
+        if games is not None and getattr(games, "finder", None):
+            for e in games.finder.listing():
+                if e.get("state") in ("downloading", "extracting"):
+                    out.append({"kind": "game", "title": e.get("title"), "name": e.get("title"),
+                                "progress": e.get("progress") or 0, "state": e.get("state"), "error": e.get("error"),
+                                "page": "#/games"})
+        music = self.hub.plugins.get("music")
+        listing = getattr(music, "downloads_listing", None) if music is not None else None
+        if listing:
+            for e in listing():
+                if e.get("state") in ("downloading", "importing", "extracting"):
+                    out.append({"kind": "music", "title": e.get("title"), "name": e.get("title"),
+                                "progress": e.get("progress") or 0, "state": e.get("state"), "error": e.get("error"),
+                                "page": "#/music"})
+        return _json(out)
 
 
 PLUGIN = TorrentsPlugin

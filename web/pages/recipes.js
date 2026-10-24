@@ -297,7 +297,7 @@ function pantrySheet(items, onChange) {
       h("div.r-input", icon("plus"), input), h("button.primary", { type: "submit" }, t("Add"))),
     box,
     h("button", { type: "button", onclick: (e) => act(async () => {
-      const taken = (await P("shopping")).items.filter((i) => i.checked).map((i) => i.name);
+      const taken = (await P("shopping")).filter((i) => i.checked).map((i) => i.name);
       if (!taken.length) return toast(t("No ticked items in the shopping list"));
       await change("add", taken);
     }, e.currentTarget) }, icon("cart"), t("Add ticked shopping items"))]);
@@ -897,7 +897,7 @@ async function renderShopping(el) {
           planned ? h("button.primary", { onclick: (e) => act(async () => {
             const r = await P("plan/shopping", { body: { week: mon } });
             if (!r.added) return toast(t("Nothing to add: plan some recipes first"));
-            paint((await P("shopping")).items);
+            paint(await P("shopping"));
           }, e.currentTarget) }, icon("calendar"), t("Add from the week")) : null,
           h(`button${planned ? "" : ".primary"}`, { onclick: () => go("#/recipes/mine") }, icon("utensils"), t("Recipe book"))));
   }
