@@ -22,7 +22,9 @@ KINDS = ("portable", "installer", "native", "rom")
 COVERS = ("cover.jpg", "cover.jpeg", "cover.png", "cover.webp", "folder.jpg", "poster.jpg")
 ROM_SKIP = {".txt", ".nfo", ".jpg", ".jpeg", ".png", ".webp", ".xml", ".json", ".md", ".sav", ".srm",
             ".state", ".db", ".ini", ".url", ".pdf"}
-EXE_SKIP = re.compile(r"unins|crash|redist|vcredist|dxsetup|dotnet|vc_?redist|helper|updater|launcherhelper", re.I)
+EXE_SKIP = re.compile(r"unins|crash|redist|vcredist|dxsetup|dxwebsetup|dotnet|vc_?redist|helper|updater|launcherhelper|"
+                      r"^kupdate|^update|delsaves|killhelp|^spacer|^vdfs|^ar\.exe$|physx|oalinst|directx|benchmark|"
+                      r"^config|settings|editor|modkit|server\.exe$", re.I)
 INSTALLER = re.compile(r"^(setup|install|installer)(?![a-z0-9])|[_\- .](setup|installer)(?![a-z0-9])", re.I)
 VERSION_DIR = re.compile(r"^v?\d+(\.\d+)*[\w.+-]*$", re.I)
 NAME_VERSION = re.compile(r"^(?P<t>.*?)[\s_]*[\(\[]?\bv(?P<v>\d[\w.+-]*)[\)\]]?$", re.I)
@@ -139,18 +141,26 @@ def _cover(d: Path) -> str | None:
     return None
 
 
-def _pick_exe(files: list[dict], hint: str = "") -> tuple[str, str]:
-    """→ (kind, exe path) for a game folder, or ('', '')."""
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def _pick_exe(files: list[dict], hint: str = "", title: str = "") -> tuple[str, str]:
+    """→ (kind, exe path) for a game folder, or ('', ''). Without a hint: an exe named like the game wins
+    (Gothic3.exe over a bigger kupdate.exe), then the largest one that isn't a known helper."""
     paths = [f["p"] for f in files]
     if hint and hint in paths:
         kind = "native" if not hint.lower().endswith(".exe") else (
             "installer" if INSTALLER.search(Path(hint).name) else "portable")
         return kind, hint
     size = {f["p"]: f["s"] for f in files}
-    exes = [p for p in paths if p.lower().endswith(".exe") and p.count("/") <= 2]
+    exes = [p for p in paths if p.lower().endswith(".exe") and p.count("/") <= 2
+            and not any(part.startswith(".") for part in p.split("/"))]      # .casa-extract and other scratch
     games = [p for p in exes if not EXE_SKIP.search(Path(p).name) and not INSTALLER.search(Path(p).name)]
     if games:
-        return "portable", max(games, key=lambda p: size[p])
+        t = _norm(title)
+        named = lambda p: bool(t) and len(_norm(Path(p).stem)) >= 3 and _norm(Path(p).stem) in t
+        return "portable", max(games, key=lambda p: (named(p), size[p]))
     setups = [p for p in exes if INSTALLER.search(Path(p).name)]
     if setups:
         return "installer", sorted(setups, key=lambda p: (p.count("/"), p))[0]
@@ -209,7 +219,7 @@ def scan(root: str) -> tuple[list[dict], list[dict]]:
             title, name_version = split_name(entry.name)
             files, size = _walk(gdir)
             gog = gog_info(gdir, files)
-            kind, exe = _pick_exe(files, str(man.get("exe") or gog.get("exe") or ""))
+            kind, exe = _pick_exe(files, str(man.get("exe") or gog.get("exe") or ""), title)
             if man.get("kind") in ("portable", "installer", "native"):
                 kind = man["kind"]
             workdir = str(man.get("workdir") or (gog.get("workdir") if exe == gog.get("exe") else "") or "")

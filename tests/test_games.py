@@ -1074,6 +1074,16 @@ def test_bonus_archive_failure_does_not_block_gog():
             F.shutil.which = orig
 
 
+def test_exe_named_like_the_game_wins():
+    f = lambda d: [{"p": k, "s": v} for k, v in d.items()]
+    assert library._pick_exe(f({"vcredist_x86.exe": 2682880, "kupdate.exe": 413696, "Gothic3.exe": 229376}),
+                             "", "Gothic 3") == ("portable", "Gothic3.exe")
+    g2 = {"delsaves.exe": 50000, "system/Gothic2.exe": 8000000, "system/KillHelp.exe": 10000,
+          "system/Spacer2.exe": 9000000, "system/ar.exe": 1000, ".casa-extract/app/big.exe": 99999999}
+    assert library._pick_exe(f(g2), "", "Gothic 2 Gold Edition") == ("portable", "system/Gothic2.exe")
+    assert library._pick_exe(f({"a.exe": 10, "game_main.exe": 99}), "", "Unrelated") == ("portable", "game_main.exe")
+
+
 def test_gog_detection_rules():
     with tempfile.TemporaryDirectory() as d:
         t = Path(d)
