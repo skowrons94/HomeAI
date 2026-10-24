@@ -20,7 +20,7 @@ export async function loadLocations(ctx, fresh = false) {
 export const locLabel = (d, path) => {
   if (!path) return t("Internal storage");
   const hit = (d?.locations || []).find((l) => l.path === path);
-  if (hit) return hit.kind === "sd" ? t("SD card {name}", { name: hit.label }) : t("Internal storage");
+  if (hit) return hit.kind === "sd" ? (hit.label ? t("SD card {name}", { name: hit.label }) : t("SD card")) : t("Internal storage");
   return path;
 };
 
@@ -52,7 +52,7 @@ export function chooseLocation(ctx, { title, current = "", need = 0, withDefault
       const small = need && l.free < need * 1.02 + (50 << 20);
       return h("button.gm-opt.gm-loc" + (on ? ".on" : ""), { disabled: !l.writable, onclick: () => pick(withDefault && l.kind === "internal" ? "" : l.path) },
         icon(l.kind === "sd" ? "storage" : "cpu"),
-        h("span.gm-loc-t", h("b", l.kind === "sd" ? t("SD card {name}", { name: l.label }) : t("Internal storage")),
+        h("span.gm-loc-t", h("b", l.kind === "sd" ? (l.label ? t("SD card {name}", { name: l.label }) : t("SD card")) : t("Internal storage")),
           h("span.gm-meta", l.path), spaceBar(l),
           h("span.gm-meta" + (small ? ".gm-bad" : ""), small ? t("Not enough space: needs {size}", { size: fmt.bytes(need) }) + " · " + freeLine(l) : freeLine(l))),
         on ? icon("check") : null);

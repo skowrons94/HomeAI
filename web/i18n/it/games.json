@@ -261,5 +261,6 @@
   "innoextract failed on {name} (exit {code}) {tail}": "innoextract non è riuscito su {name} (codice {code}) {tail}",
   "innoextract produced no files": "innoextract non ha prodotto file",
   "GOG installers need innoextract on the hub to unpack": "Gli installer GOG richiedono innoextract sull'hub per essere estratti",
-  "Refusing to delete outside the games folder": "Rifiuto di eliminare fuori dalla cartella dei giochi"
+  "Refusing to delete outside the games folder": "Rifiuto di eliminare fuori dalla cartella dei giochi",
+  "SD card": "Scheda SD"
 }

@@ -18,6 +18,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import re
 import logging
 import os
 import secrets
@@ -560,7 +561,11 @@ class GamesPlugin(Plugin):
                 raise _fail(err)
             self._loc_cache = (time.monotonic(), d if isinstance(d, dict) else {})
         d = self._loc_cache[1]
-        return _json({"online": True, "supported": True, "agent": st.get("agent"), "locations": d.get("locations") or [],
+        locs = [dict(x) for x in d.get("locations") or [] if isinstance(x, dict)]
+        for x in locs:   # SD cards formatted by SteamOS are labelled by their UUID: not a name worth showing
+            if x.get("kind") == "sd" and re.fullmatch(r"[0-9a-fA-F-]{8,}", str(x.get("label") or "")):
+                x["label"] = ""
+        return _json({"online": True, "supported": True, "agent": st.get("agent"), "locations": locs,
                       "default": d.get("default"), "home": d.get("home"),
                       "current": str(get_path(self.config, "deck.location", "") or "")})
 
