@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import functools
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -34,8 +36,19 @@ _UPSERT = (
 )
 
 
+def _locked(fn):
+    @functools.wraps(fn)
+    def inner(self, *a, **k):
+        with self.lock:
+            return fn(self, *a, **k)
+    return inner
+
+
 class Store:
+    # one SQLite connection shared by the event loop and executor threads: every operation holds this lock,
+    # or a write from a thread lands inside another's BEGIN ("cannot start a transaction within a transaction")
     def __init__(self, path: Path):
+        self.lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -51,23 +64,28 @@ class Store:
         self._last_prune = 0.0
         self._migrate_history()
 
+    @_locked
     def close(self) -> None:
         self.db.close()
 
     # -- generic --------------------------------------------------------------
 
+    @_locked
     def execute(self, sql: str, params: tuple | dict = ()) -> sqlite3.Cursor:
         return self.db.execute(sql, params)
 
+    @_locked
     def query(self, sql: str, params: tuple | dict = ()) -> list[dict]:
         return [dict(r) for r in self.db.execute(sql, params).fetchall()]
 
     # -- key/value --------------------------------------------------------------
 
+    @_locked
     def get(self, key: str, default: Any = None) -> Any:
         row = self.db.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else default
 
+    @_locked
     def set(self, key: str, value: Any) -> None:
         self.db.execute(
             "INSERT INTO kv(key, value) VALUES(?, ?) "
@@ -75,6 +93,7 @@ class Store:
             (key, json.dumps(value)),
         )
 
+    @_locked
     def delete(self, key: str) -> None:
         self.db.execute("DELETE FROM kv WHERE key=?", (key,))
 
@@ -105,6 +124,7 @@ class Store:
             b = int(ts) // bucket * bucket
             self.db.execute(_UPSERT.format(t=table), (sid, b, value, value, value))
 
+    @_locked
     def add_history(self, entity: str, key: str, value: float, ts: float) -> None:
         sid = self._series_id(entity, key)
         self.db.execute("BEGIN")
@@ -120,6 +140,7 @@ class Store:
                 self.db.execute(f"DELETE FROM {table} WHERE ts < ?",
                                 (ts - self.retention[table] * 86400,))
 
+    @_locked
     def history(self, entity: str, key: str, since: float,
                 until: float | None = None) -> list[list[float]]:
         """``[[ts, avg, min, max], ...]`` from the finest rollup that covers ``since``."""
@@ -141,6 +162,7 @@ class Store:
         ).fetchall()
         return [[r[0], round(r[1], 3), round(r[2], 3), round(r[3], 3)] for r in rows]
 
+    @_locked
     def delete_series(self, entity: str, key: str | None = None) -> None:
         """Forget recorded history of an entity (or one of its keys)."""
         for (ent, k), sid in list(self._series.items()):
@@ -150,6 +172,7 @@ class Store:
                 self.db.execute("DELETE FROM series WHERE id=?", (sid,))
                 del self._series[(ent, k)]
 
+    @_locked
     def series(self) -> list[dict]:
         """All recorded series with their latest hourly bucket."""
         return self.query(
@@ -158,6 +181,7 @@ class Store:
 
     # -- notifications ------------------------------------------------------------
 
+    @_locked
     def add_notification(self, title: str, body: str = "", url: str = "",
                          image: str = "", tag: str = "") -> dict:
         ts = time.time()
@@ -171,16 +195,20 @@ class Store:
         return {"id": cur.lastrowid, "ts": ts, "title": title, "body": body,
                 "url": url, "image": image, "tag": tag, "read": 0}
 
+    @_locked
     def notifications(self, limit: int = 50) -> list[dict]:
         return self.query(
             "SELECT * FROM notifications ORDER BY id DESC LIMIT ?", (limit,)
         )
 
+    @_locked
     def mark_notifications_read(self) -> None:
         self.db.execute("UPDATE notifications SET read=1 WHERE read=0")
 
+    @_locked
     def delete_notification(self, nid: int) -> None:
         self.db.execute("DELETE FROM notifications WHERE id=?", (nid,))
 
+    @_locked
     def clear_notifications(self) -> None:
         self.db.execute("DELETE FROM notifications")

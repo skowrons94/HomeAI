@@ -10,6 +10,11 @@ import signal
 import sys
 from pathlib import Path
 
+# Files are served from the NAS (SMB): with sendfile the kernel reads the share inside the event loop,
+# so a game going to the Deck or a song to a speaker froze the hub. Without it aiohttp reads in a thread.
+# Set before aiohttp is imported (it reads the variable once).
+os.environ.setdefault("AIOHTTP_NOSENDFILE", "1")
+
 from .core import Hub
 from .settings import Config
 from .web import WebServer

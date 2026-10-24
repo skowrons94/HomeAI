@@ -9,6 +9,7 @@ download table is never involved.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -208,9 +209,10 @@ async def run_argv(argv: list[str], timeout: float, log_tail: bool = False) -> t
         if out:
             try:
                 size = out.seek(0, 2)
-                out.seek(max(0, size - 400))
+                out.seek(max(0, size - 6000))
                 lines = [x.strip() for x in out.read().decode("utf-8", "replace").replace("\r", "\n").splitlines() if x.strip()]
-                tail = lines[-1][:200] if lines else ""
+                errs = [x for x in lines if "error" in x.lower() and not x.lower().startswith("done")]
+                tail = " — ".join(([errs[-1][:160]] if errs else []) + ([lines[-1][:120]] if lines else []))
             except Exception:  # noqa: BLE001 - the log is a courtesy
                 tail = ""
             out.close()
@@ -372,7 +374,9 @@ async def extract_gog(installers: list[Path], dest: Path, tool: str) -> int:
         raise UnpackError(_("not enough free space to unpack"))
     try:
         for inst in installers:
-            code, tail = await run_argv([tool, "--gog", "--exclude-temp", "--silent", "-e", "-d", str(tmp), str(inst)],
+            # -T none: the NAS share refuses file times (one warning per file, and a failed exit status)
+            code, tail = await run_argv([tool, "--gog", "--exclude-temp", "--timestamps", "none", "--silent", "-e",
+                                         "-d", str(tmp), str(inst)],
                                         GOG_TIMEOUT, log_tail=True)
             if code != 0:
                 raise UnpackError(_("innoextract failed on {name} (exit {code}) {tail}", name=inst.name, code=code,
@@ -381,7 +385,9 @@ async def extract_gog(installers: list[Path], dest: Path, tool: str) -> int:
             raise UnpackError(_("innoextract produced no files"))
         return await loop.run_in_executor(None, _gog_cleanup, tmp, dest, installers)
     except BaseException:           # failure or cancel: drop the half-extracted copy, keep the installers
-        shutil.rmtree(tmp, ignore_errors=True)
+        # in a thread: deleting thousands of files on the NAS froze the whole hub (web app included)
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(loop.run_in_executor(None, lambda: shutil.rmtree(tmp, ignore_errors=True)))
         raise
 
 
