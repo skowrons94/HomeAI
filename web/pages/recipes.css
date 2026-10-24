@@ -332,9 +332,12 @@ h2.r-aisle { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; 
 .f-add > button.primary { min-height: 46px; }
 .f-seg { display: flex; width: 100%; }
 .f-seg button { flex: 1 1 0; min-width: 0; min-height: 40px; white-space: nowrap; }
-.f-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: end; }
-.f-date { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
-.f-date input { min-width: 0; }
+.f-opts { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; align-items: end; }
+.f-date { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+/* iOS Safari gives date inputs an intrinsic width and their own look: make them fit the column like text fields */
+.f-date input, .field input[type="date"] { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
+  -webkit-appearance: none; appearance: none; display: block; min-height: 44px; text-align: left; }
+.f-date input::-webkit-date-and-time-value, .field input[type="date"]::-webkit-date-and-time-value { text-align: left; }
 .f-quicklab { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: -4px; }
 .f-quick { justify-content: flex-start; margin: 0; }
 .f-quick button.chipbtn { background: var(--surface-2); box-shadow: none; min-height: 36px; }

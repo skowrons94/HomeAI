@@ -1161,7 +1161,7 @@ function placeSeg(value, onChange) {
 async function renderFridge(el) {
   let items = [], known = [], place = jsonKey("r-fplace", "fridge"), q = "";
   const input = h("input", { placeholder: t("What did you put in? (e.g. milk)"), enterkeyhint: "done", autocomplete: "off", autocapitalize: "none", maxlength: 60 });
-  const qty = h("input", { placeholder: t("Quantity"), enterkeyhint: "done", autocomplete: "off", maxlength: 40 });
+  const qty = h("input", { placeholder: t("e.g. 6, 1 l, half"), enterkeyhint: "done", autocomplete: "off", maxlength: 40 });
   const exp = h("input", { type: "date", "aria-label": t("Expires") });
   const seg = placeSeg(place, (k) => { try { sessionStorage.setItem("r-fplace", JSON.stringify(k)); } catch {} });
   const sugg = h("div.r-ideas.r-sugg"), quick = h("div.r-ideas.f-quick"), soon = h("div"), groups = h("div");
@@ -1193,7 +1193,7 @@ async function renderFridge(el) {
   const form = h("form.f-add", { onsubmit: (e) => { e.preventDefault(); add(); } },
     h("div.r-input", icon("plus"), input),
     seg.el,
-    h("div.f-opts", qty, h("label.f-date", h("span", t("Expires")), exp)),
+    h("div.f-opts", h("label.f-date", h("span", t("Quantity")), qty), h("label.f-date", h("span", t("Expires")), exp)),
     h("button.primary", { type: "submit" }, icon("plus"), t("Add")));
 
   function row(i) {
