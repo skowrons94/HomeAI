@@ -253,6 +253,7 @@ class WebServer:
     async def _state(self):
         hub = self.hub
         return _json({
+            "version": str(int(hub.started)),   # the page reloads itself when the hub was updated meanwhile
             "entities": [e.to_json() for e in hub.entities.values()],
             "plugins": [
                 {"name": p.name, "title": p.title or p.name.title(), "error": p.error,

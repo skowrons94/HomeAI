@@ -278,8 +278,19 @@ export const fmt = {
 
 // ---------------------------------------------------------------- state + events
 
+/** The hub restarted with new code while this page stayed open: old shared code + new page code
+ *  would not fit together ("… is not found"). Reload, but never under someone's typing. */
+function reloadIfUpdated(version) {
+  if (!version || !window.CASA_V || version === window.CASA_V || window.CASA_V.startsWith("{{")) return false;
+  const go = () => location.reload();
+  if (document.activeElement?.matches?.("input, textarea, select")) window.addEventListener("hashchange", go, { once: true });
+  else go();
+  return true;
+}
+
 export async function refreshState() {
   const s = await api("state");
+  if (reloadIfUpdated(s.version)) return s;
   store.entities = new Map(s.entities.map((e) => [e.id, e]));
   Object.assign(store, { plugins: s.plugins, homekit: s.homekit, rooms: s.rooms, unread: s.unread,
                          name: s.name, notify_channels: s.notify_channels, onboarding: s.onboarding,
@@ -497,10 +508,17 @@ async function render() {
     const root = h("div.page-root");
     main.replaceChildren(root);
     const done = await loaded[page.id].render(root, args);
+    try { sessionStorage.removeItem("casa.reloaded"); } catch {}
     if (my !== navSeq) { if (typeof done === "function") { try { done(); } catch {} } return; }
     cleanup = done;
   } catch (e) {
     console.error(e);
+    // a page module that doesn't fit the loaded app.js: this tab predates an update
+    if (/export|module|import/i.test(e.message || "") && !sessionStorage.getItem("casa.reloaded")) {
+      try { sessionStorage.setItem("casa.reloaded", "1"); } catch {}
+      location.reload();
+      return;
+    }
     if (my === navSeq)
       main.replaceChildren(errorCard(e.message, { title: t("Couldn't load {page}", { page: t(page.title) }),
                                                   retry: render }));
