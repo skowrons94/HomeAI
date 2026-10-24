@@ -46,8 +46,12 @@ class Output:
 
 class Player:
     def __init__(self, output: Output, fetch: Callable[[dict], Awaitable[str]], spawn: Callable,
-                 on_change: Callable[["Player"], None] | None = None):
+                 on_change: Callable[["Player"], None] | None = None,
+                 on_listen: Callable[["Player", dict, float], None] | None = None):
         self.output, self.fetch, self.spawn, self.on_change = output, fetch, spawn, on_change
+        self.on_listen = on_listen    # called with (player, track, seconds listened) when a track is left
+        self.person = ""              # who last controlled this player (X-Casa-Person), for the listen history
+        self._counted = True          # the current track was already reported (or none is playing)
         self.queue: list[dict] = []
         self.index = -1
         self.state = "idle"           # idle | playing | paused
@@ -79,6 +83,18 @@ class Player:
                 "track": tr, "queue": self.queue, "position": round(self.position(), 1),
                 "duration": (tr or {}).get("duration") or 0, "volume": self.volume, "error": self.error,
                 "shuffle": self.shuffle}
+
+    def _flush(self) -> None:
+        """Report how long the current track was listened to (once per track); the callback decides if it counts."""
+        tr = self.track
+        if self._counted or tr is None or self.state not in ("playing", "paused"):
+            return
+        self._counted = True
+        if self.on_listen:
+            try:
+                self.on_listen(self, tr, self.position())
+            except Exception:
+                log.exception("listen listener failed")
 
     def _changed(self) -> None:
         if self.on_change:
@@ -116,6 +132,7 @@ class Player:
                     if gen != self._gen:
                         return
                 self._started = time.monotonic()
+                self._counted = False
                 self._changed()
                 nxt = self.queue[self.index + 1] if self.index + 1 < len(self.queue) else None
                 if nxt:
@@ -123,6 +140,7 @@ class Player:
                 await self.output.stream(path, self._offset, track)
                 if gen != self._gen:
                     return
+                self._flush()
                 self._offset = 0.0
                 self.index += 1
                 self._started = time.monotonic()
@@ -152,6 +170,7 @@ class Player:
         if not tracks:
             raise ValueError("nothing to play")
         start = min(max(int(start), 0), len(tracks) - 1)
+        self._flush()
         self.shuffle = bool(shuffle)
         if shuffle:
             first = tracks[start] if start else None
@@ -177,10 +196,12 @@ class Player:
     async def jump(self, index: int) -> None:
         if not 0 <= index < len(self.queue):
             raise ValueError("no such track")
+        self._flush()
         self.index = index
         await self._begin()
 
     async def next(self) -> None:
+        self._flush()
         if self.index + 1 < len(self.queue):
             self.index += 1
             await self._begin()
@@ -188,6 +209,7 @@ class Player:
             await self.stop()
 
     async def previous(self) -> None:
+        self._flush()
         if self.position() > RESTART_AFTER or self.index <= 0:
             await self._begin()
         else:
@@ -223,6 +245,7 @@ class Player:
         await (self.pause() if self.state == "playing" else self.resume())
 
     async def stop(self) -> None:
+        self._flush()
         await self._halt()
         self.state, self._prepared = "idle", False
         self.queue, self.index = [], -1

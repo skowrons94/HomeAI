@@ -33,12 +33,14 @@ from aiohttp import web
 from ...core import Entity, Plugin, current_plugin
 from ...i18n import _
 from ...settings import get_path
+from . import albumedit
 from . import find as findmod
 from . import dlna
-from . import libfiles
+from . import libfiles, listens
 from . import outputs as outmod
 from .discover import Discover
 from .find import Finder
+from .listens import Listens
 from .musicbrainz import MBID, MetaError, MusicBrainz, find_owned
 from .player import Player
 from .subsonic import Subsonic, SubsonicError, valid_id
@@ -107,6 +109,8 @@ class MusicPlugin(Plugin):
         self.disc = Discover(lambda: self.session, self.owned)
         self.finder = Finder(self)
         self.players: dict[str, Player] = {}
+        self.listens = Listens(self.hub.store)
+        self.job: dict | None = None            # progress of a running library change (tags / merge / delete)
         self.outs: dict[str, dict] = {}            # discovered devices by id
         self.out_scanned = 0.0
         self._scan_lock = asyncio.Lock()
@@ -282,7 +286,7 @@ class MusicPlugin(Plugin):
         pl = self.players.get(desc["id"])
         if pl is None:
             out = dlna.DlnaOutput(self, desc) if desc.get("dlna") else outmod.AirPlayOutput(self, desc)
-            pl = self.players[desc["id"]] = Player(out, self.fetch, self.spawn, self._player_changed)
+            pl = self.players[desc["id"]] = Player(out, self.fetch, self.spawn, self._player_changed, self._player_listen)
         return pl
 
     def _player_changed(self, pl: Player) -> None:
@@ -296,6 +300,21 @@ class MusicPlugin(Plugin):
                         artwork=f"/api/p/music/cover/{tr['cover']}?size=300" if tr.get("cover") else "",
                         position=round(pl.position(), 1), duration=tr.get("duration") or 0,
                         position_at=time.time(), output=pl.output.name, volume=pl.volume)
+
+    def _player_listen(self, pl: Player, track: dict, seconds: float) -> None:
+        if listens.counts(seconds, track.get("duration") or 0):
+            self.spawn(self.record_listen(track, seconds, pl.output.name, pl.person), "music listen")
+
+    async def record_listen(self, song: dict, seconds: float, output: str, person: str = "") -> bool:
+        """Store a listen (if it counts) and tell Navidrome so its own play counts follow."""
+        if not self.listens.add(song, seconds, output, person):
+            return False
+        with contextlib.suppress(Exception):
+            await self.nav.scrobble(song["id"], time.time() - seconds)
+        return True
+
+    def _person(self, request) -> str:
+        return " ".join(request.headers.get("X-Casa-Person", "").split())[:60]
 
     def _active_player(self) -> Player:
         pl = self.players.get(self.active or "")
@@ -388,6 +407,11 @@ class MusicPlugin(Plugin):
                 p("/outputs/{id}/pair", self.r_pair), p("/outputs/{id}/password", self.r_password),
                 g("/speaker/{exp}/{sig}/{name}", self.r_speaker_stream),
                 g("/library/{kind}/{id}/files", self.r_lib_files), p("/library/{kind}/{id}/delete", self.r_lib_delete),
+                g("/library/album/{id}/tags", self.r_tags), p("/library/album/{id}/edit", self.r_edit),
+                p("/library/album/{id}/merge", self.r_merge), p("/library/album/{id}/merge-discs", self.r_merge_discs),
+                g("/library/album/{id}/siblings", self.r_siblings), g("/library/job", self.r_job),
+                p("/listens", self.r_listen), g("/listens/recent", self.r_recent), g("/listens/top", self.r_top),
+                g("/listens/stats", self.r_listen_stats),
                 g("/player", self.r_player), p("/player/play", self.r_play), p("/player/{action}", self.r_control),
                 p("/test", self.r_test), p("/rescan", self.r_rescan), g("/scan", self.r_scan)]
 
@@ -432,7 +456,66 @@ class MusicPlugin(Plugin):
         return _json(a)
 
     async def r_album(self, request):
-        return _json(await self._call(self.nav.album(self._id(request))))
+        a = await self._call(self.nav.album(self._id(request)))
+        plays = self.listens.plays_of([t["id"] for t in a["tracks"]])
+        for t in a["tracks"]:
+            t["plays"] = plays.get(t["id"], 0)
+        return _json(a)
+
+    # -- tags, merge, listens -------------------------------------------------------------------------
+    async def r_tags(self, request):
+        return _json(await albumedit.get_tags(self, self._id(request)))
+
+    async def r_siblings(self, request):
+        return _json(await albumedit.siblings(self, self._id(request)))
+
+    async def r_job(self, request):
+        return _json(self.job or {"phase": ""})
+
+    async def r_edit(self, request):
+        return _json(await albumedit.edit(self, self._id(request), await self._body(request)))
+
+    async def r_merge(self, request):
+        return _json(await albumedit.merge(self, self._id(request), await self._body(request)))
+
+    async def r_merge_discs(self, request):
+        return _json(await albumedit.merge_discs(self, self._id(request)))
+
+    async def r_listen(self, request):
+        b = await self._body(request)
+        sid = str(b.get("id") or "")
+        if not valid_id(sid):
+            raise ValueError(_("Invalid request"))
+        try:
+            seconds = float(b.get("seconds") or 0)
+        except (TypeError, ValueError):
+            raise ValueError(_("Invalid request"))
+        song = await self._call(self.nav.song(sid))      # the server's own data, not the phone's
+        if not song["id"]:
+            raise KeyError(_("Not found"))
+        out = "phone" if str(b.get("output") or "phone") == "phone" else str(b["output"])[:60]
+        return _json({"recorded": await self.record_listen(song, min(seconds, 86400), out, self._person(request))})
+
+    @staticmethod
+    def _int(request, key, default, allowed=None) -> int:
+        try:
+            v = int(request.query.get(key, default))
+        except ValueError:
+            v = default
+        return v if allowed is None or v in allowed else default
+
+    async def r_recent(self, request):
+        return _json({"listens": self.listens.recent(self._int(request, "limit", 30))})
+
+    async def r_top(self, request):
+        kind = request.query.get("kind", "track")
+        if kind not in ("track", "album", "artist"):
+            raise ValueError(_("Invalid request"))
+        return _json({"top": self.listens.top(kind, self._int(request, "days", 30, listens.PERIODS),
+                                              self._int(request, "limit", 20))})
+
+    async def r_listen_stats(self, request):
+        return _json(self.listens.stats())
 
     # -- delete songs / albums from the library (the files on the NAS) --------------------------------
     async def _lib_files(self, request) -> tuple[list[dict], list[tuple[dict, Path | None]]]:
@@ -458,18 +541,17 @@ class MusicPlugin(Plugin):
                       "size": sum(x["size"] for x, _f in ok), "folder": self.music_dir})
 
     async def r_lib_delete(self, request):
+        kind, iid = request.match_info["kind"], request.match_info["id"]
+        log.info("library delete %s %s requested", kind, iid)
         b = await self._body(request)
         if b.get("confirm") is not True:
             raise ValueError(_("Confirm the deletion first"))
         _songs, found = await self._lib_files(request)
         files = [f for _x, f in found if f]
         if not files:
+            log.warning("library delete %s %s: no files found on the NAS", kind, iid)
             raise ValueError(_("The files of this music were not found on the NAS"))
-        loop = asyncio.get_running_loop()
-        n = await loop.run_in_executor(None, libfiles.delete, Path(self.music_dir), files)
-        with contextlib.suppress(Exception):
-            await self.rescan()
-        return _json({"ok": True, "deleted": n, "missing": len(found) - len(files)})
+        return _json(await albumedit.delete(self, kind, iid, files, len(found) - len(files)))
 
     async def r_search(self, request):
         q = " ".join(request.query.get("q", "").split())
@@ -759,6 +841,7 @@ class MusicPlugin(Plugin):
     async def r_play(self, request):
         b = await self._body(request)
         pl = self.player_for(self._out_key(b))
+        pl.person = self._person(request)
         tracks = await self._resolve(b)
         mode = b.get("mode", "play")
         try:
@@ -779,6 +862,7 @@ class MusicPlugin(Plugin):
             self.player_for(self._out_key(b))
         if pl is None:
             raise ValueError(_("Nothing is playing"))
+        pl.person = self._person(request)
         if action == "volume":
             try:
                 await pl.set_volume(int(b.get("value")))

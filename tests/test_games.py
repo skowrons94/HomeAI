@@ -693,7 +693,7 @@ def test_agent_writes_art_into_steam_grid():
         (steam / "userdata/0/config").mkdir(parents=True)
         A.steam_running = lambda: False
         agent = A.Agent(TOKEN, tmp / "Games", tmp / "roms", steam, tmp / "data")
-        assert A.VERSION == "1.3"
+        assert A.VERSION.startswith("1.3")
         art = A.decode_art({"grid": base64.b64encode(PNG).decode(), "hero": base64.b64encode(JPG).decode()})
         assert art["grid"] == (PNG, ".png") and art["hero"][1] == ".jpg" and A.decode_art(None) == {}
         for bad in ({"grid": "!!notbase64"}, {"grid": base64.b64encode(b"GIF89a....").decode()}, {"evil": "AAAA"}, "x",
@@ -1803,7 +1803,7 @@ def test_installer_arguments_and_wine_paths():
     t = Path("/home/deck/Games/Gothic 3")
     assert A.wine_path(t) == "Z:\\home\\deck\\Games\\Gothic 3"
     assert A.installer_args("inno", t) == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/NOICONS",
-                                          "/DIR=Z:\\home\\deck\\Games\\Gothic 3"]
+                                          "/LANG=english", "/DIR=Z:\\home\\deck\\Games\\Gothic 3"]
     nsis = A.installer_args("nsis", Path("/home/deck/Games/G3"))
     assert nsis == ["/S", "/D=Z:\\home\\deck\\Games\\G3"] and nsis[-1].startswith("/D=")
     try:
@@ -1860,7 +1860,7 @@ def test_installer_runs_through_proton_and_becomes_a_shortcut():
         assert j["state"] == "done" and j["phase"] == "done", j
         call = env.called()
         assert call["args"][0] == "run" and call["args"][1].endswith("setup_gothic_3.exe")
-        assert call["args"][2:] == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/NOICONS",
+        assert call["args"][2:] == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/NOICONS", "/LANG=english",
                                     "/DIR=Z:" + str(tmp / "Games/Gothic 3").replace("/", "\\")]
         assert call["prefix"] == str(tmp / "Games/_prefixes/Gothic 3") and (tmp / "Games/_prefixes/Gothic 3").is_dir()
         assert call["client"] == str(tmp / "steam") and call["debug"] == "-all"

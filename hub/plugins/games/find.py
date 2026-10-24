@@ -162,6 +162,11 @@ def find_archives(payload: Path) -> list[Path]:
 def tool_for(name: str) -> list[str] | None:
     """Command prefix to extract a .rar/.7z, or None when no tool is installed."""
     ext = name.lower().rsplit(".", 1)[-1]
+    if ext == "rar":   # Debian's 7-Zip is built without RAR: unrar or unar first
+        if shutil.which("unrar"):
+            return [shutil.which("unrar"), "x", "-y"]
+        if shutil.which("unar"):
+            return [shutil.which("unar"), "-q", "-f"]
     for tool in ("7z", "7zz", "7za"):
         if shutil.which(tool):
             return [shutil.which(tool), "x", "-y", "-mmt=2"]     # 2 of the Pi's 4 cores: the web app keeps the rest

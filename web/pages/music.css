@@ -294,3 +294,18 @@ a.mu-pv { text-decoration: none; }
 [data-tid].playing { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 [data-tid].playing .mu-trk-t b, [data-tid].playing .mu-row-t b { color: var(--accent); }
 [data-tid].playing .mu-num { color: var(--accent); font-weight: 700; }
+
+/* listen history, merge/edit sheets */
+.mu-plays { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mu-trk .mu-plays { margin-right: 6px; font-size: 12px; }
+.mu-hstat { margin: 2px 2px 6px; }
+.mu-hchips { margin: 0 0 8px; }
+.mu-rank { flex: none; width: 36px; text-align: center; font-weight: 700; color: var(--muted); }
+.mu-merge { width: 100%; min-height: 48px; margin: 4px 0 6px; gap: 8px; }
+.mu-status { display: flex; align-items: center; gap: 8px; }
+.mu-status::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: mu-turn .8s linear infinite; flex: none; }
+@keyframes mu-turn { to { transform: rotate(360deg); } }
+.mu-field select { font-size: 16px; min-height: 44px; }
+.mu-status[hidden], .mu-note[hidden] { display: none; }
+.mu-manage-row { flex-wrap: wrap; }
+.mu-manage-row .spacer { display: none; }

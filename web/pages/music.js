@@ -8,7 +8,8 @@ const P = (path, opts) => api(`p/music/${path}`, opts);
 const KEY = "casa.music.view";
 const PHONE = "phone";
 const LISTS = () => [["newest", t("New")], ["recent", t("Recent")], ["frequent", t("Most played")],
-  ["random", t("Random")], ["alphabeticalByName", t("A–Z")], ["artists", t("Artists")], ["genres", t("Genres")]];
+  ["random", t("Random")], ["alphabeticalByName", t("A–Z")], ["artists", t("Artists")], ["genres", t("Genres")],
+  ["history", t("Listens")]];
 
 let view = { tab: "library", list: "newest", dtab: "artist", output: PHONE };
 try { view = { ...view, ...JSON.parse(localStorage.getItem(KEY) || "{}") }; } catch { /* private mode */ }
@@ -17,6 +18,7 @@ const saveView = () => { try { localStorage.setItem(KEY, JSON.stringify(view)); 
 let root = null;
 let timers = [];
 const els = {};
+let hist = { recent: [], top: [], stats: null, kind: "track", days: 30, topBusy: false };
 let lib = { albums: [], artists: [], genres: [], genre: "", configured: true, error: "", loaded: false, search: null, searchError: "" };
 let query = "";
 const dx = { q: "", artists: [], albums: [], dzArtists: [], dzAlbums: [], busy: false, searched: false, error: "", fallback: false };
@@ -86,8 +88,24 @@ function now() {
 
 const streamUrl = (tr) => `/api/p/music/stream/${encodeURIComponent(tr.id)}?suffix=${encodeURIComponent(tr.suffix || "")}`;
 
+// listen history: seconds really played of the current phone track, reported when it is left (server re-checks the rule)
+let ph = null;
+function phoneFlush() {
+  const x = ph; ph = null;
+  if (!x || x.secs < 30) return;
+  if (x.secs >= 240 || (x.dur && x.secs >= x.dur * 0.5)) P("listens", { body: { id: x.id, seconds: Math.round(x.secs), output: PHONE } }).catch(() => {});
+}
+audio.addEventListener("timeupdate", () => {
+  if (!ph || audio.paused) return;
+  const d = audio.currentTime - ph.last;
+  if (d > 0 && d < 1.5) ph.secs += d;
+  ph.last = audio.currentTime;
+});
+
 function phoneLoad(i) {
+  phoneFlush();
   const tr = pl.queue[i];
+  if (tr) ph = { id: tr.id, dur: tr.duration || 0, secs: 0, last: 0 };
   if (!tr) { pl.state = "idle"; pl.index = -1; audio.removeAttribute("src"); emit(); return; }
   pl.index = i; pl.error = "";
   audio.src = streamUrl(tr);
@@ -106,7 +124,7 @@ function phoneLoad(i) {
 }
 audio.addEventListener("play", () => { pl.state = "playing"; emit(); });
 audio.addEventListener("pause", () => { if (audio.src && !audio.ended) { pl.state = "paused"; emit(); } });
-audio.addEventListener("ended", () => { if (pl.index + 1 < pl.queue.length) phoneLoad(pl.index + 1); else { pl.state = "idle"; emit(); } });
+audio.addEventListener("ended", () => { if (pl.index + 1 < pl.queue.length) phoneLoad(pl.index + 1); else { phoneFlush(); pl.state = "idle"; emit(); } });
 audio.addEventListener("error", () => { if (audio.src) { pl.error = t("This track cannot be played on the phone"); pl.state = "paused"; emit(); } });
 if ("mediaSession" in navigator) {
   const set = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch { /* ignore */ } };
@@ -164,7 +182,7 @@ async function control(action, extra = {}) {
       else if (action === "toggle") { if (audio.paused) await audio.play(); else audio.pause(); }
       else if (action === "next") { if (pl.index + 1 < pl.queue.length) phoneLoad(pl.index + 1); else control("stop"); }
       else if (action === "previous") { if (audio.currentTime > 3 || pl.index <= 0) audio.currentTime = 0; else phoneLoad(pl.index - 1); }
-      else if (action === "stop") { audio.pause(); audio.removeAttribute("src"); pl.queue = []; pl.index = -1; pl.state = "idle"; emit(); }
+      else if (action === "stop") { phoneFlush(); audio.pause(); audio.removeAttribute("src"); pl.queue = []; pl.index = -1; pl.state = "idle"; emit(); }
       else if (action === "volume") audio.volume = Math.max(0, Math.min(1, extra.value / 100));
       else if (action === "jump") phoneLoad(extra.index);
       emit();
@@ -185,7 +203,7 @@ registerLocalPlayer({
   },
   control(action) {
     if (action === "toggle") { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); }
-    else if (action === "next") { if (pl.index + 1 < pl.queue.length) phoneLoad(pl.index + 1); else { audio.pause(); pl.state = "idle"; emit(); } }
+    else if (action === "next") { if (pl.index + 1 < pl.queue.length) phoneLoad(pl.index + 1); else { phoneFlush(); audio.pause(); pl.state = "idle"; emit(); } }
   },
 });
 const sendVolume = debounce((v) => control("volume", { value: v }), 120);
@@ -278,6 +296,11 @@ async function loadLibrary() {
     if (view.list === "artists") {
       lib.artists = (await P("artists")).artists || [];
       lib.configured = true;
+    } else if (view.list === "history") {
+      const [r, tp, st] = await Promise.all([P("listens/recent?limit=20"), P(`listens/top?kind=${hist.kind}&days=${hist.days}&limit=15`),
+        P("listens/stats")]);
+      hist.recent = r.listens || []; hist.top = tp.top || []; hist.stats = st;
+      lib.configured = true;
     } else if (view.list === "genres" && !lib.genre) {
       lib.genres = (await P("genres")).genres || [];
       lib.configured = true;
@@ -292,6 +315,7 @@ async function loadLibrary() {
   } catch (e) {
     lib.error = e.message;
     if (view.list === "artists") lib.artists = [];
+    else if (view.list === "history") { hist.recent = []; hist.top = []; }
     else if (view.list === "genres" && !lib.genre) lib.genres = [];
     else lib.albums = [];     // never show a list of another view next to an error
   }
@@ -404,6 +428,7 @@ function drawLibrary() {
     put(els.body, ...(out.length ? out : [h("div.empty", t("No results."))]));
     return;
   }
+  if (view.list === "history") { drawHistory(); return; }
   if (view.list === "genres") {
     if (!lib.genre) {
       put(els.body, lib.genres.length ? h("div.mu-grid.mu-ggrid", lib.genres.map((g) => genreTile(g.name, null, g.albums, () => {
@@ -420,6 +445,54 @@ function drawLibrary() {
   if (view.list === "artists") {
     put(els.body, lib.artists.length ? h("div.mu-card.mu-list", lib.artists.map(artistRow)) : emptyCard());
   } else put(els.body, lib.albums.length ? h("div.mu-grid", lib.albums.map(albumTile)) : emptyCard());
+}
+
+const listenPlay = (x) => playTracks([{ id: x.song_id, title: x.title, artist: x.artist, album: x.album, album_id: x.album_id,
+  cover: x.cover, duration: x.duration, suffix: "" }], 0);
+
+function listenRow(x) {
+  return h("div.mu-prow", { "data-tid": x.song_id },
+    h("button.mu-prow-main", { onclick: () => listenPlay(x) },
+      navCover(x.cover, x.album, 100, ".sm"),
+      h("span.mu-row-t", h("b", x.title), h("span.mu-meta", joinMeta(x.artist, x.album)))),
+    h("span.mu-meta.mu-dur", fmt.ago(x.played_at)));
+}
+
+function topRow(x, rank) {
+  const sub = hist.kind === "artist" ? "" : joinMeta(x.artist, hist.kind === "track" ? x.album : "");
+  const main = [hist.kind === "artist" ? h("span.mu-rank", rank) : navCover(x.cover, x.name, 100, hist.kind === "artist" ? ".sm.round" : ".sm"),
+    h("span.mu-row-t", h("b", x.name), sub ? h("span.mu-meta", sub) : null)];
+  const go = hist.kind === "track" ? () => listenPlay({ song_id: x.id, title: x.name, artist: x.artist, album: x.album, album_id: x.album_id, cover: x.cover })
+    : hist.kind === "album" ? () => openAlbum(x.id)
+      : () => { query = x.name; els.q.value = x.name; doSearch(); };
+  return h("div.mu-prow", hist.kind === "track" ? { "data-tid": x.id } : {},
+    h("button.mu-prow-main", { onclick: go }, main),
+    h("span.mu-meta.mu-dur.mu-plays", `▶ ${fmt.num(x.plays)}`));
+}
+
+async function loadTop() {
+  hist.topBusy = true; drawHistory();
+  try { hist.top = (await P(`listens/top?kind=${hist.kind}&days=${hist.days}&limit=15`)).top || []; } catch { hist.top = []; }
+  hist.topBusy = false; drawHistory();
+}
+
+function drawHistory() {
+  if (!root?.isConnected || view.list !== "history" || query.trim().length >= 2) return;
+  const kinds = [["track", t("Songs")], ["album", t("Albums")], ["artist", t("Artists")]];
+  const periods = [[7, t("7 days")], [30, t("30 days")], [365, t("Year")], [0, t("All time")]];
+  const st = hist.stats;
+  put(els.body,
+    st?.total ? h("div.mu-note.mu-hstat", t("{n} listens · {h} hours of music", { n: fmt.num(st.total), h: fmt.num(st.hours) })) : null,
+    section(t("Recently listened")),
+    hist.recent.length ? h("div.mu-card.mu-list", hist.recent.map(listenRow))
+      : h("div.mu-card.mu-center", h("p.muted", t("Nothing yet: songs you listen to for at least half, or four minutes, are counted here."))),
+    section(t("Most listened")),
+    h("div.mu-chips.mu-hchips", kinds.map(([k, l]) => chip(l, null, hist.kind === k, () => { hist.kind = k; loadTop(); }))),
+    h("div.mu-chips.mu-hchips", periods.map(([d, l]) => chip(l, null, hist.days === d, () => { hist.days = d; loadTop(); }))),
+    hist.topBusy ? h("div.empty", h("span.spin"))
+      : hist.top.length ? h("div.mu-card.mu-list", hist.top.map((x, i) => topRow(x, i + 1)))
+        : h("div.mu-note", t("No listens in this period.")));
+  markPlaying();
 }
 
 const doSearch = debounce(async () => {
@@ -452,6 +525,7 @@ async function openAlbum(id) {
       h("button.mu-trk", { onclick: () => playTracks(tracks, i, { album: id }) },
         h("span.mu-num", x.track || i + 1),
         h("span.mu-trk-t", h("b", x.title), x.artist && x.artist !== a.artist ? h("span.mu-meta", x.artist) : null),
+        x.plays ? h("span.mu-meta.mu-plays", `▶ ${fmt.num(x.plays)}`) : null,
         h("span.mu-meta", mins(x.duration))),
       h("a.mu-pv.mu-when-view", { href: saveHref(x.id, "track"), download: "",
         title: joinMeta(t("Download to phone"), sizeText(x.size)), "aria-label": t("Download to phone") }, icon("download")),
@@ -459,6 +533,13 @@ async function openAlbum(id) {
         onclick: () => confirmLibDelete("song", x.id, x.title, () => { s.close(); openAlbum(id); }) }, icon("trash"))));
   });
   const tracksBox = h("div.mu-tracks", rows);
+  const sibBox = h("div");
+  P(`library/album/${encodeURIComponent(id)}/siblings`).then((r) => {
+    if ((r.siblings || []).length < 2 || !sibBox.isConnected) return;
+    const list = r.siblings.map((m) => t("CD {n}", { n: m.disc })).join(" + ");
+    put(sibBox, h("button.primary.mu-merge", { onclick: () => confirmMergeDiscs(id, r, s) }, ic("list"),
+      t("Merge the discs ({list})", { list })));
+  }).catch(() => {});
   const manage = h("button.ghost.mu-manage", { onclick: () => {
     const on = tracksBox.classList.toggle("editing");
     manage.replaceChildren(icon(on ? "check" : "edit"), on ? t("Done") : t("Manage"));
@@ -476,11 +557,42 @@ async function openAlbum(id) {
       h("button", { onclick: () => playTracks(tracks, 0, { album: id, mode: "queue" }) }, ic("list"), t("Queue")),
       h("a.btn", { href: saveHref(id, "album"), download: "" }, icon("download"),
         joinMeta(t("Download to phone"), sizeText(a.size)))),
+    sibBox,
     h("div.row.mu-manage-row", manage, h("div.spacer"),
+      h("button", { onclick: () => openEdit(id, a, s) }, icon("edit"), t("Edit")),
+      h("button", { onclick: () => openMergeWith(id, a, s) }, ic("list"), t("Merge with…")),
       h("button.danger", { onclick: () => confirmLibDelete("album", id, a.name, () => { s.close(); loadLibrary(); }) },
         icon("trash"), t("Delete album"))),
     tracksBox);
   markPlaying();
+}
+
+/** Run a library change that rewrites files and rescans Navidrome, showing its progress inline. */
+async function runJob(statusEl, label, work) {
+  statusEl.textContent = label;
+  const timer = setInterval(async () => {
+    try {
+      const j = await P("library/job");
+      if (j.phase === "tags") statusEl.textContent = t("Rewriting tags {done}/{total}…", { done: j.done, total: j.total });
+      else if (j.phase === "delete") statusEl.textContent = t("Deleting files…");
+      else if (j.phase === "scan") statusEl.textContent = t("Updating the library…");
+    } catch { /* keep the last text */ }
+  }, 1200);
+  try { return await work(); } finally { clearInterval(timer); }
+}
+
+/** Buttons + inline status + inline error for a sheet that runs a job; the error stays visible in the sheet. */
+function jobUi() {
+  const status = h("div.mu-note.mu-status", { hidden: true });
+  const err = h("div.mu-note.err", { hidden: true, role: "alert" });
+  return { status, err,
+    async run(btns, label, work) {
+      err.hidden = true; status.hidden = false;
+      btns.forEach((b) => { b.disabled = true; });
+      try { return await runJob(status, label, work); }
+      catch (e) { err.textContent = e.message; err.hidden = false; return null; }
+      finally { status.hidden = true; btns.forEach((b) => { b.disabled = false; }); }
+    } };
 }
 
 /** Delete a song or album from the library (the files on the NAS), after showing exactly what goes. */
@@ -490,11 +602,19 @@ async function confirmLibDelete(kind, id, name, done) {
   try { info = await P(`library/${kind}/${encodeURIComponent(id)}/files`); }
   catch (e) { sheetError(s, e.message, () => { s.close(); confirmLibDelete(kind, id, name, done); }); return; }
   const files = info.files || [];
-  const go = h("button.danger", { disabled: !files.length, onclick: (e) => act(async () => {
-    const r = await P(`library/${kind}/${encodeURIComponent(id)}/delete`, { body: { confirm: true } });
+  const ui = jobUi();
+  const cancel = h("button", { onclick: () => s.close() }, t("Cancel"));
+  const go = h("button.danger", { disabled: !files.length, onclick: async () => {
+    const r = await ui.run([go, cancel], t("Updating the library…"),
+      () => P(`library/${kind}/${encodeURIComponent(id)}/delete`, { body: { confirm: true } }));
+    if (!r) return;
+    if (r.listed) {
+      ui.err.textContent = t("{n} files were deleted, but Navidrome still lists this. Try Rescan in the Music settings.", { n: r.deleted });
+      ui.err.hidden = false; go.hidden = true; cancel.textContent = t("Close"); done?.(); return;
+    }
     toast(t("Deleted {n} files", { n: r.deleted }));
     s.close(); done?.();
-  }, e.currentTarget) }, icon("trash"), t("Delete for good"));
+  } }, icon("trash"), t("Delete for good"));
   put(s.el,
     h("p", h("b", name)),
     files.length ? h("div.mu-note", t("{n} files · {size} will be deleted from the NAS:", { n: files.length, size: sizeText(info.size) }))
@@ -502,7 +622,91 @@ async function confirmLibDelete(kind, id, name, done) {
     files.length ? h("pre.mu-paths", files.slice(0, 40).map((f) => f.path).join("\n") + (files.length > 40 ? "\n…" : "")) : null,
     info.missing?.length ? h("div.mu-note.err", t("Not found (left alone): {list}", { list: info.missing.join(", ") })) : null,
     h("div.mu-note", t("This can't be undone.")),
-    h("div.row.mu-actions", h("button", { onclick: () => s.close() }, t("Cancel")), go));
+    ui.status, ui.err,
+    h("div.row.mu-actions", cancel, go));
+}
+
+/** After a tag change: close what is open, reload the library and show the (new) album. */
+function reopenAlbum(r, parent) {
+  toast(t("Done: {n} files updated", { n: r.changed }));
+  parent?.close();
+  loadLibrary();
+  openAlbum(r.album_id);
+}
+
+async function openEdit(id, a, parent) {
+  const s = sheet(t("Edit album"), [h("div.mu-empty-s", h("span.spin"))]);
+  let info;
+  try { info = await P(`library/album/${encodeURIComponent(id)}/tags`); }
+  catch (e) { sheetError(s, e.message, () => { s.close(); openEdit(id, a, parent); }); return; }
+  const f = info.fields;
+  const inp = (k, label, attrs = {}) => {
+    const el = h("input", { type: "text", value: f[k].value, placeholder: f[k].mixed ? t("Different values") : "", autocomplete: "off", ...attrs });
+    return [el, h("label.mu-field", h("span", label), el)];
+  };
+  const [iName, lName] = inp("album", t("Album"));
+  const [iArtist, lArtist] = inp("albumartist", t("Album artist"));
+  const [iYear, lYear] = inp("year", t("Year"), { inputmode: "numeric", maxlength: 4 });
+  const [iGenre, lGenre] = inp("genre", t("Genre"));
+  const ui = jobUi();
+  const cancel = h("button", { onclick: () => s.close() }, t("Cancel"));
+  const save = h("button.primary", { onclick: async () => {
+    const body = {};
+    for (const [k, el] of [["album", iName], ["albumartist", iArtist], ["year", iYear], ["genre", iGenre]]) {
+      if (el.value.trim() !== f[k].value) body[k] = el.value.trim();
+    }
+    if (!Object.keys(body).length) { s.close(); return; }
+    const r = await ui.run([save, cancel], t("Rewriting tags…"), () => P(`library/album/${encodeURIComponent(id)}/edit`, { body }));
+    if (r) { s.close(); reopenAlbum(r, parent); }
+  } }, icon("check"), t("Save"));
+  put(s.el, lName, lArtist, h("div.row", lYear, lGenre),
+    h("div.mu-note", t("{n} files will be rewritten on the NAS (only the tags, never the audio).", { n: info.count })),
+    ui.status, ui.err, h("div.row.mu-actions", cancel, save));
+}
+
+async function confirmMergeDiscs(id, sib, parent) {
+  const s = sheet(t("Merge the discs"), []);
+  const ui = jobUi();
+  const cancel = h("button", { onclick: () => s.close() }, t("Cancel"));
+  const go = h("button.primary", { onclick: async () => {
+    const r = await ui.run([go, cancel], t("Rewriting tags…"), () => P(`library/album/${encodeURIComponent(id)}/merge-discs`, { body: {} }));
+    if (r) { s.close(); reopenAlbum(r, parent); }
+  } }, t("Merge"));
+  put(s.el, h("p", t("These albums become one album “{name}” with {n} discs:", { name: sib.base, n: sib.siblings.length })),
+    h("div.mu-card.mu-list", sib.siblings.map((m) => h("div.mu-row", h("span.mu-row-t", h("b", m.name),
+      h("span.mu-meta", joinMeta(t("Disc {n}", { n: m.disc }), t("{n} tracks", { n: m.songs }))))))),
+    h("div.mu-note", t("Only the tags of the files change (album, disc number); then the library is rescanned.")),
+    ui.status, ui.err, h("div.row.mu-actions", cancel, go));
+}
+
+async function openMergeWith(id, a, parent) {
+  const s = sheet(t("Merge with…"), [h("div.mu-empty-s", h("span.spin"))]);
+  let list;
+  try { list = ((await P(`artist/${encodeURIComponent(a.artist_id)}`)).list || []).filter((x) => x.id !== id); }
+  catch (e) { sheetError(s, e.message, () => { s.close(); openMergeWith(id, a, parent); }); return; }
+  if (!list.length) { put(s.el, h("div.mu-note", t("This artist has no other albums."))); return; }
+  put(s.el, h("p", t("“{name}” will be added to the album you choose, as one of its discs:", { name: a.name })),
+    h("div.mu-card.mu-list", list.map((x) => h("button.mu-row", { onclick: () => confirmMerge(id, a, x, parent, s) },
+      navCover(x.cover, x.name, 100, ".sm"),
+      h("span.mu-row-t", h("b", x.name), h("span.mu-meta", joinMeta(x.year, t("{n} tracks", { n: x.songs })))), icon("right")))));
+}
+
+function confirmMerge(id, a, target, parent, prev) {
+  prev.close();
+  const s = sheet(t("Merge albums"), []);
+  const disc = h("select", h("option", { value: "auto" }, t("Next disc")),
+    [1, 2, 3, 4, 5, 6].map((n) => h("option", { value: String(n) }, t("Disc {n}", { n }))));
+  const ui = jobUi();
+  const cancel = h("button", { onclick: () => s.close() }, t("Cancel"));
+  const go = h("button.primary", { onclick: async () => {
+    const r = await ui.run([go, cancel], t("Rewriting tags…"), () => P(`library/album/${encodeURIComponent(id)}/merge`,
+      { body: { into: target.id, as_disc: disc.value === "auto" ? "auto" : Number(disc.value) } }));
+    if (r) { s.close(); reopenAlbum(r, parent); }
+  } }, t("Merge"));
+  put(s.el, h("p", t("“{a}” becomes part of “{b}”.", { a: a.name, b: target.name })),
+    h("label.mu-field", h("span", t("Position")), disc),
+    h("div.mu-note", t("Only the tags of the files change (album, disc number); then the library is rescanned.")),
+    ui.status, ui.err, h("div.row.mu-actions", cancel, go));
 }
 
 async function openArtist(id, name) {

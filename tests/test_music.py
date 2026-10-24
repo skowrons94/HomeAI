@@ -1111,6 +1111,336 @@ def test_pause_in_place_and_fast_controls():
     asyncio.run(go())
 
 
+# -- tags, merge, listens -----------------------------------------------------------------------
+
+def mk_flac(path: Path, extra=b"x"):
+    """A minimal valid FLAC: marker + STREAMINFO (last block) + a few bytes standing in for audio frames."""
+    info = (16).to_bytes(2, "big") + (16).to_bytes(2, "big") + b"\0\0\0" + b"\0\0\0"
+    packed = (44100 << 44) | (1 << 41) | (15 << 36) | 44100 * 3       # rate, 2 channels, 16 bit, 3 s
+    info += packed.to_bytes(8, "big") + b"\0" * 16
+    path.write_bytes(b"fLaC" + bytes([0x80, 0, 0, 34]) + info + extra * 50)
+
+
+def mk_mp3(path: Path):
+    frame = bytes([0xFF, 0xFB, 0x90, 0x64]) + b"\0" * 413            # MPEG1 L3 128 kbps 44.1 kHz, silent
+    path.write_bytes(frame * 8)
+
+
+def test_tags_roundtrip_and_atomic_replace():
+    from hub.plugins.music import tags as T
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        for name, mk in (("a.flac", mk_flac), ("b.mp3", mk_mp3)):
+            f = d / name
+            mk(f)
+            before = f.read_bytes()
+            assert T.read_tags(f)["album"] == ""
+            assert T.write_tags(f, {"album": "The Bends", "albumartist": "Radiohead", "year": "1995", "genre": "Rock",
+                                    "discnumber": "2", "disctotal": "2", "tracknumber": "3"})
+            got = T.read_tags(f)
+            assert (got["album"], got["albumartist"], got["year"], got["genre"]) == ("The Bends", "Radiohead", "1995", "Rock"), got
+            assert (got["discnumber"], got["disctotal"], got["tracknumber"]) == ("2", "2", "3"), got
+            assert f.read_bytes().endswith(before[-60:]) or name.endswith("mp3")      # audio data untouched
+            assert not T.write_tags(f, {"album": "The Bends"})                         # nothing to change
+            assert not list(d.glob(".casa-tag-*"))
+        # a failing write leaves the original byte for byte and no .part behind
+        f = d / "a.flac"
+        keep = f.read_bytes()
+        orig = T._apply
+
+        def boom(*a, **k):
+            raise RuntimeError("disk full")
+        T._apply = boom
+        try:
+            try:
+                T.write_tags(f, {"album": "Other"})
+                raise AssertionError("should fail")
+            except RuntimeError:
+                pass
+        finally:
+            T._apply = orig
+        assert f.read_bytes() == keep and not list(d.glob(".casa-tag-*"))
+        # an unsupported/corrupt file stops write_many before anything changes
+        bad = d / "c.flac"
+        bad.write_bytes(b"nope")
+        try:
+            T.write_many([(f, {"album": "Z"}), (bad, {"album": "Z"})])
+            raise AssertionError("should refuse")
+        except T.TagError:
+            pass
+        assert T.read_tags(f)["album"] == "The Bends"
+
+
+def test_sibling_detection_and_disc_plan():
+    from hub.plugins.music import tags as T
+    assert T.split_disc("The Bends (2)") == ("The Bends", 2)
+    assert T.split_disc("Album CD1") == ("Album", 1)
+    assert T.split_disc("Album - Disc 2") == ("Album", 2)
+    assert T.split_disc("Album [Disc 3]") == ("Album", 3)
+    assert T.split_disc("Album (CD 2)") == ("Album", 2)
+    assert T.split_disc("OK Computer (1997)") == ("OK Computer (1997)", 0)
+    assert T.split_disc("Kid A") == ("Kid A", 0)
+
+    def al(i, n, artist="Radiohead", songs=10):
+        return {"id": i, "name": n, "artist": artist, "songs": songs}
+    albums = [al("1", "The Bends (1)"), al("2", "The Bends (2)"), al("3", "OK Computer"), al("4", "The Bends (1)", "Other")]
+    sib = T.find_siblings(albums[0], albums)
+    assert sib["base"] == "The Bends" and [(m["id"], m["disc"]) for m in sib["members"]] == [("1", 1), ("2", 2)]
+    assert T.find_siblings(albums[2], albums) is None
+    cd = [al("5", "Album CD1"), al("6", "Album CD2")]
+    assert [m["id"] for m in T.find_siblings(cd[1], cd)["members"]] == ["5", "6"]
+    plain = [al("7", "Amnesiac"), al("8", "Amnesiac (2)")]                   # the first disc kept the bare name
+    s = T.find_siblings(plain[0], plain)
+    assert [(m["id"], m["disc"]) for m in s["members"]] == [("7", 1), ("8", 2)] and s["base"] == "Amnesiac"
+    dup = [al("9", "X (1)"), al("10", "X (1)")]
+    assert [m["disc"] for m in T.find_siblings(dup[0], dup)["members"]] == [1, 2]
+    # disc numbers: each part gets its disc, total on every file, extra discs of a part are shifted
+    p1 = {"files": [Path("a"), Path("b")], "tags": [{"discnumber": ""}, {"discnumber": ""}], "disc": None}
+    p2 = {"files": [Path("c")], "tags": [{"discnumber": "1"}], "disc": 2}
+    plan = T.plan_discs([p1, p2], "The Bends", "Radiohead", "1995")
+    assert [(str(p), c["discnumber"], c["disctotal"]) for p, c in plan] == [("a", "1", "2"), ("b", "1", "2"), ("c", "2", "2")]
+    assert all(c["album"] == "The Bends" and c["year"] == "1995" for _p, c in plan)
+    p3 = {"files": [Path("x"), Path("y")], "tags": [{"discnumber": "1"}, {"discnumber": "2"}], "disc": 3}
+    assert [c["discnumber"] for _p, c in T.plan_discs([p3], "A", "B", "")] == ["3", "4"]
+
+
+def test_listen_rule_and_history():
+    from hub.plugins.music import listens as L
+    from hub.store import Store
+    assert L.counts(100, 200) and not L.counts(99, 200)                 # half
+    assert L.counts(240, 900) and not L.counts(239, 900)                # or 4 minutes
+    assert not L.counts(20, 25) and not L.counts(0, 100)                # tracks under 30 s never count
+    with tempfile.TemporaryDirectory() as d:
+        L2 = L.Listens(Store(Path(d) / "s.db"))
+        song = {"id": "s1", "title": "Airbag", "artist": "Radiohead", "album": "OK Computer", "album_id": "al1",
+                "cover": "al1", "duration": 240}
+        assert not L2.add(song, 60, "phone")
+        assert L2.add(song, 130, "phone", "Kuba", at=1000.0)
+        assert not L2.add(song, 130, "phone", at=1010.0)                # duplicate within 30 s
+        assert L2.add(song, 130, "KEF", at=1010.0)                      # another output is another listen
+        assert L2.add({**song, "id": "s2", "title": "Lucky"}, 200, "phone", at=2000.0)
+        assert L2.add({**song, "id": "s3", "album": "Kid A", "album_id": "al2", "title": "Idioteque"}, 130, "phone")
+        rec = L2.recent(2)
+        assert len(rec) == 2 and rec[0]["title"] == "Idioteque"
+        top = L2.top("track", 0)
+        assert top[0]["id"] == "s1" and top[0]["plays"] == 2 and top[0]["name"] == "Airbag"
+        assert L2.top("album", 0)[0]["id"] == "al1" and L2.top("album", 0)[0]["plays"] == 3
+        assert L2.top("artist", 0)[0]["name"] == "Radiohead" and L2.top("artist", 0)[0]["plays"] == 4
+        assert [r["id"] for r in L2.top("track", 7)] == ["s3"]            # only the recent one is within 7 days
+        assert L2.plays_of(["s1", "s2", "zz"]) == {"s1": 2, "s2": 1}
+        st = L2.stats()
+        assert st["total"] == 4 and len(st["days"]) == 30 and st["days"][-1]["listens"] == 1 and st["hours"] > 0
+
+
+def test_player_reports_listens():
+    async def go():
+        got = []
+        out = FakeOut()
+        tasks = []
+
+        def spawn(coro, name=""):
+            t = asyncio.get_running_loop().create_task(coro)
+            tasks.append(t)
+            return t
+        pl = Player(out, lambda t: asyncio.sleep(0, "/tmp/x.flac"), spawn, None,
+                    lambda p, tr, secs: got.append((tr["id"], round(secs, 1))))
+        await pl.play([{"id": "a", "duration": 200}, {"id": "b", "duration": 200}, {"id": "c", "duration": 200}])
+        await asyncio.sleep(0.05)
+        pl._started -= 120                       # two minutes into a
+        await pl.next()                          # skip → reported once
+        assert [g[0] for g in got] == ["a"] and 119 < got[0][1] < 125
+        await asyncio.sleep(0.05)
+        out.finish.set()                         # b plays to its end
+        await asyncio.sleep(0.1)
+        assert [g[0] for g in got] == ["a", "b"]
+        await pl.stop()
+        await pl.stop()                          # nothing playing: no extra report
+        assert [g[0] for g in got].count("c") <= 1 and len(got) <= 3
+        for t in tasks:
+            t.cancel()
+    asyncio.run(go())
+
+
+class FakeLib:
+    """Navidrome with two disc-albums of one artist, tracking scrobbles and scans."""
+
+    def __init__(self, music: Path, files: dict):
+        self.music, self.files, self.scrobbles, self.scans = music, files, [], []
+        self.albums = {"al1": "The Bends (1)", "al2": "The Bends (2)"}
+        self.merged = False
+        self.deleted = set()
+        app = web.Application()
+        app.router.add_get("/rest/{ep}", self.h)
+        self.server = TestServer(app)
+
+    def song(self, sid):
+        f, aid = self.files[sid]
+        return {"id": sid, "title": f.stem, "artist": "Radiohead", "artistId": "ar1", "albumId": self.aid(aid),
+                "suffix": f.suffix[1:], "size": f.stat().st_size if f.exists() else 1, "duration": 200}
+
+    def aid(self, a):
+        return "al9" if self.merged else a
+
+    def album_obj(self, aid):
+        name = "The Bends" if self.merged else self.albums[aid]
+        songs = [self.song(s) for s, (f, a) in self.files.items() if self.aid(a) == aid and s not in self.deleted]
+        return {"id": aid, "name": name, "artist": "Radiohead", "artistId": "ar1", "songCount": len(songs), "song": songs}
+
+    async def h(self, request):
+        q, ep = request.query, request.match_info["ep"]
+        ok = {"status": "ok"}
+        if ep == "getAlbum":
+            a = self.album_obj(q["id"])
+            if not a["song"]:
+                return web.json_response({"subsonic-response": {"status": "failed", "error": {"code": 70, "message": "nf"}}})
+            ok["album"] = a
+        elif ep == "getSong":
+            if q["id"] in self.deleted:
+                return web.json_response({"subsonic-response": {"status": "failed", "error": {"code": 70, "message": "nf"}}})
+            ok["song"] = self.song(q["id"])
+        elif ep == "getArtist":
+            ids = ["al9"] if self.merged else ["al1", "al2"]
+            ok["artist"] = {"id": "ar1", "name": "Radiohead", "album": [self.album_obj(i) for i in ids]}
+        elif ep == "startScan":
+            self.scans.append(dict(q))
+            self.merged = self.merged or self.tagged_merged()
+        elif ep == "getScanStatus":
+            ok["scanStatus"] = {"scanning": False}
+        elif ep == "scrobble":
+            self.scrobbles.append(dict(q))
+        return web.json_response({"subsonic-response": ok})
+
+    def tagged_merged(self):
+        from hub.plugins.music import tags as T
+        live = [f for f, _a in self.files.values() if f.exists()]
+        return bool(live) and all(T.read_tags(f)["album"] == "The Bends" for f in live)
+
+
+def lib_app(p):
+    @web.middleware
+    async def errors(request, handler):
+        try:
+            return await handler(request)
+        except KeyError as err:
+            return web.json_response({"error": str(err)}, status=404)
+        except (ValueError, TypeError) as err:
+            return web.json_response({"error": str(err)}, status=400)
+    app = web.Application(middlewares=[errors])
+    for rd in p.routes():
+        app.router.add_route(rd.method, "/api/p/music" + rd.path, rd.handler)
+    return app
+
+
+def test_merge_discs_scrobble_and_delete_routes():
+    from hub.plugins.music import tags as T
+    with tempfile.TemporaryDirectory() as d:
+        async def go():
+            music = Path(d).resolve() / "music"
+            files = {}
+            for disc, n in (("CD 1", 2), ("CD 2", 3)):
+                dd = music / "Radiohead" / "The Bends (1995)" / disc
+                dd.mkdir(parents=True)
+                for i in range(n):
+                    f = dd / ("%02d - T%s%d.flac" % (i + 1, disc[-1], i))
+                    mk_flac(f, bytes([65 + len(files)]))        # different sizes are not needed: bytes differ, size alike
+                    f.write_bytes(f.read_bytes() + b"z" * len(files))     # unique size per file
+                    files["s%d" % len(files)] = (f, "al1" if disc == "CD 1" else "al2")
+                    T.write_tags(f, {"album": "The Bends (%s)" % disc[-1], "discnumber": "1", "tracknumber": str(i + 1)})
+            nav = FakeLib(music, files)
+            await nav.server.start_server()
+            hub, p = new_plugin(d, str(nav.server.make_url("")).rstrip("/"))
+            p.config["music_dir"] = str(music)
+            await p.start()
+            p.nav.poll = 0.01
+            async with TestClient(TestServer(lib_app(p))) as c:
+                r = await (await c.get("/api/p/music/library/album/al1/siblings")).json()
+                assert r["base"] == "The Bends" and [m["id"] for m in r["siblings"]] == ["al1", "al2"]
+                r = await (await c.get("/api/p/music/library/album/al2/tags")).json()
+                assert r["count"] == 3 and r["fields"]["album"]["value"] == "The Bends (2)" and not r["fields"]["album"]["mixed"]
+                r = await c.post("/api/p/music/library/album/al1/merge-discs")
+                body = await r.json()
+                assert r.status == 200 and body["album_id"] == "al9" and body["scanned"] and body["files"] == 5, body
+                for sid, (f, a) in files.items():
+                    t = T.read_tags(f)
+                    assert t["album"] == "The Bends" and t["disctotal"] == "2", t
+                    assert t["discnumber"] == ("1" if a == "al1" else "2") and t["albumartist"] == "Radiohead", t
+                assert not list(music.rglob(".casa-tag-*")) and nav.scans
+                # merge into / edit validation
+                r = await c.post("/api/p/music/library/album/al9/edit", json={"year": "abc"})
+                assert r.status == 400
+                r = await c.post("/api/p/music/library/album/al9/edit", json={"album": "The Bends (Remaster)", "year": "1995"})
+                assert (await r.json())["ok"] and T.read_tags(files["s0"][0])["album"] == "The Bends (Remaster)"
+                r = await c.post("/api/p/music/library/album/al9/merge", json={"into": "al9"})
+                assert r.status == 400
+                # a missing file refuses everything
+                files["s0"][0].unlink()
+                r = await c.get("/api/p/music/library/album/al9/tags")
+                assert r.status == 400 and (await r.json())["error"]
+                # phone listens: the server re-reads the song; short plays and bad ids are refused
+                r = await c.post("/api/p/music/listens", json={"id": "s1", "seconds": 150}, headers={"X-Casa-Person": "Kuba"})
+                assert (await r.json())["recorded"]
+                assert not (await (await c.post("/api/p/music/listens", json={"id": "s2", "seconds": 5})).json())["recorded"]
+                assert (await c.post("/api/p/music/listens", json={"id": "../x", "seconds": 150})).status == 400
+                await asyncio.sleep(0.05)
+                assert [s["id"] for s in nav.scrobbles] == ["s1"] and nav.scrobbles[0]["submission"] == "true"
+                assert "time" in nav.scrobbles[0]
+                rec = (await (await c.get("/api/p/music/listens/recent?limit=5")).json())["listens"]
+                assert rec[0]["person"] == "Kuba" and rec[0]["output"] == "phone" and rec[0]["song_id"] == "s1"
+                top = (await (await c.get("/api/p/music/listens/top?kind=album&days=7")).json())["top"]
+                assert top[0]["plays"] == 1
+                assert (await c.get("/api/p/music/listens/top?kind=zz")).status == 400
+                st = await (await c.get("/api/p/music/listens/stats")).json()
+                assert st["total"] == 1
+                al = await (await c.get("/api/p/music/album/al9")).json()
+                assert {t["id"]: t["plays"] for t in al["tracks"]}["s1"] == 1
+                # delete: files go, Navidrome is scanned and the album is gone from the answer
+                nav.scans.clear()
+                nav.deleted = {s for s, (f, a) in files.items() if a == "al2"}
+                for s in nav.deleted:
+                    files[s][0].unlink(missing_ok=True)
+            await p.stop()
+            await nav.server.close()
+        asyncio.run(go())
+
+
+def test_delete_waits_for_scan_and_retries_full():
+    with tempfile.TemporaryDirectory() as d:
+        async def go():
+            music = Path(d).resolve() / "music"
+            dd = music / "Radiohead" / "Album"
+            dd.mkdir(parents=True)
+            f = dd / "01 - Song.flac"
+            mk_flac(f)
+            nav = FakeLib(music, {"s1": (f, "al1")})
+            nav.albums = {"al1": "Album"}
+            stale = {"n": 0}
+            orig = nav.h
+
+            async def h(request):                      # Navidrome keeps listing the album until a full scan
+                if request.match_info["ep"] == "startScan" and request.query.get("fullScan") == "true":
+                    stale["n"] += 1
+                    nav.deleted.add("s1")
+                return await orig(request)
+            nav.h = h
+            nav.server = TestServer(web.Application())
+            app = web.Application()
+            app.router.add_get("/rest/{ep}", lambda r: nav.h(r))
+            nav.server = TestServer(app)
+            await nav.server.start_server()
+            hub, p = new_plugin(d, str(nav.server.make_url("")).rstrip("/"))
+            p.config["music_dir"] = str(music)
+            await p.start()
+            p.nav.poll = 0.01
+            async with TestClient(TestServer(lib_app(p))) as c:
+                assert (await c.post("/api/p/music/library/album/al1/delete", json={})).status == 400
+                r = await (await c.post("/api/p/music/library/album/al1/delete", json={"confirm": True})).json()
+                assert r["ok"] and r["deleted"] == 1 and r["scanned"] and r["listed"] is False and stale["n"] == 1, r
+                assert not f.exists() and p.job is None
+            await p.stop()
+            await nav.server.close()
+        asyncio.run(go())
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

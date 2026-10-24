@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-VERSION = "1.3"
+VERSION = "1.3.1"
 MEDIA_ROOT = Path("/run/media")      # SD cards are mounted here: /run/media/deck/<label> or /run/media/<label>
 SYSTEM_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 MAX_BODY = 8 * 1024 * 1024
@@ -357,7 +357,9 @@ def installer_args(kind: str, target: Path) -> list[str]:
     """Silent-install arguments (a list, never a shell string). NSIS wants /D= last and unquoted, so its
     target must not contain spaces (Wine would quote the argument)."""
     if kind == "inno":
-        return ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/NOICONS", "/DIR=" + wine_path(target)]
+        # /LANG: GOG installers otherwise stop at a language dialog even in /VERYSILENT mode
+        return ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/NOICONS", "/LANG=english",
+                "/DIR=" + wine_path(target)]
     if kind == "nsis":
         return ["/S", "/D=" + wine_path(target)]
     raise ValueError("unknown installer type")
@@ -904,7 +906,7 @@ class Agent:
         except OSError as err:
             return self._fail(job, "Cannot create the install folder: %s" % err)
         env = {**os.environ, "STEAM_COMPAT_DATA_PATH": str(prefix), "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(self.steam_dir),
-               "WINEDEBUG": "-all"}
+               "WINEDEBUG": "-all", "PROTON_USE_XALIA": "0"}   # Xalia (gamepad UI helper) only gets in the way here
         if Path("/tmp/.X11-unix/X0").exists() and not env.get("DISPLAY"):
             env["DISPLAY"] = ":0"
         argv = ["nice", "-n", "10", str(Path(pr["path"]) / "proton"), "run", str(setup)] + installer_args(kind, target)

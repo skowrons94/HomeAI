@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
+import time
 import secrets
 from urllib.parse import urlencode
 
@@ -18,7 +20,7 @@ LISTS = ("newest", "recent", "frequent", "random", "alphabeticalByName")
 
 
 class SubsonicError(Exception):
-    pass
+    code = 0                 # Subsonic error code (70 = not found), 0 when the answer never came
 
 
 def auth_params(user: str, password: str, salt: str | None = None) -> dict:
@@ -101,7 +103,9 @@ class Subsonic:
             err = resp.get("error") or {}
             if err.get("code") in (40, 41):
                 raise SubsonicError(_("Navidrome: wrong user or password"))
-            raise SubsonicError(str(err.get("message") or "Navidrome error"))
+            e = SubsonicError(str(err.get("message") or "Navidrome error"))
+            e.code = int(err.get("code") or 0)
+            raise e
         return resp
 
     async def ping(self) -> dict:
@@ -150,10 +154,39 @@ class Subsonic:
                 "albums": [map_album(a) for a in r.get("album") or []],
                 "songs": [map_song(s) for s in r.get("song") or []]}
 
-    async def start_scan(self) -> dict:
-        r = await self.call("startScan")
+    async def start_scan(self, full: bool = False) -> dict:
+        r = await self.call("startScan", fullScan="true" if full else None)
         return {"scanning": bool((r.get("scanStatus") or {}).get("scanning"))}
 
     async def scan_status(self) -> dict:
         s = (await self.call("getScanStatus")).get("scanStatus") or {}
         return {"scanning": bool(s.get("scanning")), "count": s.get("count") or 0}
+
+    poll = 0.7               # seconds between scan status checks (tests make it small)
+
+    async def scan_and_wait(self, full: bool = False, timeout: float = 60.0) -> bool:
+        """Start a scan and wait until Navidrome is done. → False when it was still scanning after ``timeout``."""
+        await self.start_scan(full)
+        end = time.monotonic() + timeout
+        await asyncio.sleep(self.poll)
+        while True:
+            if not (await self.scan_status())["scanning"]:
+                return True
+            if time.monotonic() >= end:
+                return False
+            await asyncio.sleep(self.poll)
+
+    async def exists(self, kind: str, iid: str) -> bool:
+        """Does Navidrome still list this album/song? (not found = False; other errors are raised)"""
+        try:
+            if kind == "album":
+                return bool((await self.album(iid))["tracks"])
+            return bool((await self.song(iid))["id"])
+        except SubsonicError as err:
+            if err.code == 70:
+                return False
+            raise
+
+    async def scrobble(self, sid: str, when: float | None = None) -> None:
+        """Count a finished listen in Navidrome (play count, 'Recently played')."""
+        await self.call("scrobble", id=sid, submission="true", time=int((when or time.time()) * 1000))
