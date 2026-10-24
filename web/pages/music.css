@@ -287,3 +287,10 @@ a.mu-pv { text-decoration: none; }
 .mu-manage-row { margin: 4px 0 2px; gap: 8px; }
 .mu-paths { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 220px; overflow: auto;
             background: var(--surface-2); border-radius: 10px; padding: 10px; margin: 0; }
+
+/* the song you tapped, then the one playing (anywhere it is listed) */
+.mu-trkrow, .mu-prow { border-radius: 12px; transition: background .15s; }
+[data-tid].picked { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+[data-tid].playing { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+[data-tid].playing .mu-trk-t b, [data-tid].playing .mu-row-t b { color: var(--accent); }
+[data-tid].playing .mu-num { color: var(--accent); font-weight: 700; }

@@ -67,7 +67,7 @@ const section = (title, count) => h("h3.mu-section", title, count != null ? h("s
 const audio = new Audio();
 audio.preload = "auto";
 const pl = { queue: [], index: -1, state: "idle", error: "", remote: null, remoteAt: 0, volume: 100, listeners: new Set() };
-const emit = () => pl.listeners.forEach((f) => f());
+const emit = () => { pl.listeners.forEach((f) => f()); markPlaying(); };
 const isPhone = () => view.output === PHONE;
 const outName = () => (isPhone() ? t("This phone") : (outputs.list.find((o) => o.id === view.output)?.name || t("Speaker")));
 
@@ -121,8 +121,20 @@ async function remote(path, body) {
 }
 
 /** tracks: full track objects (phone); album: id when they are all of that album (hub resolves it). */
-async function playTracks(tracks, start = 0, { shuffle = false, album = null, mode = "play" } = {}) {
+async function playTracks(tracks, start = 0, { shuffle = false, album = null, mode = "play", chosen = false } = {}) {
   if (!tracks.length) return;
+  picked(tracks[start]?.id);
+  // nothing playing anywhere yet: ask where first (the pick is a tap, so the phone may still start audio)
+  if (!chosen && mode === "play" && now().state === "idle") {
+    let done = false;
+    openOutputs((ok) => {
+      if (done) return;
+      done = true;
+      if (ok) playTracks(tracks, start, { shuffle, album, mode, chosen: true });
+      else picked(null);
+    });
+    return;
+  }
   if (isPhone()) {
     let list = tracks.slice();
     if (mode === "queue" || mode === "next") {
@@ -184,6 +196,20 @@ async function pollRemote() {
     const r = await P(`player?output=${encodeURIComponent(view.output)}`);
     pl.remote = r; pl.remoteAt = Date.now(); emit();
   } catch { /* output gone or hub busy */ }
+}
+
+// ---- which song is playing: highlighted wherever it is listed (rows carry data-tid) ----------
+
+let pickedId = null;
+function picked(id) { pickedId = id || null; markPlaying(); }
+function markPlaying() {
+  const n = now();
+  const playing = n.state !== "idle" ? n.track?.id : null;
+  if (playing && playing === pickedId) pickedId = null;
+  document.querySelectorAll("[data-tid]").forEach((el) => {
+    el.classList.toggle("playing", el.dataset.tid === playing);
+    el.classList.toggle("picked", el.dataset.tid === pickedId && el.dataset.tid !== playing);
+  });
 }
 
 // ---- mini-player bar -----------------------------------------------------------------------
@@ -329,7 +355,7 @@ function artistRow(a) {
 }
 
 function songRow(s) {
-  return h("div.mu-prow",
+  return h("div.mu-prow", { "data-tid": s.id },
     h("button.mu-prow-main", { onclick: () => playTracks([s], 0) },
       navCover(s.cover, s.album, 100, ".sm"),
       h("span.mu-row-t", h("b", s.title), h("span.mu-meta", joinMeta(s.artist, s.album)))),
@@ -408,6 +434,7 @@ async function openAlbum(id) {
   tracks.forEach((x, i) => {
     if (multiDisc && x.disc !== lastDisc) { lastDisc = x.disc; rows.push(h("div.mu-disc", t("Disc {n}", { n: x.disc }))); }
     rows.push(h("div.mu-trkrow",
+      { "data-tid": x.id },
       h("button.mu-trk", { onclick: () => playTracks(tracks, i, { album: id }) },
         h("span.mu-num", x.track || i + 1),
         h("span.mu-trk-t", h("b", x.title), x.artist && x.artist !== a.artist ? h("span.mu-meta", x.artist) : null),
@@ -431,7 +458,7 @@ async function openAlbum(id) {
     h("div.mu-actions",
       h("button.primary", { onclick: () => playTracks(tracks, 0, { album: id }) }, icon("play"), t("Play")),
       h("button", { onclick: () => playTracks(tracks, 0, { album: id, shuffle: true }) }, ic("shuffle"), t("Shuffle")),
-      h("button", { onclick: () => openOutputs((ok) => ok && playTracks(tracks, 0, { album: id })) }, icon("speaker"), t("Play on…")),
+      h("button", { onclick: () => openOutputs((ok) => ok && playTracks(tracks, 0, { album: id, chosen: true })) }, icon("speaker"), t("Play on…")),
       h("button", { onclick: () => playTracks(tracks, 0, { album: id, mode: "queue" }) }, ic("list"), t("Queue")),
       h("a.btn", { href: saveHref(id, "album"), download: "" }, icon("download"),
         joinMeta(t("Download to phone"), sizeText(a.size)))),
@@ -439,6 +466,7 @@ async function openAlbum(id) {
       h("button.danger", { onclick: () => confirmLibDelete("album", id, a.name, () => { s.close(); loadLibrary(); }) },
         icon("trash"), t("Delete album"))),
     tracksBox);
+  markPlaying();
 }
 
 /** Delete a song or album from the library (the files on the NAS), after showing exactly what goes. */
@@ -1057,7 +1085,12 @@ function drawDownloads() {
 
 function openOutputs(onDone) {
   const list = h("div.mu-list-plain");
-  const pick = (id) => { view.output = id; saveView(); pl.remote = null; s.close(); pollRemote(); drawBar(); emit(); onDone?.(true); };
+  let decided = false;
+  const pick = (id) => {
+    view.output = id; saveView(); pl.remote = null; decided = true;
+    onDone?.(true);           // still inside the tap: the phone is allowed to start audio
+    s.close(); pollRemote(); drawBar(); emit();
+  };
   const paint = () => {
     const opt = (id, name, sub, ico, extra) => h("div.mu-out-row" + (view.output === id ? ".on" : ""),
       h("button.mu-out-pick", { onclick: () => pick(id) }, h("span.mu-ico-sm", ico),
@@ -1071,7 +1104,7 @@ function openOutputs(onDone) {
   };
   const s = sheet(t("Play on"), [list,
     h("button.wide", { onclick: (e) => act(async () => { await loadOutputs(true); paint(); }, e.currentTarget) }, icon("refresh"), t("Find devices"))],
-  { onClose: () => onDone?.(false) });
+  { onClose: () => { if (!decided) onDone?.(false); } });
   s.el.parentElement.classList.add("mu-sheet");
   paint();
   if (!outputs.loaded) loadOutputs().then(paint);
