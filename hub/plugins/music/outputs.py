@@ -173,8 +173,11 @@ class AirPlayOutput(Output):
     async def set_volume(self, value: int) -> None:
         k = self.kef()
         if k is not None:
-            await k.set_volume(value)
-            return
+            try:
+                await k.set_volume(value)
+                return
+            except Exception as err:    # its control port can be closed while AirPlay still works
+                log.info("KEF volume via its protocol failed (%s): using AirPlay", err)
         temp = self.atv is None
         atv = await self._connect()
         try:
