@@ -304,9 +304,12 @@ def test_queue_logic():
         assert pl.state == "playing" and len(out.log) == n + 1 and out.log[-1][0] == "/tmp/t1"
         await pl.enqueue([{"id": "x"}], next_=True)
         assert pl.queue[pl.index + 1]["id"] == "x"
-        await pl.set_volume(150)
-        assert out.vol == 100 and pl.volume == 100
+        await pl.set_volume(150)                            # answers at once, applied in the background
+        assert pl.volume == 100
+        await settle()
+        assert out.vol == 100
         await pl.stop()
+        await settle()
         assert pl.state == "idle" and pl.track is None and out.closed >= 1
         await pl.play([tr[0]], shuffle=True)
         await settle()
@@ -1044,6 +1047,68 @@ def test_library_files_locate_and_delete():
                 raise AssertionError(bad)
             except ValueError:
                 pass
+
+
+def test_pause_in_place_and_fast_controls():
+    """DLNA speakers pause/resume without restarting the track; stop and volume answer at once."""
+    from hub.plugins.music.player import Output, Player
+
+    class Slow(Output):
+        can_pause = True
+
+        def __init__(self):
+            self.calls, self.end = [], asyncio.Event()
+
+        async def stream(self, path, offset=0.0, track=None):
+            self.calls.append(("stream", offset))
+            await self.end.wait()
+
+        async def pause(self):
+            await asyncio.sleep(0.2)
+            self.calls.append(("pause",))
+
+        async def resume(self):
+            self.calls.append(("resume",))
+
+        async def set_volume(self, v):
+            await asyncio.sleep(0.2)
+            self.calls.append(("vol", v))
+
+        async def close(self):
+            await asyncio.sleep(0.2)
+            self.calls.append(("close",))
+
+    async def go():
+        tasks = []
+
+        def spawn(c, name=""):
+            t = asyncio.ensure_future(c)
+            tasks.append(t)
+            return t
+        out = Slow()
+        pl = Player(out, lambda t: asyncio.sleep(0, "/tmp/x.flac"), spawn)
+        await pl.play([{"id": "a", "duration": 200}])
+        await asyncio.sleep(0.05)
+        t0 = asyncio.get_running_loop().time()
+        await pl.pause()
+        await pl.set_volume(30)
+        await pl.set_volume(40)
+        assert asyncio.get_running_loop().time() - t0 < 0.05 and pl.state == "paused" and pl.volume == 40
+        await asyncio.sleep(0.5)
+        await pl.resume()
+        assert pl.state == "playing"
+        await asyncio.sleep(0.05)
+        assert [c for c in out.calls if c[0] == "stream"] == [("stream", 0.0)]      # not restarted
+        assert ("pause",) in out.calls and ("resume",) in out.calls
+        assert [c for c in out.calls if c[0] == "vol"][-1] == ("vol", 40)
+        t0 = asyncio.get_running_loop().time()
+        await pl.stop()
+        assert asyncio.get_running_loop().time() - t0 < 0.05 and pl.state == "idle"
+        await asyncio.sleep(0.3)
+        assert ("close",) in out.calls
+        for t in tasks:
+            t.cancel()
+    asyncio.run(go())
 
 
 if __name__ == "__main__":

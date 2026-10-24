@@ -56,6 +56,9 @@ EXT = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/flac": ".flac", "audio/
        "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".m4a", "audio/ogg": ".ogg", "audio/opus": ".opus",
        "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav"}
 BROWSER_OK = {"mp3", "m4a", "aac", "flac", "wav"}
+# formats the speakers get as they are (pyatv/miniaudio decodes them, DLNA speakers play them): no transcoding,
+# which on a Pi 3 runs at about real time and made every new track wait minutes
+SPEAKER_RAW = {"mp3", "flac", "wav"}
 PASS_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition")
 
 
@@ -185,7 +188,7 @@ class MusicPlugin(Plugin):
         fut = asyncio.get_running_loop().create_future()
         self._fetching[sid] = fut
         try:
-            path = await self._download(sid)
+            path = await self._download(sid, str(track.get("suffix") or "").lower())
             fut.set_result(path)
             return path
         except BaseException as err:
@@ -195,10 +198,11 @@ class MusicPlugin(Plugin):
         finally:
             self._fetching.pop(sid, None)
 
-    async def _download(self, sid: str) -> str:
+    async def _download(self, sid: str, suffix: str = "") -> str:
         part = self.tmp / (sid + ".part")
+        url = self.nav.url("stream", id=sid, format="raw") if suffix in SPEAKER_RAW else self.nav.stream_url(sid, "mp3", 320)
         try:
-            async with self.session.get(self.nav.stream_url(sid, "mp3", 320),
+            async with self.session.get(url,
                                         timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=60)) as r:
                 ctype = r.headers.get("Content-Type", "").split(";")[0].strip().lower()
                 if r.status != 200 or ctype not in EXT:

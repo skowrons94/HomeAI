@@ -31,6 +31,15 @@ class Output:
     async def set_volume(self, value: int) -> None:
         raise NotImplementedError
 
+    # outputs that can pause in place (DLNA) set can_pause and implement these; others are stopped and restarted
+    can_pause = False
+
+    async def pause(self) -> None:
+        raise NotImplementedError
+
+    async def resume(self) -> None:
+        raise NotImplementedError
+
     async def close(self) -> None:
         pass
 
@@ -51,6 +60,8 @@ class Player:
         self._offset = 0.0            # seconds into the track at that moment
         self._frozen = 0.0            # position while paused
         self._prepared = False
+        self._vol_task: asyncio.Task | None = None
+        self._applied_volume: int | None = None
 
     # -- state ---------------------------------------------------------------------------------
     @property
@@ -187,11 +198,21 @@ class Player:
         if self.state != "playing":
             return
         self._frozen = self.position()
+        if self.output.can_pause and self._task and not self._task.done():
+            self.state = "paused"            # answer now; the speaker is told in the background
+            self._changed()
+            self.spawn(self._quiet(self.output.pause()), "music pause")
+            return
         await self._halt()
         self.state = "paused"
         self._changed()
 
     async def resume(self) -> None:
+        if self.state == "paused" and self.output.can_pause and self._task and not self._task.done():
+            self._offset, self._started, self.state = self._frozen, time.monotonic(), "playing"
+            self._changed()
+            self.spawn(self._quiet(self.output.resume()), "music resume")
+            return
         if self.state == "paused":
             await self._begin(self._frozen)
         elif self.state == "idle" and self.queue:
@@ -205,12 +226,34 @@ class Player:
         await self._halt()
         self.state, self._prepared = "idle", False
         self.queue, self.index = [], -1
-        with contextlib.suppress(Exception):
-            await self.output.close()
         self._changed()
+        self.spawn(self._quiet(self.output.close()), "music stop")
+
+    async def _quiet(self, coro) -> None:
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            log.info("music %s: %s", self.output.name, err)
 
     async def set_volume(self, value: int) -> None:
-        value = max(0, min(100, int(value)))
-        await self.output.set_volume(value)
-        self.volume = value
+        """Answer at once; one background task sends the latest value (a dragged slider sends many)."""
+        self.volume = max(0, min(100, int(value)))
         self._changed()
+        if self._vol_task is None or self._vol_task.done():
+            self._vol_task = self.spawn(self._apply_volume(), "music volume")
+
+    async def _apply_volume(self) -> None:
+        while self.volume is not None and self.volume != self._applied_volume:
+            v = self.volume
+            try:
+                await self.output.set_volume(v)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                log.info("volume on %s: %s", self.output.name, err)
+                self.error = str(err) or type(err).__name__
+                self._changed()
+                return
+            self._applied_volume = v

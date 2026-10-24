@@ -156,10 +156,27 @@ async function control(action, extra = {}) {
       else if (action === "volume") audio.volume = Math.max(0, Math.min(1, extra.value / 100));
       else if (action === "jump") phoneLoad(extra.index);
       emit();
-    } else await remote(`player/${action}`, extra);
-  } catch (e) { toast(e.message, true); }
+    } else {
+      optimistic(action, extra);
+      await remote(`player/${action}`, extra);
+    }
+  } catch (e) { toast(e.message, true); pollRemote(); }
 }
-const sendVolume = debounce((v) => control("volume", { value: v }), 250);
+const sendVolume = debounce((v) => control("volume", { value: v }), 120);
+
+/** Show the result of a tap at once; the hub's answer (a moment later) confirms or corrects it. */
+function optimistic(action, extra) {
+  const r = pl.remote;
+  if (!r) return;
+  const n = now();
+  const at = () => { r.position = n.position; pl.remoteAt = Date.now(); };
+  if (action === "pause" || (action === "toggle" && r.state === "playing")) { at(); r.state = "paused"; }
+  else if (action === "resume" || action === "toggle") { at(); r.state = "playing"; }
+  else if (action === "stop") { r.state = "idle"; r.track = null; r.queue = []; r.index = -1; }
+  else if (action === "volume") { r.volume = extra.value; return; }   // the slider already shows it
+  else return;
+  emit();
+}
 
 async function pollRemote() {
   if (isPhone() || !root?.isConnected) return;

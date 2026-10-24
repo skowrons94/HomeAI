@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import os
 import logging
 import re
 import socket
@@ -149,8 +150,12 @@ class Renderer:
         return m.group(1) if m else ""
 
 
+MIME = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav", ".m4a": "audio/mp4", ".ogg": "audio/ogg"}
+
+
 class DlnaOutput(Output):
     kind = "dlna"
+    can_pause = True
 
     def __init__(self, plugin, desc: dict):
         self.p, self.desc = plugin, desc
@@ -169,7 +174,7 @@ class DlnaOutput(Output):
             with contextlib.suppress(DlnaError):
                 await self.r.call(AVT, "Stop", InstanceID=0)
             await self.r.call(AVT, "SetAVTransportURI", InstanceID=0, CurrentURI=url,
-                              CurrentURIMetaData=didl(url, track))
+                              CurrentURIMetaData=didl(url, track, MIME.get(os.path.splitext(path)[1].lower(), "audio/mpeg")))
             await self.r.call(AVT, "Play", InstanceID=0, Speed=1)
             started, deadline = False, time.monotonic() + START_TIMEOUT
             while True:
@@ -185,9 +190,7 @@ class DlnaOutput(Output):
                 elif not started and time.monotonic() > deadline:
                     raise DlnaError(_("{name} did not start playing", name=self.name))
         except asyncio.CancelledError:
-            with contextlib.suppress(Exception):
-                await asyncio.shield(self.r.call(AVT, "Stop", InstanceID=0))
-            raise
+            raise            # next/stop: the next SetAVTransportURI or close() takes over the speaker
         except DlnaError as err:
             from .outputs import OutputError
             raise OutputError(str(err)) from err
@@ -198,6 +201,12 @@ class DlnaOutput(Output):
         except DlnaError as err:
             from .outputs import OutputError
             raise OutputError(str(err)) from err
+
+    async def pause(self) -> None:
+        await self.r.call(AVT, "Pause", InstanceID=0)
+
+    async def resume(self) -> None:
+        await self.r.call(AVT, "Play", InstanceID=0, Speed=1)
 
     async def close(self) -> None:
         with contextlib.suppress(Exception):
