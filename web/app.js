@@ -621,6 +621,7 @@ async function boot() {
   // first run: guided setup (skippable; Settings can start it again)
   if (store.onboarding && !location.hash) location.hash = "#/welcome";
   render();
+  drawNowBar();
 }
 
 boot();
