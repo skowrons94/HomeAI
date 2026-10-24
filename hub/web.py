@@ -47,7 +47,7 @@ def _json(data, status=200):
 
 # Plugin routes that carry their own credential (the Steam Deck agent has no login cookie: the
 # games plugin checks a signed, expiring link on every request to /dl/).
-PUBLIC_PREFIXES = ("/api/p/games/dl/",)
+PUBLIC_PREFIXES = ("/api/p/games/dl/", "/api/p/music/speaker/")   # signed links for the Deck / DLNA speakers
 
 
 def remote_error(err: Exception) -> str:

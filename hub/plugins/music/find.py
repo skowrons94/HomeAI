@@ -307,10 +307,64 @@ class Finder:
             out.append({"hash": e["hash"], "title": e["title"], "artist": e.get("artist"), "album": e.get("album"),
                         "year": e.get("year"), "added": e.get("added"),
                         "progress": 1.0 if done else lv.get("progress", 0.0), "rate": 0 if done else lv.get("rate", 0),
-                        "eta": None if done else lv.get("eta"), "state": e["state"], "error": e.get("error")})
+                        "eta": None if done else lv.get("eta"), "state": e["state"], "error": e.get("error"),
+                        "files": e["state"] == "error" and bool(e.get("payload")),
+                        "library": bool(e.get("albums")) and done})
         return out
 
-    async def cancel(self, h: str) -> None:
+    def _payload_path(self, e: dict) -> Path | None:
+        """The download's own files inside the incoming folder, or None. Never the incoming root, never a
+        symlink, never anything resolving outside the incoming folder."""
+        raw = e.get("payload")
+        if not raw:
+            return None
+        base, p = Path(e.get("dir") or self.incoming()), Path(raw)
+        if p.is_symlink() or not p.exists() or not inside(base, p) or p.resolve() == base.resolve():
+            return None
+        return p
+
+    def _album_paths(self, e: dict) -> list[Path]:
+        """Imported album folders still in the library: ``<music_dir>/<Artist>/<Album>`` (two levels deep)."""
+        root = self.music_dir
+        out = []
+        for raw in e.get("albums") or []:
+            p = Path(str(raw))
+            try:
+                rel = p.resolve().relative_to(root.resolve())
+            except ValueError:
+                continue
+            if len(rel.parts) >= 2 and p.is_dir() and not p.is_symlink() and inside(root, p):
+                out.append(p)
+        return out
+
+    @staticmethod
+    def _size(p: Path) -> int:
+        if p.is_file():
+            return p.stat().st_size
+        total = 0
+        for r, _d, files in os.walk(p):
+            for f in files:
+                try:
+                    fp = Path(r) / f
+                    if not fp.is_symlink():
+                        total += fp.stat().st_size
+                except OSError:
+                    pass
+        return total
+
+    async def info(self, h: str) -> dict:
+        """What removing this entry would delete: the payload left in the incoming folder and the albums in the library."""
+        e = next((x for x in self.entries() if x["hash"] == h), None)
+        if not e:
+            raise KeyError(_("Download not found"))
+        loop = asyncio.get_running_loop()
+        payload = self._payload_path(e)
+        albums = self._album_paths(e)
+        pay = {"path": str(payload), "size": await loop.run_in_executor(None, self._size, payload)} if payload else None
+        alb = [{"path": str(a), "size": await loop.run_in_executor(None, self._size, a)} for a in albums]
+        return {"hash": h, "state": e["state"], "payload": pay, "albums": alb}
+
+    async def cancel(self, h: str, delete_files: bool = False) -> None:
         es = self.entries()
         e = next((x for x in es if x["hash"] == h), None)
         if not e:
@@ -320,8 +374,44 @@ class Finder:
                 await self._tx().remove(h, delete_data=True)
             except Exception as err:
                 log.info("cancel %s: %s", h, err)
+        elif delete_files and e["state"] != "importing":
+            p = self._payload_path(e)
+            if p:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, lambda: shutil.rmtree(p) if p.is_dir() else p.unlink(missing_ok=True))
         self._save([x for x in es if x["hash"] != h])
         self.live.pop(h, None)
+
+    async def delete_from_library(self, h: str) -> dict:
+        """Delete the album folders this download imported (only those, only inside the music folder), rescan."""
+        e = next((x for x in self.entries() if x["hash"] == h), None)
+        if not e:
+            raise KeyError(_("Download not found"))
+        if e["state"] != "done":
+            raise ValueError(_("Only a finished download can be removed from the library"))
+        albums = self._album_paths(e)
+        if not albums:
+            raise ValueError(_("These albums are no longer in the library"))
+        root = self.music_dir
+        loop = asyncio.get_running_loop()
+
+        def wipe():
+            for a in albums:
+                if inside(root, a) and a.resolve() != root.resolve() and not a.is_symlink():
+                    shutil.rmtree(a)
+                    parent = a.parent
+                    if parent.resolve() != root.resolve() and inside(root, parent):
+                        try:
+                            parent.rmdir()           # the artist folder, only when it became empty
+                        except OSError:
+                            pass
+        await loop.run_in_executor(None, wipe)
+        self._save([x for x in self.entries() if x["hash"] != h])
+        try:
+            await self.p.rescan()
+        except Exception:
+            log.exception("rescan after library delete")
+        return {"ok": True, "removed": len(albums)}
 
     async def retry(self, h: str) -> None:
         e = next((x for x in self.entries() if x["hash"] == h), None)
@@ -374,21 +464,22 @@ class Finder:
                 await self._tx().remove(h, delete_data=False)
             except Exception as err:
                 log.info("remove %s: %s", h, err)
-            state, msg = "done", None
+            state, msg, albums = "done", None, []
             try:
                 payload = Path(e["payload"])
                 if not payload.exists():
                     state, msg = "error", _("The downloaded files were not found")
                 else:
                     loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, lambda: import_payload(
+                    res = await loop.run_in_executor(None, lambda: import_payload(
                         payload, Path(e["dir"]), self.music_dir, e["artist"], e["album"], e.get("year"),
                         bool(e.get("discography"))))
+                    albums = res.get("albums") or []
             except UnpackError as err:
                 state, msg = "error", _("Could not import: {err}", err=str(err))
             except (OSError, zipfile.BadZipFile) as err:
                 state, msg = "error", str(err)
-            self._update(h, state=state, error=msg)
+            self._update(h, state=state, error=msg, **({"albums": albums} if state == "done" else {}))
             if state == "done":
                 try:
                     await self.p.rescan()

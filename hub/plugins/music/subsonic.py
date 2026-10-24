@@ -39,7 +39,12 @@ def map_song(s: dict) -> dict:
             "disc": s.get("discNumber") or 1, "duration": s.get("duration") or 0,
             "suffix": (s.get("suffix") or "").lower(), "bitrate": s.get("bitRate") or 0,
             "cover": str(s.get("coverArt") or s.get("albumId") or s.get("id") or ""),
-            "year": s.get("year") or None}
+            "year": s.get("year") or None, "size": s.get("size") or 0}
+
+
+def map_genre(g: dict) -> dict:
+    return {"name": str(g.get("value") or g.get("name") or ""), "albums": g.get("albumCount") or 0,
+            "songs": g.get("songCount") or 0}
 
 
 def map_album(a: dict) -> dict:
@@ -47,7 +52,8 @@ def map_album(a: dict) -> dict:
             "artist": a.get("artist") or "", "artist_id": str(a.get("artistId") or ""),
             "year": a.get("year") or None, "cover": str(a.get("coverArt") or a.get("id") or ""),
             "songs": a.get("songCount") or 0, "duration": a.get("duration") or 0,
-            "mbid": a.get("musicBrainzId") or "", "added": a.get("created") or ""}
+            "mbid": a.get("musicBrainzId") or "", "added": a.get("created") or "",
+            "genre": a.get("genre") or ""}
 
 
 def map_artist(a: dict) -> dict:
@@ -70,6 +76,10 @@ class Subsonic:
 
     def stream_url(self, song_id: str, fmt: str = "mp3", bitrate: int = 320) -> str:
         return self.url("stream", id=song_id, format=fmt, maxBitRate=bitrate)
+
+    def download_url(self, item_id: str) -> str:
+        """Original file of a song, or a zip of an album (Navidrome)."""
+        return self.url("download", id=item_id)
 
     async def call(self, endpoint: str, **params) -> dict:
         if not self.configured:
@@ -109,7 +119,18 @@ class Subsonic:
         a = (await self.call("getArtist", id=aid)).get("artist") or {}
         return {**map_artist(a), "list": [map_album(x) for x in a.get("album") or []]}
 
-    async def album_list(self, kind: str = "newest", size: int = 30, offset: int = 0) -> list[dict]:
+    async def genres(self) -> list[dict]:
+        r = await self.call("getGenres")
+        out = [map_genre(g) for g in (r.get("genres") or {}).get("genre") or [] if isinstance(g, dict)]
+        return sorted((g for g in out if g["name"] and g["albums"]), key=lambda g: (-g["albums"], g["name"].lower()))
+
+    async def album_list(self, kind: str = "newest", size: int = 30, offset: int = 0, genre: str = "") -> list[dict]:
+        if kind == "byGenre":
+            genre = " ".join(str(genre or "").split())[:100]
+            if not genre:
+                raise ValueError(_("Invalid request"))
+            r = await self.call("getAlbumList2", type=kind, size=size, offset=offset, genre=genre)
+            return [map_album(a) for a in (r.get("albumList2") or {}).get("album") or []]
         if kind not in LISTS:
             raise ValueError(_("Unknown list"))
         r = await self.call("getAlbumList2", type=kind, size=size, offset=offset)
@@ -117,7 +138,8 @@ class Subsonic:
 
     async def album(self, aid: str) -> dict:
         a = (await self.call("getAlbum", id=aid)).get("album") or {}
-        return {**map_album(a), "tracks": [map_song(s) for s in a.get("song") or []]}
+        tracks = [map_song(s) for s in a.get("song") or []]
+        return {**map_album(a), "tracks": tracks, "size": sum(t["size"] for t in tracks)}
 
     async def song(self, sid: str) -> dict:
         return map_song((await self.call("getSong", id=sid)).get("song") or {})

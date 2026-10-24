@@ -286,12 +286,43 @@ class Discover:
     async def genres(self) -> list[dict]:
         async def fetch():
             d = await self._dz("/genre")
-            return [{"id": str(g["id"]), "name": g.get("name") or ""} for g in d.get("data") or []
+            return [{"id": str(g["id"]), "name": g.get("name") or "",
+                     "picture": _pic(g, "picture_medium", "picture_big", "picture_xl")}
+                    for g in d.get("data") or []
                     if isinstance(g, dict) and g.get("name") and g.get("id") not in (0, "0")]
-        return await self.cached("genres", DETAIL_TTL, fetch)
+        return [dict(g) for g in await self.cached("genres", DETAIL_TTL, fetch)]
 
     async def genre_albums(self, gid: str) -> list[dict]:
         return await self.mark(await self.chart("albums", _check_id(gid), 30))
+
+    async def genre_page(self, gid: str) -> dict:
+        """Charts of one genre: albums (marked owned), artists and tracks. A failing part is reported, not fatal."""
+        gid = _check_id(gid)
+
+        async def artists():
+            got = await self.chart("artists", gid, 24)
+            if got:
+                return got
+
+            async def fetch():
+                d = await self._dz(f"/genre/{gid}/artists")
+                return [map_artist(x) for x in d.get("data") or [] if isinstance(x, dict) and x.get("id")]
+            return [dict(a) for a in await self.cached(f"genre-artists:{gid}", CHART_TTL, fetch)]
+        res = await asyncio.gather(self.genre_albums(gid), artists(), self.chart("tracks", gid, 20),
+                                   return_exceptions=True)
+        out, errors = {}, {}
+        for name, val in zip(("albums", "artists", "tracks"), res):
+            if isinstance(val, Exception):
+                errors[name] = str(val) if isinstance(val, DiscoverError) else _("The music service sent an unexpected answer")
+                val = []
+            out[name] = val
+        if len(errors) == 3:
+            raise DiscoverError(next(iter(errors.values())))
+        idx = await self.index()
+        for tr in out["tracks"]:
+            tr["owned"] = idx.match(tr.get("artist", ""), tr.get("album", "")) if idx and tr.get("album") else None
+        out["errors"] = errors
+        return out
 
     # -- details ------------------------------------------------------------------------------------
     async def album(self, aid: str) -> dict:

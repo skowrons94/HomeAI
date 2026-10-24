@@ -241,3 +241,40 @@
 .mu-actions a.btn { min-height: 44px; flex: 1 1 130px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 10px;
   font-size: 14px; white-space: normal; text-align: center; text-decoration: none; }
 .mu-link { display: inline-flex; align-items: center; }
+
+/* genres: picture tiles (Discover) and coloured tiles (Library) */
+.mu-gt { position: relative; display: block; width: 100%; aspect-ratio: 16 / 10; padding: 0; border: 0; overflow: hidden; cursor: pointer;
+  border-radius: 12px; color: #fff; text-align: left; font: inherit; box-shadow: var(--shadow); white-space: normal;
+  background: linear-gradient(150deg, hsl(var(--mh) 55% 42%), hsl(calc(var(--mh) + 50) 55% 24%)); transition: transform .15s; }
+.mu-gt:active { transform: scale(.98); }
+.mu-gt img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .3s; }
+.mu-gt img.in { opacity: 1; }
+.mu-gt::after { content: ""; position: absolute; inset: 0; background: linear-gradient(to top, rgb(0 0 0 / .72), rgb(0 0 0 / .05) 65%); }
+.mu-gt-n { position: absolute; z-index: 1; left: 10px; right: 10px; bottom: 8px; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.mu-gt-n b { font-size: 14px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; text-shadow: 0 1px 4px rgb(0 0 0 / .5); }
+.mu-gt-n small { font-size: 11px; opacity: .85; }
+.mu-grail { grid-auto-columns: 132px; }
+@media (min-width: 761px) { .mu-grail { grid-auto-columns: 168px; } }
+.mu-ggrid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (min-width: 560px) { .mu-ggrid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 900px) { .mu-ggrid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); } }
+.mu-rhead .mu-mini { margin-left: auto; }
+.mu-gback { display: flex; align-items: center; gap: 4px; margin: 0 0 6px -8px; min-width: 0; }
+.mu-gback h3 { margin: 0; font-size: 18px; min-width: 0; overflow-wrap: anywhere; }
+.mu-gback .icon { min-width: 44px; min-height: 44px; flex: none; }
+.mu-gback .mu-count { margin-left: 4px; font-size: 13px; color: var(--muted); }
+.mu-own { flex: none; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; background: rgb(32 160 78 / .92); color: #fff; }
+.mu-own svg.i { width: 11px; height: 11px; stroke-width: 3.5; }
+
+/* download to the phone */
+.mu-trkrow { display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--line); }
+.mu-trkrow .mu-trk { border-bottom: 0; flex: 1; min-width: 0; width: auto; }
+a.mu-pv { text-decoration: none; }
+.mu-trkrow a.mu-pv, .mu-prow a.mu-pv { color: var(--muted); background: none; }
+
+/* removing a download */
+.mu-actions.col { flex-direction: column; }
+.mu-actions.col > button { flex: none; width: 100%; }
+.mu-delbox { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--surface-2); min-width: 0; }
+.mu-delbox code { font-size: 12px; overflow-wrap: anywhere; word-break: break-all; }

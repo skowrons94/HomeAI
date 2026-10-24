@@ -21,7 +21,8 @@ import shutil
 import time
 from pathlib import Path
 
-from .library import SUB_EXT, VIDEO_EXT
+from .files import (SUB_EXT, VIDEO_EXT, check_deletable, delete_paths, delete_video_with_subs, inside,
+                    tree_size)
 from .ranking import absolute_episode, parse
 from .transmission import TransmissionError
 from ...i18n import _
@@ -221,8 +222,9 @@ class Downloads:
         try:
             targets = await self._do_import(row, t)
             state = "seeding" if self.post_process == "copy" and self.seed_ratio > 0 else "imported"
+            row["data"]["targets"] = targets
             self._update(h, state=state, target=targets[0] if targets else None, error=None,
-                         progress=1)
+                         progress=1, data=json.dumps(row["data"]))
             if self.post_process == "copy" and state == "imported":
                 await self._remove_torrent(h, delete_data=True)
             await self.plugin.library.scan()
@@ -384,6 +386,84 @@ class Downloads:
         except TransmissionError as err:
             log.warning("remove %s: %s", h, err)
 
+    # -- what removing would delete ---------------------------------------------------------
+
+    def _library_targets(self, row: dict) -> list[str]:
+        """Imported video files of a download that still exist (all episodes of a pack)."""
+        paths = row["data"].get("targets") or ([row["target"]] if row.get("target") else [])
+        return [p for p in dict.fromkeys(paths) if os.path.isfile(p)]
+
+    async def _data_path(self, row: dict) -> tuple[str | None, bool]:
+        """(path of the downloaded data, still known to Transmission) - inside download_dir only."""
+        h = row["hash"]
+        top = None
+        in_tr = False
+        try:
+            ts = await self.tr.torrents([h]) if self.tr.enabled else []
+        except TransmissionError:
+            ts = []
+        if ts:
+            in_tr = True
+            top = os.path.join(ts[0]["downloadDir"], ts[0]["name"])
+        else:
+            saved = self.store.get(f"media.import.{h}")
+            if saved and saved.get("files"):
+                top = os.path.join(saved["downloadDir"], saved["files"][0]["name"].split("/")[0])
+            elif self.download_dir and row.get("name"):
+                top = os.path.join(self.download_dir, row["name"])
+        if top and (not self.download_dir or inside(top, [self.download_dir]) is None):
+            top = None
+        return top, in_tr
+
+    async def info(self, h: str) -> dict:
+        """What 'remove and delete the files' / 'delete from library' would delete, for the confirm sheet."""
+        row = next((r for r in self.rows() if r["hash"] == h), None)
+        if row is None:
+            raise KeyError(_("download not found"))
+        out = {"hash": h, "title": row["title"], "state": row["state"], "files": None, "library": None}
+        top, in_tr = await self._data_path(row)
+        if top and (os.path.exists(top) or in_tr):
+            out["files"] = {"path": top, "size": await asyncio.to_thread(tree_size, top),
+                            "exists": os.path.exists(top)}
+        lib = self._library_targets(row)
+        if lib:
+            roots = [self.movies_dir, self.series_dir]
+            out["library"] = {"paths": lib, "count": len(lib), "allowed": all(inside(p, roots) for p in lib),
+                              "size": sum(os.path.getsize(p) for p in lib)}
+        return out
+
+    async def _remove_with_files(self, h: str) -> None:
+        """Forget the download and delete what it left in the download folder."""
+        row = next((r for r in self.rows() if r["hash"] == h), None)
+        if row is None:
+            raise KeyError(_("download not found"))
+        top, in_tr = await self._data_path(row)
+        if top and os.path.lexists(top):  # validate before touching anything
+            check_deletable([top], [self.download_dir], allow_dirs=True)
+        await self._remove_torrent(h, delete_data=True)  # Transmission deletes its own data
+        if top and os.path.lexists(top):
+            await asyncio.to_thread(delete_paths, check_deletable([top], [self.download_dir], True),
+                                    [self.download_dir], False)
+        self.store.execute("DELETE FROM media_downloads WHERE hash=?", (h,))
+        self.store.delete(f"media.import.{h}")
+
+    async def _delete_library(self, h: str) -> None:
+        """Delete the imported film / episodes (and their subtitles) from the library."""
+        row = next((r for r in self.rows() if r["hash"] == h), None)
+        if row is None:
+            raise KeyError(_("download not found"))
+        roots = [self.movies_dir, self.series_dir]
+        targets = self._library_targets(row)
+        if not targets:
+            raise ValueError(_("nothing in the library to delete"))
+        for p in targets:  # validate everything before deleting anything
+            check_deletable([p], roots)
+        for p in targets:
+            await asyncio.to_thread(delete_video_with_subs, p, roots)
+        self._update(h, state="removed", target=None, error=None,
+                     data=json.dumps({**row["data"], "targets": []}))
+        await self.plugin.library.scan()
+
     async def action(self, h: str, action: str) -> None:
         if action == "pause":
             await self.tr.stop(h)
@@ -397,6 +477,10 @@ class Downloads:
             unfinished = row and row["state"] in ("queued", "downloading", "paused")
             await self._remove_torrent(h, delete_data=bool(unfinished))
             self.store.execute("DELETE FROM media_downloads WHERE hash=?", (h,))
+        elif action == "remove_files":
+            await self._remove_with_files(h)
+        elif action == "delete_library":
+            await self._delete_library(h)
         elif action == "retry_import":
             ts = await self.tr.torrents([h], files=True)
             t = ts[0] if ts else self.store.get(f"media.import.{h}")

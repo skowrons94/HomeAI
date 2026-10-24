@@ -128,5 +128,22 @@
   "The music service is busy, try again in a moment": "Il servizio musicale è occupato, riprova tra poco",
   "This album was not found": "Album non trovato",
   "Only a failed import can be retried": "Si può riprovare solo un'importazione non riuscita",
-  "Download not found": "Download non trovato"
+  "Download not found": "Download non trovato",
+  "Albums in your library:": "Album nella tua libreria:",
+  "Delete from library": "Elimina dalla libreria",
+  "Download to phone": "Scarica sul telefono",
+  "Empty": "Vuota",
+  "Files still in the downloads folder:": "File ancora nella cartella dei download:",
+  "Genres": "Generi",
+  "Navidrome could not provide this file": "Navidrome non riesce a fornire questo file",
+  "No files are left for this download.": "Per questo download non è rimasto nessun file.",
+  "Only a finished download can be removed from the library": "Solo un download completato può essere rimosso dalla libreria",
+  "Remove and delete the files": "Rimuovi ed elimina i file",
+  "Remove download": "Rimuovi download",
+  "Remove from list": "Togli dalla lista",
+  "See all": "Vedi tutti",
+  "The albums are deleted from the music folder and the library is rescanned.": "Gli album vengono eliminati dalla cartella musica e la libreria viene riscansionata.",
+  "These albums are no longer in the library": "Questi album non sono più nella libreria",
+  "Top albums": "Album più ascoltati",
+  "Top artists": "Artisti più ascoltati"
 }

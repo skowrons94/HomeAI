@@ -12,6 +12,7 @@ Ids: "tmdb:<n>" for TMDB, "tt<n>" (IMDb) for Cinemeta.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -25,6 +26,31 @@ TMDB = "https://api.themoviedb.org/3"
 IMG = "https://image.tmdb.org/t/p/"
 CINEMETA = "https://v3-cinemeta.strem.io"
 CINEMETA_PAGE = 50  # items per genre catalog page (skip= steps)
+
+
+# TMDB's TV genre list has no Horror or Thriller (and no Anime for either kind): browse them through
+# keywords / language. Keyword ids are looked up by exact name at run time, never hard-coded.
+VIRTUAL = {
+    "v:horror": {"name": "Horror", "types": ("series",),
+                 "keywords": ["horror", "slasher", "supernatural horror", "zombie"]},
+    "v:thriller": {"name": "Thriller", "types": ("series",),
+                   "keywords": ["thriller", "psychological thriller", "suspense"]},
+    "v:anime": {"name": "Anime", "types": ("movie", "series"), "genres": ["16"], "language": "ja"},
+}
+# sort -> (TMDB sort_by, minimum votes per kind: stops one-vote wonders topping the lists)
+SORTS = {"popular": ("popularity.desc", {"movie": 20, "tv": 10}),
+         "rated": ("vote_average.desc", {"movie": 500, "tv": 200}),
+         "recent": ("{date}.desc", {"movie": 10, "tv": 5})}
+
+
+def year_range(year: str) -> tuple[str, str]:
+    """'2019' -> ('2019-01-01', '2019-12-31'); '2010s' -> ('2010-01-01', '2019-12-31'); '' -> ('', '')."""
+    y = str(year or "").strip().lower()
+    if len(y) == 4 and y.isdigit():
+        return f"{y}-01-01", f"{y}-12-31"
+    if len(y) == 5 and y[:4].isdigit() and y.endswith("s") and y[3] == "0":
+        return f"{y[:4]}-01-01", f"{int(y[:4]) + 9}-12-31"
+    return "", ""
 
 
 def parse_tmdb_genres(data: dict) -> list[dict]:
@@ -190,31 +216,109 @@ class Metadata:
     # -- genres ---------------------------------------------------------------------
 
     async def genres(self, type_: str) -> list[dict]:
-        """[{id, name}] for 'movie' or 'series'. TMDB: localized names; Cinemeta: English names."""
+        """[{id, name}] for 'movie' or 'series'. TMDB: localized names (plus the virtual genres TMDB
+        lacks, see VIRTUAL); Cinemeta: English names."""
         if self.provider == "tmdb":
             data = await self._tmdb(f"/genre/{'movie' if type_ == 'movie' else 'tv'}/list",
                                     ttl=86400, persist=True)
-            return parse_tmdb_genres(data)
+            out = parse_tmdb_genres(data)
+            names = {g["name"].lower() for g in out}
+            for vid, v in VIRTUAL.items():
+                if type_ in v["types"] and v["name"].lower() not in names:
+                    out.append({"id": vid, "name": _(v["name"])})
+            return sorted(out, key=lambda g: g["name"])
         manifest = await self._get(CINEMETA + "/manifest.json", ttl=86400, persist=True)
         return parse_cinemeta_genres(manifest, type_)
 
-    async def discover(self, type_: str, genre: str, page: int = 1) -> dict:
-        """Popular titles of one genre: {items, page, has_more}."""
+    async def _keyword_ids(self, names: list[str]) -> list[str]:
+        """TMDB keyword ids for exact keyword names (looked up once, cached for a month)."""
+        ids = []
+        for n in names:
+            try:
+                res = (await self._tmdb("/search/keyword", ttl=30 * 86400, persist=True,
+                                        query=n)).get("results", [])
+            except Exception as err:
+                log.warning("TMDB keyword %r: %s", n, err)
+                continue
+            hit = next((k for k in res if (k.get("name") or "").lower() == n.lower()), None)
+            if hit:
+                ids.append(str(hit["id"]))
+        return ids
+
+    async def _genre_params(self, genre: str) -> dict:
+        """TMDB discover filters for a genre id: a real genre, or one of the virtual ones."""
+        if genre.isdigit():
+            return {"with_genres": genre}
+        v = VIRTUAL.get(genre)
+        if not v:
+            raise ValueError(_("unknown genre"))
+        p = {}
+        if v.get("genres"):
+            p["with_genres"] = ",".join(v["genres"])
+        if v.get("language"):
+            p["with_original_language"] = v["language"]
+        if v.get("keywords"):
+            ids = await self._keyword_ids(v["keywords"])
+            p["with_keywords"] = "|".join(ids) if ids else "0"  # none found: match nothing
+        return p
+
+    async def discover(self, type_: str, genre: str, page: int = 1, sort: str = "popular",
+                       year: str = "", ttl: float = 3 * 3600, persist: bool = False) -> dict:
+        """Titles of one genre: {items, page, has_more}. sort: popular | rated | recent;
+        year: '2019' or a decade like '2010s'."""
         page = max(1, page)
+        sort = sort if sort in SORTS else "popular"
+        gte, lte = year_range(year)
         if self.provider == "tmdb":
-            if not str(genre).isdigit():
-                raise ValueError(_("unknown genre"))
-            data = await self._tmdb(f"/discover/{'movie' if type_ == 'movie' else 'tv'}", ttl=3 * 3600,
-                                    with_genres=genre, sort_by="popularity.desc", page=page,
-                                    include_adult="false", **{"vote_count.gte": 20})
+            kind = "movie" if type_ == "movie" else "tv"
+            params = await self._genre_params(str(genre))
+            datef = "primary_release_date" if kind == "movie" else "first_air_date"
+            if sort == "recent":
+                lte = min(lte or "9999", date.today().isoformat())
+            params.update({"sort_by": SORTS[sort][0].format(date=datef), "page": page,
+                           "include_adult": "false", "vote_count.gte": SORTS[sort][1][kind]})
+            if gte:
+                params[f"{datef}.gte"] = gte
+            if lte and (sort == "recent" or year):
+                params[f"{datef}.lte"] = lte
+            data = await self._tmdb(f"/discover/{kind}", ttl=ttl, persist=persist, **params)
             items = [x for x in (self._norm_tmdb(i, type_) for i in data.get("results", [])) if x]
             return {"items": items, "page": page, "has_more": page < min(data.get("total_pages", 1), 500)}
         skip = (page - 1) * CINEMETA_PAGE
-        data = await self._get(f"{CINEMETA}/catalog/{type_}/top/genre={quote(str(genre))}&skip={skip}.json",
-                               ttl=6 * 3600)
+        cat = "imdbRating" if sort == "rated" else "top"
+        data = await self._get(f"{CINEMETA}/catalog/{type_}/{cat}/genre={quote(str(genre))}&skip={skip}.json",
+                               ttl=ttl, persist=persist)
         metas = data.get("metas", [])
-        return {"items": [self._norm_cinemeta(m, type_) for m in metas], "page": page,
-                "has_more": len(metas) >= CINEMETA_PAGE * 0.9}
+        items = [self._norm_cinemeta(m, type_) for m in metas]
+        if gte or lte:  # Cinemeta can't filter by date: trim the page (the list may come out short)
+            items = [i for i in items if i["year"] and gte[:4] <= str(i["year"]) <= (lte or "9999")[:4]]
+        if sort == "recent":
+            items.sort(key=lambda i: i["release_date"] or str(i["year"] or ""), reverse=True)
+        return {"items": items, "page": page, "has_more": len(metas) >= CINEMETA_PAGE * 0.9}
+
+    async def genre_images(self, type_: str) -> dict:
+        """{genre id: backdrop url} - the most popular title of each genre, distinct across genres.
+        Cached for a week (one TMDB call per genre the first time)."""
+        genres = await self.genres(type_)
+        sem = asyncio.Semaphore(4)
+
+        async def one(g):
+            async with sem:
+                try:
+                    r = await self.discover(type_, g["id"], 1, ttl=7 * 86400, persist=True)
+                except Exception as err:
+                    log.debug("genre image %s: %s", g["id"], err)
+                    return []
+                return [i["backdrop"].replace("/w1280/", "/w780/") for i in r["items"] if i.get("backdrop")]
+
+        pools = await asyncio.gather(*(one(g) for g in genres))
+        used, out = set(), {}
+        for g, pool in zip(genres, pools):
+            pick = next((u for u in pool if u not in used), pool[0] if pool else None)
+            if pick:
+                used.add(pick)
+                out[g["id"]] = pick
+        return out
 
     async def search(self, query: str) -> list[dict]:
         if self.provider == "tmdb":

@@ -10,28 +10,30 @@ Pi is slow but a 1000-title library takes seconds.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import time
 from pathlib import Path
 
+from ...i18n import _
+from .files import (DL_SUB_EXT, SUB_EXT, VIDEO_EXT, check_file, delete_video_with_subs, hid,
+                    inside, siblings_of, size_of)
 from .ranking import ARTICLES, normalize, parse
 
 log = logging.getLogger("hub.media.library")
 
-VIDEO_EXT = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts", ".wmv", ".mpg", ".mpeg", ".webm"}
-SUB_EXT = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt"}
 FOLDER_RE = re.compile(r"^(?P<title>.+?)\s*[\(\[](?P<year>(19|20)\d\d)[\)\]]")
 SEASON_DIR_RE = re.compile(r"(?:season|stagione|serie|s)\s*0*(\d{1,2})\b", re.I)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS media_lib_movies (
     path TEXT PRIMARY KEY, title TEXT, norm TEXT, year INTEGER, quality TEXT, size INTEGER,
-    mtime REAL, meta_id TEXT, poster TEXT);
+    mtime REAL, meta_id TEXT, poster TEXT, genres TEXT);
 CREATE TABLE IF NOT EXISTS media_lib_shows (
     path TEXT PRIMARY KEY, title TEXT, norm TEXT, year INTEGER, episodes INTEGER, size INTEGER,
-    mtime REAL, meta_id TEXT, poster TEXT);
+    mtime REAL, meta_id TEXT, poster TEXT, genres TEXT);
 CREATE TABLE IF NOT EXISTS media_lib_episodes (
     show_path TEXT, season INTEGER, episode INTEGER, path TEXT,
     PRIMARY KEY (show_path, season, episode));
@@ -130,6 +132,11 @@ class Library:
         self.movies_dir = cfg.get("movies_dir", "")
         self.series_dir = cfg.get("series_dir", "")
         self.store.db.executescript(SCHEMA)
+        for table in ("media_lib_movies", "media_lib_shows"):  # older databases: add the genres column
+            try:
+                self.store.execute(f"ALTER TABLE {table} ADD COLUMN genres TEXT")
+            except Exception:
+                pass
         self.last_scan = self.store.get("media.library.last_scan", 0)
         self.scanning = False
         self._load()
@@ -163,8 +170,8 @@ class Library:
             self.scanning = False
         db = self.store
         # keep resolved posters across rescans
-        old_m = {r["path"]: r for r in db.query("SELECT path, meta_id, poster FROM media_lib_movies")}
-        old_s = {r["path"]: r for r in db.query("SELECT path, meta_id, poster FROM media_lib_shows")}
+        old_m = {r["path"]: r for r in db.query("SELECT path, meta_id, poster, genres FROM media_lib_movies")}
+        old_s = {r["path"]: r for r in db.query("SELECT path, meta_id, poster, genres FROM media_lib_shows")}
         db.execute("BEGIN")
         try:
             db.execute("DELETE FROM media_lib_movies")
@@ -172,14 +179,18 @@ class Library:
             db.execute("DELETE FROM media_lib_episodes")
             for m in movies:
                 o = old_m.get(m["path"], {})
-                db.execute("INSERT OR REPLACE INTO media_lib_movies VALUES "
-                           "(:path,:title,:norm,:year,:quality,:size,:mtime,:meta_id,:poster)",
-                           {**m, "meta_id": o.get("meta_id"), "poster": o.get("poster")})
+                db.execute("INSERT OR REPLACE INTO media_lib_movies (path,title,norm,year,quality,size,mtime,"
+                           "meta_id,poster,genres) VALUES "
+                           "(:path,:title,:norm,:year,:quality,:size,:mtime,:meta_id,:poster,:genres)",
+                           {**m, "meta_id": o.get("meta_id"), "poster": o.get("poster"),
+                            "genres": o.get("genres")})
             for s in shows:
                 o = old_s.get(s["path"], {})
-                db.execute("INSERT OR REPLACE INTO media_lib_shows VALUES "
-                           "(:path,:title,:norm,:year,:episodes,:size,:mtime,:meta_id,:poster)",
-                           {**s, "meta_id": o.get("meta_id"), "poster": o.get("poster")})
+                db.execute("INSERT OR REPLACE INTO media_lib_shows (path,title,norm,year,episodes,size,mtime,"
+                           "meta_id,poster,genres) VALUES "
+                           "(:path,:title,:norm,:year,:episodes,:size,:mtime,:meta_id,:poster,:genres)",
+                           {**s, "meta_id": o.get("meta_id"), "poster": o.get("poster"),
+                            "genres": o.get("genres")})
             for e in eps:
                 db.execute("INSERT OR REPLACE INTO media_lib_episodes VALUES "
                            "(:show_path,:season,:episode,:path)", e)
@@ -216,6 +227,13 @@ class Library:
             return set()
         return {(r["season"], r["episode"]) for r in self.store.query(
             "SELECT season, episode FROM media_lib_episodes WHERE show_path=?", (show["path"],))}
+
+    def episode_paths(self, show: dict | None, season: int) -> dict[int, str]:
+        if not show:
+            return {}
+        return {r["episode"]: r["path"] for r in self.store.query(
+            "SELECT episode, path FROM media_lib_episodes WHERE show_path=? AND season=?",
+            (show["path"], season))}
 
     def flag(self, item: dict) -> dict:
         """Annotate a metadata item with in_library info."""
@@ -256,28 +274,103 @@ class Library:
             "series_dir_ok": bool(self.series_dir) and os.path.isdir(self.series_dir),
         }
 
-    def browse(self, kind: str) -> list[dict]:
+    def browse(self, kind: str, genre: str = "") -> list[dict]:
         if kind == "movies":
-            return self.store.query("SELECT title, year, quality, size, mtime, meta_id, poster "
+            rows = self.store.query("SELECT path, title, year, quality, size, mtime, meta_id, poster, genres "
                                     "FROM media_lib_movies ORDER BY mtime DESC")
-        return self.store.query("SELECT title, year, episodes, size, mtime, meta_id, poster "
-                                "FROM media_lib_shows ORDER BY mtime DESC")
+        else:
+            rows = self.store.query("SELECT path, title, year, episodes, size, mtime, meta_id, poster, genres "
+                                    "FROM media_lib_shows ORDER BY mtime DESC")
+        for r in rows:
+            try:
+                r["genres"] = [str(g) for g in json.loads(r["genres"] or "[]")]
+            except ValueError:
+                r["genres"] = []
+            if kind == "movies":
+                r["file_id"] = "m-" + hid(r["path"])
+            del r["path"]  # the client never sees (or sends back) a path
+        if genre:
+            rows = [r for r in rows if genre in r["genres"]]
+        return rows
+
+    # -- files: ids <-> paths (the client only ever holds ids) ---------------------------
+
+    @property
+    def roots(self) -> list[str]:
+        return [d for d in (self.movies_dir, self.series_dir) if d]
+
+    def entry(self, fid: str) -> tuple[str, str]:
+        """('m'|'e', indexed path) for a file id; KeyError when the index doesn't know it."""
+        kind, _sep, h = fid.partition("-")
+        table = {"m": "media_lib_movies", "e": "media_lib_episodes"}.get(kind)
+        if not table or not re.fullmatch(r"[0-9a-f]{20}", h):
+            raise KeyError(_("unknown file"))
+        for r in self.store.query(f"SELECT path FROM {table}"):
+            if hid(r["path"]) == h:
+                return kind, r["path"]
+        raise KeyError(_("unknown file"))
+
+    def _video(self, kind: str, entry: str) -> str:
+        """The video file behind an index entry (movies index their folder)."""
+        if kind == "e" or not os.path.isdir(entry):
+            return entry
+        vids = sorted(_videos(entry), key=lambda v: -v[1])
+        if not vids:
+            raise FileNotFoundError(_("The file is no longer there"))
+        return vids[0][0]
+
+    def resolve(self, fid: str, sub: int | None = None) -> tuple[Path, str]:
+        """(safe real path, download name) for a video id, or its n-th subtitle. Raises KeyError
+        (unknown id), PermissionError (outside the library roots), FileNotFoundError."""
+        kind, entry = self.entry(fid)
+        video = self._video(kind, entry)
+        if sub is None:
+            return check_file(video, self.roots), Path(video).name
+        subs = siblings_of(video)
+        if not 0 <= sub < len(subs) or Path(subs[sub]).suffix.lower() not in DL_SUB_EXT:
+            raise KeyError(_("unknown file"))
+        return check_file(subs[sub], self.roots), Path(subs[sub]).name
+
+    def file_info(self, kind: str, entry: str) -> dict | None:
+        """{id, name, size, subtitles: [{n, name, size}]} for an indexed movie / episode, if present."""
+        try:
+            video = self._video(kind, entry)
+            real = check_file(video, self.roots)
+        except (OSError, PermissionError):
+            return None
+        subs = [{"n": n, "name": Path(sp).name, "size": size_of(sp)}
+                for n, sp in enumerate(siblings_of(video))
+                if Path(sp).suffix.lower() in DL_SUB_EXT and inside(sp, self.roots)]
+        return {"id": f"{kind}-{hid(entry)}", "name": real.name, "size": real.stat().st_size,
+                "subtitles": subs}
+
+    def delete_entry(self, fid: str) -> dict:
+        """Delete a movie / episode video and its subtitles from the NAS (the UI confirmed)."""
+        kind, entry = self.entry(fid)
+        return delete_video_with_subs(self._video(kind, entry), self.roots)
 
     async def resolve_posters(self, limit: int = 40) -> None:
-        """Match library folders to metadata (poster + id) a few at a time."""
+        """Match library folders to metadata (poster + id + genres) a few at a time."""
         meta = self.plugin.metadata
         for table, type_ in (("media_lib_movies", "movie"), ("media_lib_shows", "series")):
-            rows = self.store.query(f"SELECT path, title, year FROM {table} "
-                                    f"WHERE meta_id IS NULL LIMIT ?", (limit,))
+            rows = self.store.query(f"SELECT path, title, year, meta_id FROM {table} "
+                                    f"WHERE meta_id IS NULL OR genres IS NULL LIMIT ?", (limit,))
             for r in rows:
                 try:
                     res = [i for i in await meta.search(r["title"]) if i["type"] == type_]
                 except Exception as err:
                     log.debug("poster lookup %s: %s", r["title"], err)
                     return
-                best = next((i for i in res if r["year"] and i.get("year")
-                             and abs(i["year"] - r["year"]) <= 1), res[0] if res else None)
-                self.store.execute(f"UPDATE {table} SET meta_id=?, poster=? WHERE path=?",
-                                   (best["id"] if best else "", best.get("poster") if best else "",
-                                    r["path"]))
+                if r["meta_id"]:  # already matched: keep the match, just learn the genres
+                    best = next((i for i in res if i["id"] == r["meta_id"]), None)
+                else:
+                    best = next((i for i in res if r["year"] and i.get("year")
+                                 and abs(i["year"] - r["year"]) <= 1), res[0] if res else None)
+                genres = json.dumps([str(g) for g in (best or {}).get("genres") or []])
+                if r["meta_id"]:
+                    self.store.execute(f"UPDATE {table} SET genres=? WHERE path=?", (genres, r["path"]))
+                else:
+                    self.store.execute(f"UPDATE {table} SET meta_id=?, poster=?, genres=? WHERE path=?",
+                                       (best["id"] if best else "", best.get("poster") if best else "",
+                                        genres, r["path"]))
                 await asyncio.sleep(0.25)  # be gentle with the APIs

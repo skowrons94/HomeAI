@@ -14,12 +14,17 @@ See docs/music.md.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import secrets
+import socket
 import logging
 import os
 import re
 import shutil
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
@@ -28,6 +33,7 @@ from ...core import Entity, Plugin, current_plugin
 from ...i18n import _
 from ...settings import get_path
 from . import find as findmod
+from . import dlna
 from . import outputs as outmod
 from .discover import Discover
 from .find import Finder
@@ -37,6 +43,9 @@ from .subsonic import Subsonic, SubsonicError, valid_id
 
 log = logging.getLogger("hub.music")
 
+STORE_SECRET = "music.stream_secret"   # signs the links DLNA speakers fetch tracks from
+STREAM_TTL = 6 * 3600
+STREAM_NAME = re.compile(r"^[A-Za-z0-9_.:@-]{1,120}\.(mp3|flac|m4a|ogg|opus|wav)$")
 STORE_OUTPUTS = "music.outputs"      # {device id: {credentials, password}}
 OWNED_TTL = 300
 MAX_TRACK = 400 * 1024 * 1024
@@ -46,6 +55,14 @@ EXT = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/flac": ".flac", "audio/
        "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav"}
 BROWSER_OK = {"mp3", "m4a", "aac", "flac", "wav"}
 PASS_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition")
+
+
+def content_disposition(name: str) -> str:
+    """Attachment header with a safe name: ASCII fallback plus RFC 5987 filename*."""
+    clean = "".join(c for c in str(name) if c >= " " and c != "\x7f")
+    clean = findmod.safe_name(clean, "music")
+    ascii_name = re.sub(r"[^A-Za-z0-9._ ()-]", "_", clean.encode("ascii", "ignore").decode() or clean)
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(clean, safe='')}"
 
 
 def _json(data, status=200):
@@ -222,6 +239,24 @@ class MusicPlugin(Plugin):
                     found[c.identifier] = outmod.describe(c, creds)
                 except Exception:
                     log.exception("describe %s", c)
+            try:
+                renderers = await dlna.discover(self.session)
+            except Exception as err:
+                log.info("DLNA discovery failed: %s", err)
+                renderers = []
+            for r in renderers:
+                same = next((o for o in found.values() if o["address"] == r["address"]), None)
+                if same is not None:
+                    # AirPlay 2 receivers of other brands (the KEF LSX) can stay silent with pyatv's stream:
+                    # when the same speaker is a DLNA renderer, let it fetch the track itself
+                    if "apple" not in r["manufacturer"].lower():
+                        same["dlna"] = r
+                    continue
+                rid = "dlna-" + re.sub(r"[^A-Za-z0-9]", "", r["udn"])[-24:]
+                found[rid] = {"id": rid, "name": r["name"] or r["address"], "address": r["address"],
+                              "model": " ".join(x for x in (r["manufacturer"], r["model"]) if x), "kind": "dlna",
+                              "needs_pairing": False, "password": False, "paired": False, "has_password": False,
+                              "dlna": r}
             for pid, p in self.players.items():     # keep devices that are playing even if discovery missed them
                 if pid not in found and pid in self.outs:
                     found[pid] = self.outs[pid]
@@ -240,7 +275,7 @@ class MusicPlugin(Plugin):
         desc = self.find_output(key)
         pl = self.players.get(desc["id"])
         if pl is None:
-            out = outmod.AirPlayOutput(self, desc)
+            out = dlna.DlnaOutput(self, desc) if desc.get("dlna") else outmod.AirPlayOutput(self, desc)
             pl = self.players[desc["id"]] = Player(out, self.fetch, self.spawn, self._player_changed)
         return pl
 
@@ -288,9 +323,50 @@ class MusicPlugin(Plugin):
         return {"ok": True, "hash": h}
 
     # -- routes ------------------------------------------------------------------------------------
+    # -- links DLNA speakers fetch the cached track from (public: the speaker has no login cookie) ---
+    def _stream_secret(self) -> bytes:
+        sec = self.hub.store.get(STORE_SECRET)
+        if not isinstance(sec, str) or len(sec) < 32:
+            sec = secrets.token_hex(32)
+            self.hub.store.set(STORE_SECRET, sec)
+        return bytes.fromhex(sec)
+
+    def _stream_sig(self, name: str, exp: int) -> str:
+        return hmac.new(self._stream_secret(), f"{name}|{exp}".encode(), hashlib.sha256).hexdigest()
+
+    def stream_link(self, path: str, peer: str) -> str:
+        """URL of a cached track for the speaker at ``peer``: our address as seen from it, signed, expiring."""
+        name = os.path.basename(path)
+        if not STREAM_NAME.match(name) or os.path.dirname(os.path.realpath(path)) != str(self.tmp.resolve()):
+            raise ValueError("not a cached track")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.connect((peer, 9))              # no packet is sent: picks the interface that reaches the speaker
+            host = sk.getsockname()[0]
+        port = int(get_path(self.hub.config, "web.port", 8080) or 8080)
+        exp = int(time.time()) + STREAM_TTL
+        return f"http://{host}:{port}/api/p/music/speaker/{exp}/{self._stream_sig(name, exp)}/{quote(name)}"
+
+    async def r_speaker_stream(self, request):
+        mi = request.match_info
+        name = mi["name"]
+        try:
+            exp = int(mi["exp"])
+        except ValueError:
+            raise web.HTTPNotFound()
+        if (not STREAM_NAME.match(name) or exp < time.time()
+                or not hmac.compare_digest(mi["sig"], self._stream_sig(name, exp))):
+            raise web.HTTPNotFound()
+        f = self.tmp / name
+        if not f.is_file():
+            raise web.HTTPNotFound()
+        ctype = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".m4a": "audio/mp4", ".ogg": "audio/ogg",
+                 ".opus": "audio/ogg", ".wav": "audio/wav"}[f.suffix]
+        return web.FileResponse(f, headers={"Content-Type": ctype})
+
     def routes(self):
         g, p, d = web.get, web.post, web.delete
-        return [g("/albums", self.r_albums), g("/artists", self.r_artists), g("/artist/{id}", self.r_artist),
+        return [g("/albums", self.r_albums), g("/artists", self.r_artists), g("/genres", self.r_genres),
+                g("/save/{id}", self.r_save), g("/artist/{id}", self.r_artist),
                 g("/album/{id}", self.r_album), g("/search", self.r_search),
                 g("/cover/{id}", self.r_cover), g("/stream/{id}", self.r_stream),
                 g("/mb/search", self.r_mb_search), g("/mb/discography/{mbid}", self.r_mb_disco),
@@ -301,8 +377,10 @@ class MusicPlugin(Plugin):
                 g("/discover/resolve", self.r_disc_resolve),
                 g("/find", self.r_find), p("/download", self.r_download), g("/downloads", self.r_downloads),
                 d("/downloads/{hash}", self.r_cancel), p("/downloads/{hash}/retry", self.r_retry),
+                g("/downloads/{hash}/info", self.r_dl_info), p("/downloads/{hash}/library-delete", self.r_dl_library),
                 g("/outputs", self.r_outputs), p("/outputs/scan", self.r_outputs_scan),
                 p("/outputs/{id}/pair", self.r_pair), p("/outputs/{id}/password", self.r_password),
+                g("/speaker/{exp}/{sig}/{name}", self.r_speaker_stream),
                 g("/player", self.r_player), p("/player/play", self.r_play), p("/player/{action}", self.r_control),
                 p("/test", self.r_test), p("/rescan", self.r_rescan), g("/scan", self.r_scan)]
 
@@ -333,7 +411,11 @@ class MusicPlugin(Plugin):
         size = min(max(int(q.get("size") or 30), 1), 100)
         offset = max(int(q.get("offset") or 0), 0)
         return _json({"configured": self.nav.configured,
-                      "albums": await self._call(self.nav.album_list(q.get("type", "newest"), size, offset))})
+                      "albums": await self._call(self.nav.album_list(q.get("type", "newest"), size, offset,
+                                                                     q.get("genre", "")))})
+
+    async def r_genres(self, request):
+        return _json({"genres": await self._call(self.nav.genres())})
 
     async def r_artists(self, request):
         return _json({"artists": await self._call(self.nav.artists())})
@@ -383,6 +465,47 @@ class MusicPlugin(Plugin):
             if up.status >= 400 or up.headers.get("Content-Type", "").startswith(("application/json", "text/")):
                 raise KeyError(_("Navidrome could not provide this track"))
             resp = web.StreamResponse(status=up.status, headers={k: up.headers[k] for k in PASS_HEADERS if k in up.headers})
+            await resp.prepare(request)
+            async for chunk in up.content.iter_chunked(1 << 16):
+                await resp.write(chunk)
+            await resp.write_eof()
+            return resp
+        finally:
+            up.release()
+
+    async def r_save(self, request):
+        """Download to the phone: the original file of a track, or a zip of an album, proxied from Navidrome
+        in chunks (nothing is buffered, Range is passed through, credentials stay here)."""
+        iid = self._id(request)
+        kind = request.query.get("kind", "track")
+        if kind not in ("track", "album"):
+            raise ValueError(_("Invalid request"))
+        name = iid
+        try:
+            if kind == "album":
+                a = await self.nav.album(iid)
+                name = f"{a['artist']} - {a['name']}.zip"
+            else:
+                s = await self.nav.song(iid)
+                name = f"{s['artist']} - {s['title']}.{s['suffix'] or 'mp3'}" if s["title"] else iid
+        except SubsonicError as err:
+            raise ValueError(str(err))
+        headers = {"Range": request.headers["Range"]} if "Range" in request.headers else {}
+        try:
+            up = await self.session.get(self.nav.download_url(iid), headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=60))
+        except aiohttp.ClientError:
+            raise ValueError(_("Navidrome not reachable at {url}", url=self.nav.base))
+        try:
+            ctype = up.headers.get("Content-Type", "")
+            if up.status >= 400 or ctype.startswith(("application/json", "text/", "application/xml")):
+                raise KeyError(_("Navidrome could not provide this file"))
+            out = {k: up.headers[k] for k in PASS_HEADERS if k in up.headers and k != "Content-Disposition"}
+            if kind == "album" and not ctype.startswith(("application/zip", "application/x-zip")):
+                out["Content-Type"] = "application/zip"
+            out["Content-Disposition"] = content_disposition(name)
+            out["Cache-Control"] = "no-store"
+            resp = web.StreamResponse(status=up.status, headers=out)
             await resp.prepare(request)
             async for chunk in up.content.iter_chunked(1 << 16):
                 await resp.write(chunk)
@@ -441,7 +564,7 @@ class MusicPlugin(Plugin):
         return _json({"genres": await self.disc.genres()})
 
     async def r_disc_genre(self, request):
-        return _json({"albums": await self.disc.genre_albums(request.match_info["id"])})
+        return _json(await self.disc.genre_page(request.match_info["id"]))
 
     async def r_disc_album(self, request):
         return _json(await self.disc.album(request.match_info["id"]))
@@ -480,8 +603,15 @@ class MusicPlugin(Plugin):
         return _json({"ok": True})
 
     async def r_cancel(self, request):
-        await self.finder.cancel(request.match_info["hash"].lower())
+        await self.finder.cancel(request.match_info["hash"].lower(),
+                                 delete_files=request.query.get("files") in ("1", "true"))
         return _json({"ok": True})
+
+    async def r_dl_info(self, request):
+        return _json(await self.finder.info(request.match_info["hash"].lower()))
+
+    async def r_dl_library(self, request):
+        return _json(await self.finder.delete_from_library(request.match_info["hash"].lower()))
 
     # -- outputs
     async def r_outputs(self, request):

@@ -5,6 +5,7 @@ import hashlib
 import io
 import sys
 import tempfile
+from types import SimpleNamespace
 import zipfile
 from pathlib import Path
 
@@ -58,8 +59,24 @@ class FakeNavidrome:
             ok["album"] = {"id": "al1", "name": "Kid A", "artist": "Radiohead", "song": [
                 {"id": "s1", "title": "Everything", "track": 1, "duration": 1, "suffix": "flac"},
                 {"id": "s2", "title": "Kid A", "track": 2, "duration": 1, "suffix": "flac"}]}
+        elif ep == "getGenres":
+            ok["genres"] = {"genre": [{"value": "Rock", "albumCount": 3, "songCount": 30},
+                                      {"value": "Jazz", "albumCount": 5, "songCount": 40},
+                                      {"value": "Empty", "albumCount": 0, "songCount": 0}]}
+        elif ep == "download":
+            body = b"Z" * 200000 if q["id"].startswith("al") else b"FLACDATA"
+            rng = request.headers.get("Range")
+            if rng:
+                a, b = rng.replace("bytes=", "").split("-")
+                part = body[int(a):int(b or len(body) - 1) + 1]
+                return web.Response(status=206, body=part, content_type="audio/flac",
+                                    headers={"Content-Range": f"bytes {a}-{int(a) + len(part) - 1}/{len(body)}"})
+            if q["id"] == "missing":
+                return web.json_response({"subsonic-response": {"status": "failed", "error": {"code": 70, "message": "x"}}})
+            return web.Response(body=body, content_type="application/zip" if q["id"].startswith("al") else "audio/flac")
         elif ep == "getSong":
-            ok["song"] = {"id": q["id"], "title": "T" + q["id"], "duration": 1, "suffix": "mp3"}
+            ok["song"] = {"id": q["id"], "title": "T" + q["id"], "artist": "Ré/diohead", "duration": 1, "suffix": "flac",
+                          "size": 8}
         elif ep == "startScan":
             self.scans += 1
             ok["scanStatus"] = {"scanning": True}
@@ -435,6 +452,7 @@ def test_finish_flow_imports_and_rescans():
             assert media.transmission.removed == (h, False)
             assert (Path(d) / "music" / "Radiohead" / "Kid A (2000)" / "01.flac").exists()
             assert p.finder.entries()[0]["state"] == "done" and nav.scans == 1
+            assert p.finder.entries()[0]["albums"] == [str((Path(d) / "music" / "Radiohead" / "Kid A (2000)").resolve())]
             await p.stop()
             await nav.server.close()
         asyncio.run(go())
@@ -738,6 +756,263 @@ def test_failed_import_keeps_the_download():
         assert sorted(p.name for p in payload.iterdir()) == ["01.flac", "02.flac"]   # nothing lost
         out = mf.import_payload(payload, inc, music, "Radiohead", "The Bends", 1995)   # "Try again"
         assert out["files"] == 2 and not payload.exists()
+
+
+def test_genres_parsing_and_album_list():
+    with tempfile.TemporaryDirectory() as d:
+        async def go():
+            nav = FakeNavidrome()
+            await nav.server.start_server()
+            hub, p = new_plugin(d, str(nav.server.make_url("")).rstrip("/"))
+            await p.start()
+            g = await p.nav.genres()
+            assert [x["name"] for x in g] == ["Jazz", "Rock"] and g[0]["albums"] == 5      # empty genre dropped, biggest first
+            await p.nav.album_list("byGenre", 20, 0, "Jazz  Fusion")
+            ep, q = nav.calls[-1]
+            assert q["type"] == "byGenre" and q["genre"] == "Jazz Fusion"
+            try:
+                await p.nav.album_list("byGenre", 20, 0, "")
+                raise AssertionError
+            except ValueError:
+                pass
+            await p.stop()
+            await nav.server.close()
+        asyncio.run(go())
+
+
+def test_content_disposition_is_safe():
+    from hub.plugins.music import content_disposition as cd
+    h = cd('Bj\u00f6rk - "Hyper/ballad"\r\nX: y.flac')
+    assert "\r" not in h and "\n" not in h and "/" not in h.split("filename*=")[0]
+    assert h.startswith("attachment; filename=\"") and "filename*=UTF-8''Bj%C3%B6rk" in h
+    assert cd("..").startswith('attachment; filename="music"')
+
+
+def test_save_proxy_streams_with_range_and_hides_credentials():
+    with tempfile.TemporaryDirectory() as d:
+        async def go():
+            nav = FakeNavidrome()
+            await nav.server.start_server()
+            hub, p = new_plugin(d, str(nav.server.make_url("")).rstrip("/"))
+            await p.start()
+
+            @web.middleware
+            async def errors(request, handler):
+                try:
+                    return await handler(request)
+                except KeyError as err:
+                    return web.json_response({"error": str(err)}, status=404)
+                except (ValueError, TypeError) as err:
+                    return web.json_response({"error": str(err)}, status=400)
+            app = web.Application(middlewares=[errors])
+            app.router.add_routes([web.RouteDef(r.method, "/api/p/music" + r.path, r.handler, r.kwargs) for r in p.routes()])
+            async with TestClient(TestServer(app)) as c:
+                r = await c.get("/api/p/music/save/s1")
+                assert r.status == 200 and await r.read() == b"FLACDATA"
+                assert r.headers["Content-Type"] == "audio/flac"
+                cdp = r.headers["Content-Disposition"]
+                assert cdp.startswith("attachment;") and "Ts1.flac" in cdp and "filename*=UTF-8''R%C3%A9%20diohead%20-%20Ts1.flac" in cdp, cdp
+                assert "pw" not in str(dict(r.headers)) and "t=" not in cdp
+                ep, q = [x for x in nav.calls if x[0] == "download"][-1]
+                assert q["id"] == "s1"
+                r = await c.get("/api/p/music/save/s1", headers={"Range": "bytes=2-4"})
+                assert r.status == 206 and await r.read() == b"ACD" and "Content-Range" in r.headers
+                r = await c.get("/api/p/music/save/al1?kind=album")           # a zip, streamed (200 kB)
+                body = await r.read()
+                assert r.status == 200 and len(body) == 200000 and r.headers["Content-Type"] == "application/zip"
+                assert "Radiohead - Kid A.zip" in r.headers["Content-Disposition"]
+                assert (await c.get("/api/p/music/save/..%2Fx")).status == 400
+                assert (await c.get("/api/p/music/save/a%20b")).status == 400
+                assert (await c.get("/api/p/music/save/s1?kind=evil")).status == 400
+                assert (await c.get("/api/p/music/genres")).status == 200
+                r = await c.get("/api/p/music/albums?type=byGenre&genre=Rock")
+                assert r.status == 200 and nav.calls[-1][1]["genre"] == "Rock"
+            await p.stop()
+            await nav.server.close()
+        asyncio.run(go())
+
+
+def test_genre_page_marks_owned_and_survives_partial_failure():
+    async def go():
+        async def owned():
+            return [{"id": "n1", "name": "Kid A", "artist": "Radiohead"}]
+
+        class G(FakeDiscover):
+            async def _json(self, url, params=None, retry=False):
+                if "/genre/5" in url or "/chart/5/artists" in url:
+                    raise D.DiscoverError("down")
+                if "/chart/5/albums" in url:
+                    return {"data": [dz_album(10, "Kid A", "Radiohead")]}
+                if "/chart/5/tracks" in url:
+                    return {"data": [{"id": 1, "title": "T", "preview": "", "artist": {"id": 3, "name": "Radiohead"},
+                                      "album": {"id": 10, "title": "Kid A"}}]}
+                if url.endswith("/genre"):
+                    return {"data": [{"id": 0, "name": "All"},
+                                     {"id": 5, "name": "Rock", "picture_medium": "https://cdn-images.dzcdn.net/images/misc/x/250x250.jpg"}]}
+                return await super()._json(url, params, retry)
+        g = G(owned)
+        gs = await g.genres()
+        assert [x["name"] for x in gs] == ["Rock"] and gs[0]["picture"].endswith("250x250.jpg")
+        pg = await g.genre_page("5")
+        assert pg["albums"][0]["owned"] == "n1" and pg["tracks"][0]["owned"] == "n1" and pg["artists"] == []
+        assert "artists" in pg["errors"] and "albums" not in pg["errors"]
+        try:
+            await g.genre_page("5x")
+            raise AssertionError
+        except D.DiscoverError:
+            pass
+    asyncio.run(go())
+
+
+def test_delete_download_files_and_library_safety():
+    with tempfile.TemporaryDirectory() as d:
+        async def go():
+            nav = FakeNavidrome()
+            await nav.server.start_server()
+            hub, p = new_plugin(d, str(nav.server.make_url("")).rstrip("/"))
+            await p.start()
+            media = FakeMedia(str(Path(d) / "dl"))
+            hub.plugins["media"], hub.plugins["torrents"] = media, FakeTorrents()
+            inc, music, outside = Path(d) / "dl" / ".incoming", Path(d) / "music", Path(d) / "outside"
+            fi = p.finder
+            mk(inc / "Failed" / "01.flac", b"x" * 50)
+            mk(inc / "Keep" / "01.flac")
+            mk(outside / "precious.txt")
+            (inc / "Link").symlink_to(outside)
+            mk(music / "Radiohead" / "Kid A (2000)" / "01.flac", b"y" * 30)
+            mk(music / "Radiohead" / "Amnesiac (2001)" / "01.flac")
+            mk(music / "Other" / "Album" / "01.flac")
+            base = {"title": "t", "artist": "a", "album": "b", "added": 0, "dir": str(inc), "error": None}
+            fi._save([
+                {**base, "hash": "h1", "state": "error", "error": "x", "payload": str(inc / "Failed")},
+                {**base, "hash": "h2", "state": "error", "payload": str(inc)},                  # the incoming root
+                {**base, "hash": "h3", "state": "error", "payload": str(inc / "Link")},         # symlink escape
+                {**base, "hash": "h4", "state": "error", "payload": str(outside)},              # outside the folder
+                {**base, "hash": "h5", "state": "done", "payload": None,
+                 "albums": [str(music / "Radiohead" / "Kid A (2000)"), str(music), str(music / "Other"), str(outside)]},
+                {**base, "hash": "h6", "state": "error", "payload": str(inc / "Keep")},
+            ])
+            i = await fi.info("h1")
+            assert i["payload"]["size"] == 50 and i["payload"]["path"].endswith("Failed")
+            for h in ("h2", "h3", "h4"):
+                assert (await fi.info(h))["payload"] is None
+            await fi.cancel("h2", delete_files=True)
+            await fi.cancel("h3", delete_files=True)
+            await fi.cancel("h4", delete_files=True)
+            assert inc.exists() and (inc / "Keep" / "01.flac").exists() and (outside / "precious.txt").exists()
+            await fi.cancel("h6")                                    # remove from list only: files stay
+            assert (inc / "Keep" / "01.flac").exists()
+            await fi.cancel("h1", delete_files=True)
+            assert not (inc / "Failed").exists() and inc.exists() and not any(e["hash"] == "h1" for e in fi.entries())
+            # library: only album folders two levels below the music dir
+            ia = await fi.info("h5")
+            assert [a["path"] for a in ia["albums"]] == [str(music / "Radiohead" / "Kid A (2000)")]
+            await fi.delete_from_library("h5")
+            assert not (music / "Radiohead" / "Kid A (2000)").exists()
+            assert (music / "Radiohead" / "Amnesiac (2001)" / "01.flac").exists()     # sibling album untouched
+            assert (music / "Other" / "Album" / "01.flac").exists() and (outside / "precious.txt").exists()
+            assert nav.scans == 1 and not any(e["hash"] == "h5" for e in fi.entries())
+            fi._save(fi.entries() + [{**base, "hash": "h7", "state": "error", "albums": [str(music / "Other" / "Album")]}])
+            try:
+                await fi.delete_from_library("h7")          # only a finished import
+                raise AssertionError
+            except ValueError:
+                pass
+            assert (music / "Other" / "Album" / "01.flac").exists()
+            await p.stop()
+            await nav.server.close()
+        asyncio.run(go())
+
+
+def test_dlna_renderer_plays_until_stopped():
+    """The KEF path: SetAVTransportURI + Play, follow GetTransportInfo until the track ends."""
+    import aiohttp
+    from aiohttp import web
+    from hub.plugins.music import dlna
+
+    desc_xml = """<?xml version="1.0"?><root xmlns="urn:schemas-upnp-org:device-1-0"><device>
+      <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType><friendlyName>LSX 1</friendlyName>
+      <manufacturer>KEF</manufacturer><modelName>SP3994</modelName><UDN>uuid:abc-841715119ae6</UDN><serviceList>
+      <service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/AVTransport/ctrl</controlURL></service>
+      <service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><controlURL>/RenderingControl/ctrl</controlURL></service>
+      </serviceList></device></root>"""
+    d = dlna.parse_description(desc_xml, "http://192.168.1.43:8080/description.xml")
+    assert d["avt"] == "http://192.168.1.43:8080/AVTransport/ctrl" and d["manufacturer"] == "KEF"
+    assert dlna.parse_description("<x>", "http://a/") is None
+
+    async def go():
+        calls, states = [], iter(["TRANSITIONING", "PLAYING", "PLAYING", "STOPPED"])
+
+        async def ctrl(request):
+            action = request.headers["SOAPAction"].strip('"').split("#")[1]
+            body = await request.text()
+            calls.append((action, body))
+            if action == "GetTransportInfo":
+                st = next(states, "STOPPED")
+                return web.Response(text=f"<r><CurrentTransportState>{st}</CurrentTransportState></r>")
+            return web.Response(text="<ok/>")
+        app = web.Application()
+        app.router.add_post("/AVTransport/ctrl", ctrl)
+        app.router.add_post("/RenderingControl/ctrl", ctrl)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        async with aiohttp.ClientSession() as session:
+            r = {**d, "avt": f"http://127.0.0.1:{port}/AVTransport/ctrl",
+                 "rc": f"http://127.0.0.1:{port}/RenderingControl/ctrl", "address": "127.0.0.1"}
+            plugin = SimpleNamespace(session=session, hub=SimpleNamespace(plugins={}),
+                                     stream_link=lambda path, peer: "http://hub/api/p/music/stream/1/s/a&b.mp3")
+            out = dlna.DlnaOutput(plugin, {"id": "x", "name": "LSX 1", "address": "127.0.0.1", "dlna": r})
+            old, dlna.POLL = dlna.POLL, 0.01
+            try:
+                await out.stream("/tmp/a.mp3", 0, {"title": "Planet <Telex>", "artist": "Radiohead"})
+                await out.set_volume(30)
+            finally:
+                dlna.POLL = old
+        await runner.cleanup()
+        names = [a for a, _b in calls]
+        assert names[:3] == ["Stop", "SetAVTransportURI", "Play"] and names.count("GetTransportInfo") == 4, names
+        uri = calls[1][1]
+        assert "a&amp;b.mp3" in uri and "Planet &amp;lt;Telex&amp;gt;" in uri      # URL and DIDL escaped once more inside SOAP
+        assert "<DesiredVolume>30</DesiredVolume>" in calls[-1][1]
+    asyncio.run(go())
+
+
+def test_stream_links_are_signed():
+    async def go():
+        with tempfile.TemporaryDirectory() as d:
+            hub = Hub({"homekit": {"enabled": False}, "web": {"port": 8080}}, Path(d))
+            from hub.plugins.music import PLUGIN as MusicPlugin
+            m = MusicPlugin(hub, {})
+            m.tmp = Path(d) / "music-tmp"
+            m.tmp.mkdir()
+            f = m.tmp / "abc.mp3"
+            f.write_bytes(b"ID3" + b"x" * 100)
+            url = m.stream_link(str(f), "127.0.0.1")
+            assert url.startswith("http://127.0.0.1:8080/api/p/music/speaker/") and url.endswith("/abc.mp3")
+            exp, sig, name = url.split("/speaker/")[1].split("/")
+
+            class R:
+                def __init__(self, **mi):
+                    self.match_info = mi
+            resp = await m.r_speaker_stream(R(exp=exp, sig=sig, name=name))
+            assert resp.headers["Content-Type"] == "audio/mpeg"
+            from aiohttp import web
+            for bad in (dict(exp=exp, sig="0" * 64, name=name), dict(exp="1", sig=sig, name=name),
+                        dict(exp=exp, sig=sig, name="../hub.db")):
+                try:
+                    await m.r_speaker_stream(R(**bad))
+                    raise AssertionError(bad)
+                except web.HTTPNotFound:
+                    pass
+            try:
+                m.stream_link("/etc/passwd.mp3", "127.0.0.1")
+                raise AssertionError("outside")
+            except ValueError:
+                pass
+    asyncio.run(go())
 
 
 if __name__ == "__main__":

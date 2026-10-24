@@ -38,6 +38,7 @@ from aiohttp import web
 from ...core import Plugin
 from ...i18n import _
 from .downloads import Downloads
+from .files import file_response, hid
 from .indexers import Indexers, Query, magnet
 from .library import Library
 from .metadata import Metadata
@@ -277,6 +278,7 @@ class MediaPlugin(Plugin):
             web.get("/discover", self.r_discover),
             web.get("/search", self.r_search),
             web.get("/genres", self.r_genres),
+            web.get("/genres/images", self.r_genre_images),
             web.get("/discover/genre", self.r_discover_genre),
             web.get("/details/{type}/{id}", self.r_details),
             web.get("/episodes/{type}/{id}/{season}", self.r_episodes),
@@ -288,8 +290,13 @@ class MediaPlugin(Plugin):
             web.delete("/watchlist/{key}", self.r_watch_del),
             web.post("/watchlist/{key}/check", self.r_watch_check),
             web.get("/downloads", lambda r: _json(self.downloads.rows())),
+            web.get("/downloads/{hash}/info", self.r_dl_info),
             web.post("/downloads/{hash}/{action}", self.r_dl_action),
             web.get("/library", self.r_library),
+            web.get("/library/file/{id}", self.r_lib_file),
+            web.get("/library/file/{id}/info", self.r_lib_file_info),
+            web.get("/library/file/{id}/subtitle/{n}", self.r_lib_file),
+            web.post("/library/file/{id}/delete", self.r_lib_delete),
             web.get("/subtitles", self.r_subs_get),
             web.post("/subtitles", self.r_subs_post),
             web.post("/library/scan", self.r_scan),
@@ -308,16 +315,20 @@ class MediaPlugin(Plugin):
         return _json({"type": t, "provider": self.metadata.provider,
                       "genres": await self.metadata.genres(t)})
 
+    async def r_genre_images(self, request):
+        return _json({"images": await self.metadata.genre_images(_kind(request))})
+
     async def r_discover_genre(self, request):
         t = _kind(request)
-        genre = request.query.get("genre", "")
+        q = request.query
+        genre = q.get("genre", "")
         if not genre:
             return _json({"error": _("genre required")}, 400)
         try:
-            page = int(request.query.get("page", 1))
+            page = int(q.get("page", 1))
         except ValueError:
             page = 1
-        res = await self.metadata.discover(t, genre, page)
+        res = await self.metadata.discover(t, genre, page, q.get("sort", "popular"), q.get("year", ""))
         self._flag(res["items"])
         return _json({"type": t, "genre": genre, **res})
 
@@ -335,6 +346,8 @@ class MediaPlugin(Plugin):
         if t == "movie":
             m = self.library.find_movie(item.get("titles") or [item["title"]], item.get("year"))
             item["library_path"] = m["path"] if m else None
+            item["library_file"] = (await asyncio.to_thread(self.library.file_info, "m", m["path"])
+                                    if m else None)
         if t == "series":
             show = self.library.find_show(item.get("titles") or [item["title"]])
             item["library_path"] = show["path"] if show else None
@@ -348,12 +361,15 @@ class MediaPlugin(Plugin):
         season = int(request.match_info["season"])
         item = await self.metadata.details(t, id_)
         eps = await self.metadata.episodes(t, item["id"], season)
-        have = self.library.episodes(self.library.find_show(item.get("titles") or [item["title"]]))
+        show = self.library.find_show(item.get("titles") or [item["title"]])
+        have = self.library.episodes(show)
+        paths = self.library.episode_paths(show, season)
         busy = {(d["season"], d["episode"]): d for d in self.downloads.active_for(f"{t}:{item['id']}")}
         today = date.today().isoformat()
         for e in eps:
             e["aired"] = bool(e.get("air_date") and e["air_date"] <= today)
             e["in_library"] = (season, e["episode"]) in have
+            e["file_id"] = f"e-{hid(paths[e['episode']])}" if e["episode"] in paths else None
             d = busy.get((season, e["episode"])) or busy.get((season, None))
             e["downloading"] = {"progress": d["progress"], "state": d["state"]} if d else None
         return _json(eps)
@@ -424,8 +440,66 @@ class MediaPlugin(Plugin):
         return _json({"ok": True})
 
     async def r_library(self, request):
-        kind = request.query.get("kind", "movies")
-        return _json({"stats": self.library.stats(), "items": self.library.browse(kind)})
+        kind = "series" if request.query.get("kind") == "series" else "movies"
+        genre = request.query.get("genre", "")
+        everything = self.library.browse(kind)
+        items = [i for i in everything if not genre or genre in i["genres"]]
+        return _json({"stats": self.library.stats(), "items": items,
+                      "genres": await self._library_genres(kind, everything)})
+
+    async def _library_genres(self, kind: str, items: list[dict]) -> list[dict]:
+        """Genres present in the library (with counts) for the 'In libreria' filter."""
+        count: dict[str, int] = {}
+        for i in items:
+            for g in i["genres"]:
+                count[g] = count.get(g, 0) + 1
+        if not count:
+            return []
+        try:
+            names = {g["id"]: g["name"] for g in await self.metadata.genres(
+                "movie" if kind == "movies" else "series")}
+        except Exception:
+            return []
+        return sorted(({"id": g, "name": names[g], "count": n} for g, n in count.items() if g in names),
+                      key=lambda g: g["name"])
+
+    async def r_lib_file(self, request):
+        """Download a library video (or one of its subtitles): Range + sendfile, nothing read into memory.
+        The id comes from the library index; the path is re-checked against the library roots."""
+        sub = request.match_info.get("n")
+        try:
+            path, name = await asyncio.to_thread(
+                self.library.resolve, request.match_info["id"], int(sub) if sub is not None else None)
+        except PermissionError as err:
+            raise web.HTTPForbidden(text=str(err))
+        except FileNotFoundError as err:
+            raise web.HTTPNotFound(text=str(err))
+        except KeyError as err:
+            raise web.HTTPNotFound(text=str(err).strip("'\""))
+        return file_response(path, name)
+
+    async def r_lib_file_info(self, request):
+        kind, entry = self.library.entry(request.match_info["id"])
+        info = await asyncio.to_thread(self.library.file_info, kind, entry)
+        if not info:
+            return _json({"error": _("The file is no longer there")}, 404)
+        return _json(info)
+
+    async def r_lib_delete(self, request):
+        body = await request.json() if request.can_read_body else {}
+        if not body.get("confirm"):
+            return _json({"error": _("Confirmation required")}, 400)
+        try:
+            res = await asyncio.to_thread(self.library.delete_entry, request.match_info["id"])
+        except PermissionError as err:
+            return _json({"error": str(err)}, 403)
+        except FileNotFoundError as err:
+            return _json({"error": str(err)}, 404)
+        await self.library.scan()
+        return _json({"ok": True, **res})
+
+    async def r_dl_info(self, request):
+        return _json(await self.downloads.info(request.match_info["hash"]))
 
     async def r_scan(self, request):
         stats = await self.library.scan()

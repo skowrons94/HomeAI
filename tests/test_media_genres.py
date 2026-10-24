@@ -43,7 +43,7 @@ def test_metadata_discover():
     r = asyncio.run(md.discover("movie", "35", 2))
     assert r["items"][0]["id"] == "tmdb:1" and r["has_more"] and r["page"] == 2
     assert calls[0][0] == "/discover/movie" and calls[0][1]["with_genres"] == "35"
-    assert asyncio.run(md.genres("series"))[0]["name"] == "Azione" and calls[-1][0] == "/genre/tv/list"
+    assert "Azione" in [g["name"] for g in asyncio.run(md.genres("series"))] and calls[-1][0] == "/genre/tv/list"
 
     md.key = ""
     urls = []

@@ -8,7 +8,7 @@ const P = (path, opts) => api(`p/music/${path}`, opts);
 const KEY = "casa.music.view";
 const PHONE = "phone";
 const LISTS = () => [["newest", t("New")], ["recent", t("Recent")], ["frequent", t("Most played")],
-  ["random", t("Random")], ["alphabeticalByName", t("A–Z")], ["artists", t("Artists")]];
+  ["random", t("Random")], ["alphabeticalByName", t("A–Z")], ["artists", t("Artists")], ["genres", t("Genres")]];
 
 let view = { tab: "library", list: "newest", dtab: "artist", output: PHONE };
 try { view = { ...view, ...JSON.parse(localStorage.getItem(KEY) || "{}") }; } catch { /* private mode */ }
@@ -17,7 +17,7 @@ const saveView = () => { try { localStorage.setItem(KEY, JSON.stringify(view)); 
 let root = null;
 let timers = [];
 const els = {};
-let lib = { albums: [], artists: [], configured: true, error: "", loaded: false, search: null, searchError: "" };
+let lib = { albums: [], artists: [], genres: [], genre: "", configured: true, error: "", loaded: false, search: null, searchError: "" };
 let query = "";
 const dx = { q: "", artists: [], albums: [], dzArtists: [], dzAlbums: [], busy: false, searched: false, error: "", fallback: false };
 let downloads = [];
@@ -221,6 +221,12 @@ async function loadLibrary() {
     if (view.list === "artists") {
       lib.artists = (await P("artists")).artists || [];
       lib.configured = true;
+    } else if (view.list === "genres" && !lib.genre) {
+      lib.genres = (await P("genres")).genres || [];
+      lib.configured = true;
+    } else if (view.list === "genres") {
+      const d = await P(`albums?type=byGenre&genre=${encodeURIComponent(lib.genre)}&size=100`);
+      lib.albums = d.albums || []; lib.configured = d.configured !== false;
     } else {
       const d = await P(`albums?type=${encodeURIComponent(view.list)}&size=${view.list === "alphabeticalByName" ? 100 : 36}`);
       lib.albums = d.albums || []; lib.configured = d.configured !== false;
@@ -228,7 +234,9 @@ async function loadLibrary() {
     lib.error = "";
   } catch (e) {
     lib.error = e.message;
-    if (view.list === "artists") lib.artists = []; else lib.albums = [];     // never show a list of another view next to an error
+    if (view.list === "artists") lib.artists = [];
+    else if (view.list === "genres" && !lib.genre) lib.genres = [];
+    else lib.albums = [];     // never show a list of another view next to an error
   }
   lib.loaded = true;
   drawLibrary();
@@ -277,6 +285,19 @@ const activeDl = () => downloads.filter((d) => d.state === "downloading" || d.st
 
 // ---- library tab ------------------------------------------------------------------------
 
+/** Genre tile: the Deezer picture when there is one, else a coloured gradient; a count under the name. */
+function genreTile(name, picture, albums, fn) {
+  const box = h("button.mu-gt", { onclick: fn, style: `--mh:${hue(name)}`, "aria-label": name });
+  if (picture) box.append(h("img", { src: picture, loading: "lazy", alt: "", decoding: "async",
+    onload: (e) => e.target.classList.add("in"), onerror: (e) => e.target.remove() }));
+  box.append(h("span.mu-gt-n", h("b", name), albums != null ? h("small", t("{n} albums", { n: albums })) : null));
+  return box;
+}
+
+/** "Download to the phone": a plain link, so iOS Safari offers to save the file in Files. */
+const saveHref = (id, kind) => `/api/p/music/save/${encodeURIComponent(id)}?kind=${kind}`;
+const sizeText = (n) => (n > 0 ? fmt.bytes(n) : "");
+
 function albumTile(a) {
   return h("button.mu-tile", { onclick: () => openAlbum(a.id), "aria-label": a.name },
     navCover(a.cover, a.name, 300, ".sq"),
@@ -291,15 +312,17 @@ function artistRow(a) {
 }
 
 function songRow(s) {
-  return h("button.mu-row", { onclick: () => playTracks([s], 0) },
-    navCover(s.cover, s.album, 100, ".sm"),
-    h("span.mu-row-t", h("b", s.title), h("span.mu-meta", joinMeta(s.artist, s.album))),
-    h("span.mu-meta", mins(s.duration)));
+  return h("div.mu-prow",
+    h("button.mu-prow-main", { onclick: () => playTracks([s], 0) },
+      navCover(s.cover, s.album, 100, ".sm"),
+      h("span.mu-row-t", h("b", s.title), h("span.mu-meta", joinMeta(s.artist, s.album)))),
+    h("span.mu-meta.mu-dur", mins(s.duration)),
+    h("a.mu-pv", { href: saveHref(s.id, "track"), download: "", title: t("Download to phone"), "aria-label": t("Download to phone") }, icon("download")));
 }
 
 function emptyCard() {
   if (!lib.loaded) return h("div.empty", h("span.spin"));
-  if (!lib.configured || (lib.error && !lib.albums.length && !lib.artists.length)) {
+  if (!lib.configured || (lib.error && !lib.albums.length && !lib.artists.length && !lib.genres.length)) {
     return h("div.mu-card.mu-center", h("div.mu-ico", ic("music")),
       h("b", lib.configured ? t("The library is not reachable") : t("Connect your library")),
       h("p.muted", lib.error || t("Music uses Navidrome. Enter its address, user and password in the settings.")),
@@ -313,7 +336,7 @@ function emptyCard() {
 function drawLibrary() {
   if (!root?.isConnected) return;
   put(els.chips, ...LISTS().map(([k, l]) => chip(l, null, !query && view.list === k, () => {
-    view.list = k; query = ""; els.q.value = ""; lib.search = null; saveView(); lib.loaded = false; drawLibrary(); loadLibrary();
+    view.list = k; lib.genre = ""; query = ""; els.q.value = ""; lib.search = null; saveView(); lib.loaded = false; drawLibrary(); loadLibrary();
   })));
   if (query.trim().length >= 2 && lib.search) {
     const s = lib.search;
@@ -322,6 +345,19 @@ function drawLibrary() {
     if (s.albums.length) out.push(section(t("Albums"), s.albums.length), h("div.mu-grid", s.albums.map(albumTile)));
     if (s.songs.length) out.push(section(t("Songs"), s.songs.length), h("div.mu-card.mu-list", s.songs.map(songRow)));
     put(els.body, ...(out.length ? out : [h("div.empty", t("No results."))]));
+    return;
+  }
+  if (view.list === "genres") {
+    if (!lib.genre) {
+      put(els.body, lib.genres.length ? h("div.mu-grid.mu-ggrid", lib.genres.map((g) => genreTile(g.name, null, g.albums, () => {
+        lib.genre = g.name; lib.albums = []; lib.loaded = false; drawLibrary(); loadLibrary();
+      }))) : emptyCard());
+      return;
+    }
+    put(els.body, h("div.mu-gback", h("button.icon.ghost", { "aria-label": t("Back"), onclick: () => {
+      lib.genre = ""; lib.loaded = false; drawLibrary(); loadLibrary();
+    } }, icon("left")), h("h3", lib.genre), h("span.mu-count", t("{n} albums", { n: lib.albums.length }))),
+    lib.albums.length ? h("div.mu-grid", lib.albums.map(albumTile)) : emptyCard());
     return;
   }
   if (view.list === "artists") {
@@ -354,10 +390,13 @@ async function openAlbum(id) {
   const rows = [];
   tracks.forEach((x, i) => {
     if (multiDisc && x.disc !== lastDisc) { lastDisc = x.disc; rows.push(h("div.mu-disc", t("Disc {n}", { n: x.disc }))); }
-    rows.push(h("button.mu-trk", { onclick: () => playTracks(tracks, i, { album: id }) },
-      h("span.mu-num", x.track || i + 1),
-      h("span.mu-trk-t", h("b", x.title), x.artist && x.artist !== a.artist ? h("span.mu-meta", x.artist) : null),
-      h("span.mu-meta", mins(x.duration))));
+    rows.push(h("div.mu-trkrow",
+      h("button.mu-trk", { onclick: () => playTracks(tracks, i, { album: id }) },
+        h("span.mu-num", x.track || i + 1),
+        h("span.mu-trk-t", h("b", x.title), x.artist && x.artist !== a.artist ? h("span.mu-meta", x.artist) : null),
+        h("span.mu-meta", mins(x.duration))),
+      h("a.mu-pv", { href: saveHref(x.id, "track"), download: "",
+        title: joinMeta(t("Download to phone"), sizeText(x.size)), "aria-label": t("Download to phone") }, icon("download"))));
   });
   put(s.el, 
     h("div.mu-ahead", navCover(a.cover, a.name, 400, ".big"),
@@ -369,7 +408,9 @@ async function openAlbum(id) {
       h("button.primary", { onclick: () => playTracks(tracks, 0, { album: id }) }, icon("play"), t("Play")),
       h("button", { onclick: () => playTracks(tracks, 0, { album: id, shuffle: true }) }, ic("shuffle"), t("Shuffle")),
       h("button", { onclick: () => openOutputs((ok) => ok && playTracks(tracks, 0, { album: id })) }, icon("speaker"), t("Play on…")),
-      h("button", { onclick: () => playTracks(tracks, 0, { album: id, mode: "queue" }) }, ic("list"), t("Queue"))),
+      h("button", { onclick: () => playTracks(tracks, 0, { album: id, mode: "queue" }) }, ic("list"), t("Queue")),
+      h("a.btn", { href: saveHref(id, "album"), download: "" }, icon("download"),
+        joinMeta(t("Download to phone"), sizeText(a.size)))),
     h("div.mu-tracks", rows));
 }
 
@@ -465,7 +506,7 @@ const RAILS = () => [
   { key: "chart_tracks", title: t("Songs of the moment"), kind: "track" },
 ];
 const RAIL_TTL = 5 * 60 * 1000;
-const dsc = { rails: {}, errors: {}, busy: {}, at: {}, genres: null, genre: "", genreItems: null, genreErr: "", genreBusy: false };
+const dsc = { rails: {}, errors: {}, busy: {}, at: {}, genres: null, genre: "", genreData: null, genreErr: "", genreBusy: false, gAll: false };
 els.rails = {};
 let searchToken = 0;
 
@@ -552,7 +593,8 @@ function trackRow(tr, rank) {
       "aria-label": joinMeta(tr.title, tr.artist) },
     rank ? h("span.mu-num", rank) : null,
     cover(tr.cover, tr.album || tr.title, ".sm"),
-    h("span.mu-row-t", h("b", tr.title), h("span.mu-meta", tr.artist))),
+    h("span.mu-row-t", h("b", tr.title), h("span.mu-meta", tr.artist)),
+    tr.owned ? h("span.mu-own", { title: t("In your library") }, icon("check")) : null),
     h("span.mu-meta.mu-dur", mins(tr.duration)),
     previewBtn(tr));
 }
@@ -598,38 +640,49 @@ async function loadRail(key, force = false) {
 
 async function loadGenres() {
   if (dsc.genres) return;
-  try { dsc.genres = (await P("discover/genres")).genres || []; } catch { dsc.genres = []; }   // no chips; the rails still work
-  paintGenreChips();
+  try { dsc.genres = (await P("discover/genres")).genres || []; } catch { dsc.genres = []; }   // no tiles; the rails still work
+  paintGenreTiles();
 }
 
-function paintGenreChips() {
-  if (!els.gchips) return;
-  els.gchipwrap.hidden = !dsc.genres?.length;
-  put(els.gchips, chip(t("All"), null, !dsc.genre, () => pickGenre("")),
-    ...(dsc.genres || []).map((g) => chip(g.name, null, dsc.genre === g.id, () => pickGenre(dsc.genre === g.id ? "" : g.id))));
-  els.gchips.querySelector(".on")?.scrollIntoView({ block: "nearest", inline: "center" });
+function paintGenreTiles() {
+  if (!els.gsec) return;
+  els.gsec.hidden = !dsc.genres?.length || !!dsc.genre;
+  if (els.gsec.hidden) return;
+  const tiles = dsc.genres.map((g) => genreTile(g.name, g.picture, null, () => pickGenre(g.id)));
+  put(els.gsec, railHead(t("Genres"), h("button.ghost.mu-mini", { onclick: () => { dsc.gAll = !dsc.gAll; paintGenreTiles(); } },
+    dsc.gAll ? t("Show less") : t("See all"))),
+    dsc.gAll ? h("div.mu-grid.mu-ggrid", tiles) : h("div.mu-rail.mu-grail", tiles));
 }
 
 async function pickGenre(id) {
-  dsc.genre = id; dsc.genreItems = null; dsc.genreErr = "";
-  paintGenreChips();
+  dsc.genre = id; dsc.genreData = null; dsc.genreErr = "";
+  paintGenreTiles();
   els.railsWrap.hidden = !!id;
   els.genreBox.hidden = !id;
-  if (!id) { RAILS().forEach((r) => loadRail(r.key)); return; }
+  if (!id) { RAILS().forEach((r) => { paintRail(r.key); loadRail(r.key); }); return; }
+  window.scrollTo?.({ top: 0 });
   const mine = id;
   dsc.genreBusy = true; paintGenre();
-  try { dsc.genreItems = (await P(`discover/genre/${enc(id)}`)).albums || []; } catch (e) { dsc.genreErr = e.message; }
+  try { dsc.genreData = await P(`discover/genre/${enc(id)}`); } catch (e) { dsc.genreErr = e.message; }
   if (dsc.genre !== mine) return;
   dsc.genreBusy = false; paintGenre();
 }
 
 function paintGenre() {
   const g = dsc.genres?.find((x) => x.id === dsc.genre);
-  const head = railHead(g ? t("Top {genre}", { genre: g.name }) : t("Charts"));
-  if (dsc.genreBusy) put(els.genreBox, head, h("div.mu-grid", skelTiles("album", 6)));
-  else if (dsc.genreErr) put(els.genreBox, head, inlineError(dsc.genreErr, () => pickGenre(dsc.genre)));
-  else put(els.genreBox, head, dsc.genreItems?.length ? h("div.mu-grid", dsc.genreItems.map((a) => dTile(a, true)))
-    : h("div.mu-note", t("No results.")));
+  const head = h("div.mu-gback", h("button.icon.ghost", { "aria-label": t("Back"), onclick: () => pickGenre("") }, icon("left")),
+    h("h3", g?.name || t("Charts")));
+  if (dsc.genreBusy) { put(els.genreBox, head, h("div.mu-grid", skelTiles("album", 6))); return; }
+  if (dsc.genreErr) { put(els.genreBox, head, inlineError(dsc.genreErr, () => pickGenre(dsc.genre))); return; }
+  const d = dsc.genreData || {};
+  const part = (key, title, body) => (d.errors?.[key] ? [railHead(title), inlineError(d.errors[key], () => pickGenre(dsc.genre))]
+    : body.length ? [railHead(title), ...body] : []);
+  const out = [
+    ...part("albums", t("Top albums"), d.albums?.length ? [h("div.mu-grid", d.albums.map((a) => dTile(a, true)))] : []),
+    ...part("artists", t("Top artists"), d.artists?.length ? [h("div.mu-rail.round", d.artists.map(aTile))] : []),
+    ...part("tracks", t("Top songs"), d.tracks?.length ? [h("div.mu-card.mu-list", d.tracks.slice(0, 15).map((x, i) => trackRow(x, i + 1)))] : []),
+  ];
+  put(els.genreBox, head, out.length ? out : h("div.mu-note", t("No results.")));
 }
 
 function ensureDiscover() {
@@ -915,8 +968,32 @@ function dlRow(d) {
       await P(`downloads/${encodeURIComponent(d.hash)}/retry`, { body: {} }); await loadDownloads();
     }, e.currentTarget) }, icon("refresh")),
     h("button.icon.ghost", { "aria-label": active ? t("Cancel") : t("Remove"), onclick: (e) => act(async () => {
-      await P(`downloads/${encodeURIComponent(d.hash)}`, { method: "DELETE" }); await loadDownloads();
+      if (active) { await P(`downloads/${encodeURIComponent(d.hash)}`, { method: "DELETE" }); await loadDownloads(); }
+      else await openRemove(d);
     }, e.currentTarget) }, icon(active ? "x" : "trash")));
+}
+
+/** Remove a finished or failed entry: from the list only, or together with its files (path and size shown). */
+async function openRemove(d) {
+  const hash = encodeURIComponent(d.hash);
+  const info = await P(`downloads/${hash}/info`);
+  const done = async (fn) => { await fn(); s.close(); await loadDownloads(); };
+  const nothing = !info.payload && !info.albums.length;
+  const where = (x) => h("div.mu-delbox", h("code", x.path), h("span.mu-meta", sizeText(x.size) || t("Empty")));
+  const s = sheet(t("Remove download"), [
+    h("div.mu-res-title", d.title),
+    info.payload ? h("div.stack", h("div.mu-note", t("Files still in the downloads folder:")), where(info.payload)) : null,
+    info.albums.length ? h("div.stack", h("div.mu-note", t("Albums in your library:")), ...info.albums.map(where)) : null,
+    h("div.mu-actions.col",
+      h("button", { onclick: (e) => act(() => done(() => P(`downloads/${hash}`, { method: "DELETE" })), e.currentTarget) },
+        icon("x"), t("Remove from list")),
+      info.payload ? h("button.danger", { onclick: (e) => act(() => done(() => P(`downloads/${hash}?files=1`, { method: "DELETE" })), e.currentTarget) },
+        icon("trash"), t("Remove and delete the files")) : null,
+      info.albums.length ? h("button.danger", { onclick: (e) => act(() => done(() => P(`downloads/${hash}/library-delete`, { body: {} })), e.currentTarget) },
+        icon("trash"), t("Delete from library")) : null),
+    info.albums.length ? h("div.mu-note", t("The albums are deleted from the music folder and the library is rescanned.")) : null,
+    nothing ? h("div.mu-note", t("No files are left for this download.")) : null,
+  ]);
 }
 
 function drawDownloads() {
@@ -1043,12 +1120,11 @@ export default {
     els.dclear = h("button.mu-clear", { type: "button", hidden: !dx.q, "aria-label": t("Clear"), onclick: () => { clearSearch(); els.dq.focus(); } }, icon("x"));
     els.dseg = h("div.mu-chips");
     els.dres = h("div");
-    els.gchips = h("div.mu-chips");
-    els.gchipwrap = h("div.mu-chipwrap.mu-gwrap", { hidden: true }, els.gchips);
+    els.gsec = h("section.mu-rbox", { hidden: true });
     els.genreBox = h("div", { hidden: true });
     els.railsWrap = h("div");
     for (const r of RAILS()) { els.rails[r.key] = h("section.mu-rbox"); els.railsWrap.append(els.rails[r.key]); }
-    els.home = h("div", els.gchipwrap, els.genreBox, els.railsWrap);
+    els.home = h("div", els.gsec, els.genreBox, els.railsWrap);
     els.discover = h("div",
       h("form.mu-find", { onsubmit: (e) => { e.preventDefault(); els.dq.blur(); discover(); } },
         h("div.mu-search", icon("search"), els.dq, els.dclear), h("button.primary", { type: "submit" }, t("Search"))),

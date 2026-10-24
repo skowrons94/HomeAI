@@ -142,57 +142,131 @@ const emptyState = (ico, text, label, hash) =>
 
 // ---------------------------------------------------------------- discover / search
 
+const SORTS = () => [["popular", t("Most popular")], ["rated", t("Highest rated")], ["recent", t("Newest")]];
+// decades, then the last dozen years
+const YEARS = () => {
+  const y = new Date().getFullYear();
+  return [...[2020, 2010, 2000, 1990, 1980, 1970, 1960].filter((d) => d <= y).map((d) => [`${d}s`, `${d}–${String(d + 9).slice(2)}`]),
+          ...Array.from({ length: 12 }, (_, i) => [String(y - i), String(y - i)])];
+};
+const hue = (s) => [...String(s)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7);
+
+// big tappable genre tiles; backdrops arrive later (one TMDB call per genre the first time)
+function genreTiles(list, kind, onPick) {
+  const tiles = new Map();
+  const grid = h("div.m-gtiles", list.map((g) => {
+    const img = h("img", { alt: "", decoding: "async" });
+    const el = h("button.m-gtile", { onclick: () => onPick(g) }, img, h("span.m-gname", genreName(g.name)));
+    el.style.setProperty("--hue", hue(g.name));
+    tiles.set(g.id, img);
+    return el;
+  }));
+  P(`genres/images?type=${kind}`).then((r) => {
+    for (const [id, url] of Object.entries(r.images || {})) {
+      const img = tiles.get(id);
+      if (!img) continue;
+      img.onload = () => img.parentElement.classList.add("has-img");
+      img.src = url;
+    }
+  }).catch(() => {});
+  return grid;
+}
+
 async function renderDiscover(el, kind, genre) {
   kind = kind === "series" ? "series" : "movie";
   genre = genre ? decodeURIComponent(genre) : "";
-  const chips = h("div.m-chips-in");
+  let mode = genre === "genres" ? "genres" : genre ? "genre" : "home";
+  if (mode === "genres") genre = "";
+  let sort = "popular", year = "";
   const out = h("div");
   const seg = h("div.seg.m-kind");
-  const strip = h("div.m-chips", seg, chips);
-  let genres = [];
+  const gbtn = h("button.m-gbtn", { onclick: () => open("genres") });
+  const strip = h("div.m-strip", seg, gbtn);
+  const cache = {};   // kind -> genres
   let token = null;
-  const setHash = () => history.replaceState(null, "", genre ? `#/media/discover/${kind}/${enc(genre)}` : "#/media");
-  const pick = (id) => { genre = id === genre ? "" : id; paintChips(); show(); };
-  const paintChips = () => {
+  const setHash = () => history.replaceState(null, "",
+    mode === "genre" ? `#/media/discover/${kind}/${enc(genre)}` : mode === "genres" ? `#/media/discover/${kind}/genres` : "#/media");
+  const paintStrip = () => {
     fill(seg, ...[["movie", t("Movies")], ["series", t("Series")]].map(([k, l]) =>
-      h(`button${k === kind ? ".active" : ""}`, { onclick: () => { if (k !== kind) { kind = k; genre = ""; start(); } } }, l)));
-    fill(chips, ...genres.map((g) =>
-      h(`button.chip.g${g.id === genre ? ".on" : ""}`, { onclick: () => pick(g.id) }, genreName(g.name))));
-    chips.querySelector(".on")?.scrollIntoView({ block: "nearest", inline: "center" });
+      h(`button${k === kind ? ".active" : ""}`, { onclick: () => { if (k !== kind) { kind = k; open(mode === "home" ? "home" : "genres"); } } }, l)));
+    fill(gbtn, t("Genres"));
+    gbtn.className = `m-gbtn${mode !== "home" ? " on" : ""}`;
+    gbtn.onclick = () => open(mode === "home" ? "genres" : "home");
   };
+  function open(m, g = "") { mode = m; genre = g; sort = "popular"; year = ""; paintStrip(); show(); }
+  const genreList = async () => (cache[kind] ||= (await P(`genres?type=${kind}`)).genres);
+
   async function show() {
     setHash();
     const mine = token = {};
-    if (!genre) return rows(mine);
-    const g = genres.find((x) => x.id === genre);
+    if (mode === "home") return rows(mine);
+    fill(out, h("div.empty", h("div.spin")));
+    let list;
+    try { list = await genreList(); }
+    catch (e) { if (mine === token) fill(out, errorCard(e.message, { title: t("Couldn't load genres"), retry: show })); return; }
+    if (mine !== token) return;
+    if (mode === "genres") {
+      fill(out, h("div.section", h("h2", t("Genres"))),
+        list.length ? genreTiles(list, kind, (g) => open("genre", g.id))
+                    : h("div.empty", t("No genres available.")));
+    } else {
+      genreGrid(mine, list.find((x) => x.id === genre));
+    }
+  }
+
+  function genreGrid(mine, g) {
     const grid = h("div.m-grid");
     const more = h("button", t("More"));
     const box = h("div.m-more", more);
-    let page = 0, busy = false;
+    let page = 0, busy = false, done = false;
     async function next() {
-      if (busy) return;
+      if (busy || done) return;
       busy = true; more.disabled = true;
       try {
-        const r = await P(`discover/genre?type=${kind}&genre=${enc(genre)}&page=${page + 1}`);
+        const r = await P(`discover/genre?type=${kind}&genre=${enc(genre)}&page=${page + 1}&sort=${sort}&year=${enc(year)}`);
         if (mine !== token) return;
         page = r.page;
         grid.querySelectorAll(".skel").forEach((x) => x.remove());
         grid.append(...withImage(r.items).map((it) => poster(it)));
-        if (!grid.children.length && !r.has_more) box.replaceChildren(h("div.empty", t("Nothing found.")));
-        else if (!r.has_more) box.remove();
-      } catch (e) { grid.querySelectorAll(".skel").forEach((x) => x.remove()); toast(t("Couldn't load genre: {error}", { error: e.message }), true); }
-      finally { busy = false; more.disabled = false; }
+        done = !r.has_more;
+        if (!grid.children.length && done) box.replaceChildren(h("div.empty", t("Nothing found.")));
+        else if (done) box.replaceChildren();
+        else if (grid.children.length < 12) { busy = false; return next(); }   // a filtered page came out thin: keep going
+      } catch (e) {
+        grid.querySelectorAll(".skel").forEach((x) => x.remove());
+        if (mine === token) box.replaceChildren(errorCard(e.message, { title: t("Couldn't load genre"), retry: () => { done = false; box.replaceChildren(more); next(); } }));
+      } finally { busy = false; more.disabled = false; }
     }
     more.onclick = next;
-    fill(out, h("div.section", h("h2", genreName(g ? g.name : genre)), h("div.spacer"),
-                h("button.ghost", { onclick: () => pick(genre) }, icon("x"), t("Clear"))),
-         grid, box);
+    const sortSeg = h("div.seg.m-sort");
+    const paintSort = () => fill(sortSeg, ...SORTS().map(([k, l]) =>
+      h(`button${k === sort ? ".active" : ""}`, { onclick: () => { sort = k; paintSort(); reset(); } }, l)));
+    const yearSel = h("select.m-year", { "aria-label": t("Year"),
+      onchange: (e) => { year = e.target.value; reset(); } },
+      h("option", { value: "" }, t("Any year")),
+      YEARS().map(([v, l]) => h("option", { value: v }, l)));
+    yearSel.value = year;
+    function reset() {
+      const m = token = {};
+      mine = m;
+      page = 0; busy = false; done = false;
+      grid.replaceChildren(...skeletons(6));
+      box.replaceChildren(more);
+      next();
+    }
+    paintSort();
+    fill(out,
+      h("div.m-ghead",
+        h("button.ghost", { onclick: () => open("genres") }, icon("left"), t("Genres")),
+        h("h2", genreName(g ? g.name : genre))),
+      h("div.m-gctl", sortSeg, yearSel),
+      grid, box);
     grid.append(...skeletons(6));
     if ("IntersectionObserver" in window) {
       new IntersectionObserver((e) => e[0].isIntersecting && page && mine === token && next(),
                                { rootMargin: "400px" }).observe(box);
     }
-    await next();
+    next();
   }
   async function rows(mine) {
     fill(out, skelRail(), skelRail());
@@ -217,16 +291,9 @@ async function renderDiscover(el, kind, genre) {
     if (!secs.length) fill(out, errorCard(err?.message, { title: t("Couldn't reach the movie database."),
                                                           retry: show }));
   }
-  async function start() {
-    genres = [];
-    paintChips();
-    try { genres = (await P(`genres?type=${kind}`)).genres; } catch { genres = []; }   // no chips; the rails say why
-    if (genre && !genres.some((g) => g.id === genre)) genre = "";
-    paintChips();
-    await show();
-  }
   fill(el, strip, out);
-  await start();
+  paintStrip();
+  await show();
 }
 
 async function renderSearch(el, q, current = () => true) {
@@ -311,6 +378,8 @@ async function renderDetail(root, type, id, on) {
 
   const english = it.overview && (status?.metadata !== "tmdb" || looksEnglish(it.overview));
   fill(body, stateLine, actions,
+    type === "movie" && it.in_library && it.library_file && fileCard(it.library_file, {
+      title: it.title, onDeleted: () => { it.in_library = false; it.library_file = null; reload(); } }),
     type === "movie" && it.in_library && it.library_path && subsButton(it),
     favRow, dlBox,
     it.overview && h("div.stack", { style: { gap: "4px" } }, h("p.overview", { style: { margin: 0 } }, it.overview),
@@ -418,7 +487,9 @@ async function seasonsView(it, on) {
         h("div.stack", { style: { gap: "2px", minWidth: 0, flex: 1 } },
           h("b.ellipsis", e.title || t("Episode {n}", { n: e.episode })),
           h("div.small.muted", e.air_date ? fmt.date(e.air_date, { weekday: false }) : t("TBA"))),
-        e.in_library ? h("span.chip.ok", icon("check"), t("Library"))
+        e.in_library ? [h("span.chip.ok", icon("check"), t("Library")),
+          e.file_id && h("button.icon.ghost", { title: t("Download to phone"), "aria-label": t("Download to phone"),
+            onclick: () => openFileSheet(`${it.title} S${String(current).padStart(2, "0")}E${String(e.episode).padStart(2, "0")}`, e.file_id, load) }, icon("download"))]
           : e.downloading ? h("span.chip.accent", `${Math.round(e.downloading.progress * 100)}%`)
           : !e.aired ? h("span.chip", t("Not aired"))
           : [h("button.icon", { title: t("Download best"), onclick: (ev) => quickDownload(it, { season: current, episode: e.episode }, ev.currentTarget) }, icon("download")),
@@ -518,6 +589,54 @@ async function renderWatchlist(el, on) {
   on((e) => e.detail.kind === "watchlist" && paint());
 }
 
+// ---------------------------------------------------------------- files: phone download, delete
+
+const fileUrl = (id, n) => `/api/p/media/library/file/${id}${n != null ? `/subtitle/${n}` : ""}`;
+
+/** Ask before something irreversible: shows what will go (path, size) and runs `go` on confirm. */
+function confirmSheet(title, lines, label, go) {
+  const s = sheet(title, [
+    ...lines,
+    h("div.row.wrap", { style: { justifyContent: "flex-end" } },
+      h("button", { onclick: () => s.close() }, t("Cancel")),
+      h("button.danger", { onclick: (e) => act(async () => { await go(); s.close(); }, e.currentTarget) }, icon("trash"), label))]);
+  return s;
+}
+
+const pathLine = (p, size) => h("div.m-path", h("div.small", { style: { wordBreak: "break-all" } }, p),
+  size != null && h("div.small.muted", fmt.bytes(size)));
+
+const subLang = (name) => { const m = name.match(/\.([a-z]{2,3}(?:\.(?:forced|hi|sdh|cc))*)\.\w+$/i); return m ? ` · ${m[1]}` : ""; };
+
+/** The saved-to-phone links (video + subtitles) and delete button for one library file. */
+function fileCard(info, { title, onDeleted } = {}) {
+  const del = () => confirmSheet(t("Delete from library"), [
+    h("p", { style: { margin: 0 } }, t("This deletes the file from the NAS. It can't be undone.")),
+    pathLine(info.name, info.size)], t("Delete from library"), async () => {
+    await P(`library/file/${info.id}/delete`, { body: { confirm: true } });
+    toast(t("Deleted from the library"));
+    onDeleted?.();
+  });
+  return h("div.stack.m-file", { style: { gap: "8px" } },
+    h("a.btn.primary.m-dl", { href: fileUrl(info.id), download: info.name },
+      icon("download"), t("Download to phone"), h("span.m-dlsize", fmt.bytes(info.size))),
+    ...(info.subtitles || []).map((s) =>
+      h("a.btn.m-dl", { href: fileUrl(info.id, s.n), download: s.name }, icon("download"),
+        t("Subtitles") + subLang(s.name),
+        h("span.m-dlsize", fmt.bytes(s.size)))),
+    h("div.small.muted", t("On an iPhone the file is saved in the Files app.")),
+    h("button.ghost.danger", { onclick: del }, icon("trash"), t("Delete from library")));
+}
+
+async function openFileSheet(title, id, onDeleted) {
+  const s = sheet(title, [h("div.empty", h("div.spin"))]);
+  try {
+    const info = await P(`library/file/${id}/info`);
+    fill(s.el, h("div.small.muted", { style: { wordBreak: "break-all" } }, info.name),
+      fileCard(info, { onDeleted: () => { s.close(); onDeleted?.(); } }));
+  } catch (e) { fill(s.el, errorCard(e.message, { title: t("Couldn't load this file") })); }
+}
+
 // ---------------------------------------------------------------- downloads
 
 const DLABEL = () => ({ downloading: t("Downloading"), queued: t("Queued"), paused: t("Paused"), completed: t("Completed"),
@@ -535,6 +654,8 @@ function dlRow(d) {
       h("div.row", h("b.ellipsis", d.title + what),
         h(`span.chip${DSTATE[d.state] ? "." + DSTATE[d.state] : ""}`, d.state === "imported" ? t("Ready to watch") : dlabel(d.state))),
       d.state === "imported" ? h("div.row", { style: { marginTop: "4px" } }, infuseLink()) : null,
+      d.state === "failed" ? h("div.row", { style: { marginTop: "6px" } },
+        h("button.small", { onclick: (e) => dlAct(d, "retry_import", e) }, icon("refresh"), t("Retry import"))) : null,
       active && h("div.progress", { style: { marginTop: "8px" } }, h("div", { style: { width: `${(d.progress * 100).toFixed(1)}%` } })),
       h("div.row2",
         active ? h("span", `${Math.round(d.progress * 100)}%`) : null,
@@ -542,10 +663,43 @@ function dlRow(d) {
         d.error ? h("span", { style: { color: "var(--bad)" } }, d.error) : null)),
     d.state === "downloading" && h("button.icon.ghost", { title: t("Pause"), onclick: (e) => dlAct(d, "pause", e) }, icon("pause")),
     d.state === "paused" && h("button.icon.ghost", { title: t("Resume"), onclick: (e) => dlAct(d, "resume", e) }, icon("play")),
-    d.state === "failed" && h("button.icon.ghost", { title: t("Retry import"), onclick: (e) => dlAct(d, "retry_import", e) }, icon("refresh")),
-    h("button.icon.ghost", { title: active ? t("Cancel & delete partial data") : t("Remove from list"), onclick: (e) => {
-      if (!active || confirm(t("Cancel {title}?", { title: d.title }))) dlAct(d, "remove", e);
-    } }, icon("x")));
+    h("button.icon.ghost", { title: t("Remove"), "aria-label": t("Remove"), onclick: () => removeSheet(d) }, icon("x")));
+}
+
+/** What removing a download can mean: just forget it, or also delete what it left on disk / in the library. */
+async function removeSheet(d) {
+  const active = ["queued", "downloading", "paused"].includes(d.state);
+  const s = sheet(d.title, [h("div.empty", h("div.spin"))]);
+  let info;
+  try { info = await P(`downloads/${d.hash}/info`); }
+  catch (e) { fill(s.el, errorCard(e.message, { title: t("Couldn't load this download") })); return; }
+  const run = (action, msg) => async (e) => {
+    await act(async () => { await P(`downloads/${d.hash}/${action}`, { body: {} }); toast(msg); s.close(); }, e.currentTarget);
+  };
+  const files = info.files?.exists ? info.files : null;
+  const lib = info.library;
+  fill(s.el,
+    active ? h("p", { style: { margin: 0 } }, t("Cancel {title}?", { title: d.title })) : null,
+    files && h("div.stack", { style: { gap: "4px" } }, h("b.small", t("Files still in the downloads folder:")), pathLine(files.path, files.size)),
+    lib && h("div.stack", { style: { gap: "4px" } }, h("b.small", t("In your library:")),
+      ...lib.paths.slice(0, 4).map((p) => pathLine(p)), lib.count > 4 && h("div.small.muted", t("and {n} more", { n: lib.count - 4 })),
+      h("div.small.muted", t("{n} files · {size}", { n: lib.count, size: fmt.bytes(lib.size) }))),
+    !files && !lib && !active ? h("div.small.muted", t("No files are left for this download.")) : null,
+    h("div.stack", { style: { gap: "8px" } },
+      d.state === "failed" && h("button.primary", { onclick: (e) => act(async () => { await P(`downloads/${d.hash}/retry_import`, { body: {} }); s.close(); }, e.currentTarget) },
+        icon("refresh"), t("Retry import")),
+      !active && h("button", { onclick: run("remove", t("Removed from the list")) }, t("Remove from list")),
+      (files || active) && h("button.danger", { onclick: run("remove_files", t("Download and files removed")) },
+        icon("trash"), active ? t("Cancel & delete partial data") : t("Remove and delete the files")),
+      lib && lib.allowed && h("button.danger", {
+        onclick: () => confirmSheet(t("Delete from library"), [
+          h("p", { style: { margin: 0 } }, t("This deletes the film or episodes from the NAS. It can't be undone.")),
+          ...lib.paths.slice(0, 4).map((p) => pathLine(p)),
+          h("div.small.muted", fmt.bytes(lib.size))], t("Delete from library"), async () => {
+          await P(`downloads/${d.hash}/delete_library`, { body: {} });
+          toast(t("Deleted from the library")); s.close();
+        }) }, icon("trash"), t("Delete from library")),
+      h("button.ghost", { onclick: () => s.close() }, t("Cancel"))));
 }
 
 const dlAct = (d, a, e) => act(() => P(`downloads/${d.hash}/${a}`, { body: {} }), e.currentTarget);
@@ -570,16 +724,22 @@ async function renderDownloads(el, on) {
 async function renderLibrary(el) {
   fill(el, loading());
   let kind = "movies";
+  let genre = "";
   const grid = h("div");
+  const genreSel = h("select.m-year", { "aria-label": t("Genres"), onchange: (e) => { genre = e.target.value; load(); } });
   const stats = h("div.m-libstat");
   const scanBtn = h("button", { onclick: () => act(async () => { await P("library/scan", { body: {} }); toast(t("Library rescanned")); load(); }, scanBtn) },
     icon("refresh"), t("Rescan"));
   const seg = h("div.seg");
   const paintSeg = () => fill(seg, ...[["movies", t("Movies")], ["series", t("Series")]].map(([k, l]) =>
-    h(`button${k === kind ? ".active" : ""}`, { onclick: () => { kind = k; paintSeg(); load(); } }, l)));
+    h(`button${k === kind ? ".active" : ""}`, { onclick: () => { kind = k; genre = ""; paintSeg(); load(); } }, l)));
   async function load() {
-    const r = await P(`library?kind=${kind}`);
+    const r = await P(`library?kind=${kind}${genre ? `&genre=${enc(genre)}` : ""}`);
     const s = r.stats;
+    fill(genreSel, h("option", { value: "" }, t("All genres")),
+      (r.genres || []).map((g) => h("option", { value: g.id }, `${genreName(g.name)} (${g.count})`)));
+    genreSel.value = genre;
+    genreSel.hidden = !(r.genres || []).length;
     stats.textContent = `${t("{n} films", { n: s.movies })} · ${t("{n} series", { n: s.shows })}`;
     const missing = [!s.movies_dir_ok && t("movies folder not found: {dir}", { dir: s.movies_dir || t("(not set)") }),
                      !s.series_dir_ok && t("series folder not found: {dir}", { dir: s.series_dir || t("(not set)") })].filter(Boolean);
@@ -588,7 +748,7 @@ async function renderLibrary(el) {
       r.items.length ? h("div.m-grid", r.items.map((x) => poster({
         ...x, type: kind === "movies" ? "movie" : "series", id: x.meta_id,
         in_library: false, title: x.title, year: x.year,
-      }, !!x.meta_id))) : emptyState("film", t("Your library is empty. Films you download will show up here."),
+      }, !!x.meta_id))) : genre ? h("div.empty", t("Nothing found.")) : emptyState("film", t("Your library is empty. Films you download will show up here."),
                                                                        t("Discover movies"), "#/media"));
   }
   const tech = await sourcesPanel();
@@ -597,7 +757,7 @@ async function renderLibrary(el) {
   fill(el, 
     h("div.section", h("h2", t("Your library"))), stats,
     (noSources && !down) ? h("div.m-banner", "⚠️", h("div", t("Downloads are unavailable at the moment."))) : null,
-    h("div.section", seg), grid,
+    h("div.section", h("div.m-gctl", seg, genreSel)), grid,
     h("details.m-tech", h("summary", t("Technical details")),
       h("div.stack", { style: { marginTop: "10px" } }, h("div.row", scanBtn), tech.box)));
   paintSeg();
