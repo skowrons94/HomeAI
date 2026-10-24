@@ -473,7 +473,7 @@ def have_ffmpeg() -> bool:
 
 async def _run(cmd: list[str], timeout: float, want_stdout=False) -> tuple[int, bytes, str]:
     if shutil.which("nice"):
-        cmd = ["nice", "-n", "15", *cmd]
+        cmd = ["nice", "-n", "15", *(["ionice", "-c", "3"] if shutil.which("ionice") else []), *cmd]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE)

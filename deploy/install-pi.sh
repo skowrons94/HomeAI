@@ -155,14 +155,14 @@ WorkingDirectory=$DIR
 ExecStart=$DIR/.venv/bin/python -m hub
 Restart=on-failure
 RestartSec=5
-# be gentle with the SD card and other services
-Nice=5
+# the web app must stay responsive: priorities are raised by deploy/priorities.sh (drop-in)
 MemoryMax=400M
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 sudo systemctl daemon-reload
+sudo "$DIR/deploy/priorities.sh"
 sudo systemctl enable --now casa
 
 IP="$(hostname -I | awk '{print $1}')"

@@ -164,7 +164,7 @@ def tool_for(name: str) -> list[str] | None:
     ext = name.lower().rsplit(".", 1)[-1]
     for tool in ("7z", "7zz", "7za"):
         if shutil.which(tool):
-            return [shutil.which(tool), "x", "-y"]
+            return [shutil.which(tool), "x", "-y", "-mmt=2"]     # 2 of the Pi's 4 cores: the web app keeps the rest
     if ext == "rar" and shutil.which("unrar"):
         return [shutil.which("unrar"), "x", "-y"]
     if shutil.which("unar"):
@@ -172,12 +172,23 @@ def tool_for(name: str) -> list[str] | None:
     return None
 
 
+def background(argv: list[str]) -> list[str]:
+    """Lowest CPU and disk priority (nice 19, idle I/O class): unpacking a game must never slow the web app.
+    nice and ionice exec the tool, so killing the process still kills the tool."""
+    pre = []
+    if shutil.which("nice"):
+        pre += ["nice", "-n", "19"]
+    if shutil.which("ionice"):
+        pre += ["ionice", "-c", "3"]
+    return pre + argv
+
+
 async def run_argv(argv: list[str], timeout: float, log_tail: bool = False) -> tuple[int, str]:
     """Run an external tool off the event loop: killed on timeout or cancel. → (exit code, last output)."""
     import tempfile
     out = tempfile.TemporaryFile() if log_tail else None
     proc = await asyncio.create_subprocess_exec(
-        *argv, stdout=out or asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.STDOUT if out else asyncio.subprocess.DEVNULL)
+        *background(argv), stdout=out or asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.STDOUT if out else asyncio.subprocess.DEVNULL)
     try:
         code = await asyncio.wait_for(proc.wait(), timeout)
     except asyncio.TimeoutError:
