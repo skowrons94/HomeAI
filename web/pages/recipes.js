@@ -1,5 +1,5 @@
 // Recipes: discover/import, personal recipe book, shopping list, calorie log (hub/plugins/recipes).
-// Routes: #/recipes[/discover|week|mine|shopping|today|recipe/<id>]
+// Routes: #/recipes[/discover|week|mine|fridge|shopping|today|recipe/<id>]
 import { api, h, icon, toast, sheet, ensureCss, act, debounce, go, hasPlugin, t, locale, fmt, bus } from "../app.js";
 
 // Scopri starts fresh; only coming back (browser back / the recipe's back button) from a recipe opened
@@ -24,8 +24,8 @@ const FLAG = { it: "🇮🇹", en: "🇬🇧" };
 
 let status = { language: "it", goal: 2000 };
 
-const TABS = ["discover", "week", "mine", "shopping", "today"];
-const TAB_LABEL = () => ({ discover: t("Discover"), week: t("Week"), mine: t("Recipe book"), shopping: t("Shopping"), today: t("Calories") });
+const TABS = ["discover", "week", "mine", "fridge", "shopping", "today"];
+const TAB_LABEL = () => ({ discover: t("Discover"), week: t("Week"), mine: t("Recipe book"), fridge: t("Fridge"), shopping: t("Shopping"), today: t("Calories") });
 
 export default {
   async render(root, args) {
@@ -43,7 +43,7 @@ export default {
       h("div.tabs.r-tabs", TABS.map((k) =>
         h(`button${k === tab ? ".active" : ""}`, { onclick: () => go(`#/recipes/${k}`) }, TAB_LABEL()[k]))),
       body);
-    ({ discover: renderDiscover, week: renderWeek, mine: renderMine, shopping: renderShopping, today: renderToday })[tab](body);
+    ({ discover: renderDiscover, week: renderWeek, mine: renderMine, fridge: renderFridge, shopping: renderShopping, today: renderToday })[tab](body);
   },
 };
 
@@ -84,6 +84,7 @@ function renderDiscover(el) {
     try { showResults(out, await P(`search?q=${enc(q)}`), q); }
     catch (err) { fill(out, h("div.empty", err.message)); }
   };
+  if (sg("r-opencook")) { ss("r-opencook"); renderCook(el); return; }
   fill(el, cookCard(el), h("form.r-search", { onsubmit: submit }, h("div.r-input", icon("search"), input, clear), btn), out);
   if (restore && input.value.trim() && !isUrl(input.value)) submit(new Event("submit"));
   else intro(out, input, submit);
@@ -1133,4 +1134,128 @@ async function addToMenu(rec) {
     for (const m of [mon, addDays(mon, 7)]) for (const d of (await P(`plan?week=${m}`)).days) plans[d.date] = d;
     paint();
   } catch {}
+}
+
+// ---------------------------------------------------------------- fridge ("Frigo")
+
+const PLACES = () => [["fridge", t("Fridge"), "🧊"], ["freezer", t("Freezer"), "❄️"], ["pantry", t("Pantry"), "🥫"]];
+const QUICK = ["latte", "uova", "burro", "yogurt", "formaggio", "prosciutto", "verdure", "frutta", "pane", "carne", "pesce", "pasta"];
+const dayDiff = (iso) => Math.round((dateOf(iso) - dateOf(localDay())) / 864e5);
+const agoText = (iso) => { const n = -dayDiff(iso); return n <= 0 ? t("added today") : t("added {n} d ago", { n }); };
+
+function expiryBadge(iso) {
+  if (!iso) return null;
+  const n = dayDiff(iso);
+  const text = n < 0 ? t("Expired") : n === 0 ? t("Expires today") : n === 1 ? t("Expires tomorrow") : t("Expires {date}", { date: fmt.date(dateOf(iso), { weekday: false }) });
+  return h(`span.f-exp${n < 0 ? ".bad" : n <= 2 ? ".warn" : ""}`, icon(n <= 2 ? "alert" : "calendar"), text);
+}
+
+function placeSeg(value, onChange) {
+  const box = h("div.seg.f-seg");
+  const paint = () => fill(box, PLACES().map(([k, label, em]) =>
+    h(`button${k === value ? ".active" : ""}`, { type: "button", onclick: () => { value = k; paint(); onChange?.(k); } }, `${em} ${label}`)));
+  paint();
+  return { el: box, get value() { return value; } };
+}
+
+async function renderFridge(el) {
+  let items = [], known = [], place = jsonKey("r-fplace", "fridge"), q = "";
+  const input = h("input", { placeholder: t("What did you put in? (e.g. milk)"), enterkeyhint: "done", autocomplete: "off", autocapitalize: "none", maxlength: 60 });
+  const qty = h("input", { placeholder: t("Quantity"), enterkeyhint: "done", autocomplete: "off", maxlength: 40 });
+  const exp = h("input", { type: "date", "aria-label": t("Expires") });
+  const seg = placeSeg(place, (k) => { try { sessionStorage.setItem("r-fplace", JSON.stringify(k)); } catch {} });
+  const sugg = h("div.r-ideas.r-sugg"), quick = h("div.r-ideas.f-quick"), soon = h("div"), groups = h("div");
+  const search = h("input", { type: "search", placeholder: t("Search the fridge…"), oninput: (e) => { q = norm(e.target.value); paintList(); } });
+
+  const load = (r) => { items = r.items; paintList(); paintQuick(); };
+  const add = () => {
+    const name = input.value.trim();
+    if (!name) return;
+    act(async () => {
+      load(await P("fridge", { body: { name, place: seg.value, qty: qty.value, expires: exp.value } }));
+      input.value = qty.value = exp.value = ""; paintSugg(); input.focus();
+    });
+  };
+  function paintSugg() {
+    const v = norm(input.value);
+    const have = new Set(items.map((i) => norm(i.name)));
+    const list = v ? known.filter((k) => norm(k).includes(v) && !have.has(norm(k))).slice(0, 6) : [];
+    fill(sugg, list.map((k) => h("button.chipbtn", { type: "button", onclick: () => { input.value = k; paintSugg(); (qty.focus(), 0); } }, icon("plus"), k)));
+  }
+  function paintQuick() {
+    const have = new Set(items.map((i) => norm(i.name)));
+    const list = QUICK.filter((k) => !have.has(norm(k)));
+    fill(quick, list.map((k) => h("button.chipbtn", { type: "button", onclick: (e) => act(async () => {
+      load(await P("fridge", { body: { name: k, place: seg.value } }));
+    }, e.currentTarget) }, icon("plus"), k)));
+  }
+  input.addEventListener("input", paintSugg);
+  const form = h("form.f-add", { onsubmit: (e) => { e.preventDefault(); add(); } },
+    h("div.r-input", icon("plus"), input),
+    seg.el,
+    h("div.f-opts", qty, h("label.f-date", h("span", t("Expires")), exp)),
+    h("button.primary", { type: "submit" }, icon("plus"), t("Add")));
+
+  function row(i) {
+    const where = PLACES().find(([k]) => k === i.place);
+    const parts = [i.qty ? h("span.f-qty", i.qty) : null,
+      i.expires && dayDiff(i.expires) <= 3 && where ? h("span.muted", `${where[2]} ${where[1]}`) : null,   // in "Expiring soon"
+      h("span.muted", agoText(i.added)), expiryBadge(i.expires)];
+    return h("div.item.f-row", { onclick: (e) => !e.target.closest("button") && editSheet(i) },
+      h("div.f-main", h("div.f-name", i.name), h("div.f-meta", parts)),
+      h("button.f-done", { type: "button", "aria-label": t("Used up"), onclick: () => finishSheet(i) }, icon("check"), t("Used up")),
+      h("button.icon.ghost", { type: "button", "aria-label": t("Edit"), onclick: () => editSheet(i) }, icon("edit")));
+  }
+  function paintList() {
+    const list = items.filter((i) => !q || norm(i.name).includes(q));
+    const urgent = list.filter((i) => i.expires && dayDiff(i.expires) <= 3).sort((a, b) => a.expires.localeCompare(b.expires));
+    fill(soon, urgent.length ? [h("h2.r-sec", `⏰ ${t("Expiring soon")} (${urgent.length})`), h("div.list.f-soon", urgent.map(row))] : null);
+    const shown = new Set(urgent.map((i) => i.id));   // already listed under "Expiring soon": once is enough
+    fill(groups, PLACES().map(([k, label, em]) => {
+      const all = list.filter((i) => i.place === k);
+      const g = all.filter((i) => !shown.has(i.id)).sort((a, b) => a.name.localeCompare(b.name));
+      return g.length ? h("div", h("h2.r-sec", `${em} ${label} `, h("span.f-count", all.length)), h("div.list", g.map(row))) : null;
+    }), !items.length ? emptyState("storage", t("The fridge is empty. Add what you have above, or tap a quick item."))
+      : !list.length ? h("p.muted", t("Nothing found.")) : null);
+  }
+
+  function editSheet(i) {
+    const name = h("input", { value: i.name, maxlength: 60 }), qy = h("input", { value: i.qty, maxlength: 40, placeholder: t("Quantity") });
+    const d = h("input", { type: "date", value: i.expires || "" });
+    const sp = placeSeg(i.place);
+    const s = sheet(i.name, [
+      h("label.field", t("Name"), name), sp.el,
+      h("div.f-opts", h("label.field", t("Quantity"), qy), h("label.field", t("Expires"), d)),
+      h("div.row", { style: { justifyContent: "space-between" } },
+        h("button.danger", { type: "button", onclick: (e) => act(async () => { load(await P(`fridge/${i.id}`, { method: "DELETE" })); s.close(); }, e.currentTarget) }, icon("trash"), t("Delete")),
+        h("button.primary", { type: "button", onclick: (e) => act(async () => {
+          load(await P(`fridge/${i.id}`, { method: "PATCH", body: { name: name.value, place: sp.value, qty: qy.value, expires: d.value } }));
+          s.close();
+        }, e.currentTarget) }, icon("check"), t("Save")))]);
+  }
+  function finishSheet(i) {
+    const go_ = (to_shopping) => (e) => act(async () => {
+      load(await P(`fridge/${i.id}/finish`, { body: { to_shopping } }));
+      s.close(); if (to_shopping) toast(t("Added to the shopping list"));
+    }, e.currentTarget);
+    const s = sheet(t("{name} used up", { name: i.name }), [
+      h("button.primary.f-big", { type: "button", onclick: go_(true) }, icon("cart"), t("Used up: add to the shopping list")),
+      h("button.f-big", { type: "button", onclick: go_(false) }, icon("check"), t("Used up"))]);
+  }
+
+  const cook = h("button.r-cookcard.f-cook", { type: "button", onclick: () => { ss("r-opencook", "1"); try { sessionStorage.setItem("r-cook-pantry", "true"); } catch {} go("#/recipes/discover"); } },
+    h("span.r-cookic", icon("utensils")),
+    h("span.r-cooktx", h("b", t("What can I cook with this?")), h("span", t("Recipes that use what is in the fridge, freezer and pantry"))),
+    h("span.r-cookgo", icon("search")));
+  const ticked = h("button", { type: "button", "aria-label": t("Add ticked shopping items"), onclick: (e) => act(async () => {
+    const taken = (await P("shopping")).filter((i) => i.checked).map((i) => i.name);
+    if (!taken.length) return toast(t("No ticked items in the shopping list"));
+    for (const name of taken) await P("fridge", { body: { name, place: seg.value } });
+    load(await P("fridge")); toast(t("Added to the fridge"));
+  }, e.currentTarget) }, icon("cart"), t("Add ticked shopping items"));
+
+  fill(el, cook, h("div.f-card", form, sugg, h("div.f-quicklab", t("Quick add")), quick),
+    h("div.f-tools", h("div.r-input", icon("search"), search), ticked), soon, groups);
+  fill(groups, loading());
+  try { load(await P("fridge")); known = (await P("ingredients")).items; } catch (e) { fill(groups, h("div.empty", e.message)); }
 }

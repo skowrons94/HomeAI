@@ -324,3 +324,37 @@ h2.r-aisle { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; 
 .r-cm-nav { flex: 1; min-height: 72px; font-size: 20px; font-weight: 700; justify-content: center; gap: 8px; border-radius: 18px; }
 .r-cm-nav svg.i { width: 30px; height: 30px; }
 .r-cm-nav:disabled { opacity: .35; }
+
+/* fridge */
+.f-card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; margin: 14px 0; display: flex; flex-direction: column; gap: 10px; }
+.f-add { display: flex; flex-direction: column; gap: 10px; }
+.f-add .r-input input { background: var(--surface-2); box-shadow: none; }
+.f-add > button.primary { min-height: 46px; }
+.f-seg { display: flex; width: 100%; }
+.f-seg button { flex: 1 1 0; min-width: 0; min-height: 40px; white-space: nowrap; }
+.f-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: end; }
+.f-date { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+.f-date input { min-width: 0; }
+.f-quicklab { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: -4px; }
+.f-quick { justify-content: flex-start; margin: 0; }
+.f-quick button.chipbtn { background: var(--surface-2); box-shadow: none; min-height: 36px; }
+.f-card .r-sugg { margin: 0; }
+.f-tools { display: flex; gap: 10px; align-items: center; margin: 4px 0 0; }
+.f-tools .r-input { flex: 1 1 auto; }
+.f-tools > button { flex: none; min-height: 44px; }
+.f-count { display: inline-block; min-width: 22px; padding: 0 7px; margin-left: 4px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 12px; text-align: center; line-height: 20px; }
+.f-row { min-height: 60px; cursor: pointer; gap: 8px; }
+.f-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.f-name { font-weight: 600; font-size: 16px; }
+.f-name::first-letter { text-transform: uppercase; }
+.f-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12.5px; color: var(--muted); }
+.f-qty { color: var(--text); font-weight: 600; background: var(--surface-2); border-radius: 999px; padding: 1px 9px; }
+.f-exp { display: inline-flex; align-items: center; gap: 4px; padding: 1px 9px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-weight: 600; }
+.f-exp svg.i { width: 13px; height: 13px; }
+.f-exp.warn { background: color-mix(in srgb, var(--warn) 22%, var(--surface)); color: color-mix(in srgb, var(--warn) 70%, var(--text)); }
+.f-exp.bad { background: color-mix(in srgb, var(--bad) 18%, var(--surface)); color: var(--bad); }
+button.f-done { flex: none; min-height: 40px; padding: 0 12px; gap: 6px; font-size: 13px; }
+.f-big { min-height: 52px; gap: 8px; white-space: normal; }
+.f-soon { box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 45%, transparent), var(--shadow); }
+.f-cook { margin-bottom: 0; }
+@media (max-width: 480px) { button.f-done { padding: 0; width: 44px; font-size: 0; } button.f-done svg { margin: 0; } .f-tools > button { font-size: 0; width: 44px; padding: 0; } }

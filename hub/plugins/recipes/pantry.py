@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
+from datetime import date
 
+from ...i18n import _
 from . import parse
 
 KV = "recipes.pantry"
@@ -155,26 +158,155 @@ def clean_items(items) -> list[str]:
 
 
 # -- persistence ---------------------------------------------------------------------------------
+# "Frigo": the household food inventory. Entries are dicts {id, name, place, qty, expires, added} stored
+# under KV_FRIDGE. The legacy KV ("recipes.pantry", a list of names) is migrated once, losslessly, into
+# entries with place "pantry" and is then left untouched (so the migration is idempotent and reversible).
+
+KV_FRIDGE = "recipes.fridge"
+PLACES = ("fridge", "freezer", "pantry")
+SOON_DAYS = 3
+
+
+def _today() -> date:
+    return date.today()
+
+
+def check_date(v) -> str:
+    """'' for none, else a valid ISO date (YYYY-MM-DD)."""
+    if v in (None, ""):
+        return ""
+    s = str(v).strip()
+    try:
+        if len(s) != 10:
+            raise ValueError
+        date.fromisoformat(s)
+    except ValueError:
+        raise ValueError(_("The date is not valid")) from None
+    return s
+
+
+def days_left(expires: str, today: date | None = None) -> int | None:
+    if not expires:
+        return None
+    return (date.fromisoformat(expires) - (today or _today())).days
+
 
 class Pantry:
     def __init__(self, store):
         self.store = store
 
+    # entries ------------------------------------------------------------------------------
+    def entries(self) -> list[dict]:
+        v = self.store.get(KV_FRIDGE)
+        if not isinstance(v, list):  # first load: migrate the old list of names
+            old = self.store.get(KV)
+            now = _today().isoformat()
+            v = [self._new(n, "pantry", added=now) for n in clean_items(old if isinstance(old, list) else [])]
+            self.store.set(KV_FRIDGE, v)
+        return [e for e in v if isinstance(e, dict) and e.get("name")]
+
+    @staticmethod
+    def _new(name, place, qty="", expires="", added=None) -> dict:
+        return {"id": secrets.token_hex(4), "name": name, "place": place, "qty": qty, "expires": expires,
+                "added": added or _today().isoformat()}
+
+    def _save(self, entries: list[dict]) -> list[dict]:
+        self.store.set(KV_FRIDGE, entries)
+        return entries
+
+    @staticmethod
+    def _clean(b: dict, partial: bool = False) -> dict:
+        out = {}
+        if "name" in b or not partial:
+            name = pretty(str(b.get("name") or ""))
+            if not name or not key(name):
+                raise ValueError(_("A name is required"))
+            if len(name) > 60:
+                raise ValueError(_("The name is too long"))
+            out["name"] = name
+        if "place" in b or not partial:
+            place = b.get("place") or "fridge"
+            if place not in PLACES:
+                raise ValueError(_("Unknown place"))
+            out["place"] = place
+        if "qty" in b:
+            q = " ".join(str(b.get("qty") or "").split())
+            if len(q) > 40:
+                raise ValueError(_("The quantity is too long"))
+            out["qty"] = q
+        if "expires" in b:
+            out["expires"] = check_date(b.get("expires"))
+        return out
+
+    def add_entry(self, b: dict) -> dict:
+        """Add (or, for the same ingredient, update) an entry; returns it."""
+        c = self._clean(b)
+        es = self.entries()
+        for e in es:
+            if key(e["name"]) == key(c["name"]):
+                e.update({k: v for k, v in c.items() if k != "name" and (k in b)})
+                self._save(es)
+                return e
+        e = self._new(c["name"], c["place"], c.get("qty", ""), c.get("expires", ""))
+        es.append(e)
+        self._save(es)
+        return e
+
+    def patch_entry(self, eid: str, b: dict) -> dict:
+        c = self._clean(b, partial=True)
+        es = self.entries()
+        for e in es:
+            if e["id"] == eid:
+                if "name" in c and any(o is not e and key(o["name"]) == key(c["name"]) for o in es):
+                    raise ValueError(_("Already in the list"))
+                e.update(c)
+                self._save(es)
+                return e
+        raise KeyError("item not found")
+
+    def remove_entry(self, eid: str) -> dict:
+        es = self.entries()
+        for e in es:
+            if e["id"] == eid:
+                self._save([x for x in es if x is not e])
+                return e
+        raise KeyError("item not found")
+
+    def summary(self, today: date | None = None) -> dict:
+        es = self.entries()
+        today = today or _today()
+        soon = sorted(({**e, "days": days_left(e["expires"], today)} for e in es
+                       if e.get("expires") and days_left(e["expires"], today) <= SOON_DAYS),
+                      key=lambda e: (e["days"], e["name"]))
+        return {"total": len(es), "places": {p: sum(1 for e in es if e["place"] == p) for p in PLACES},
+                "expiring": soon, "expired": sum(1 for e in soon if e["days"] < 0)}
+
+    # legacy name-based API (cook_with, shopping hook, old routes) ---------------------------
     def items(self) -> list[str]:
-        v = self.store.get(KV)
-        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+        return [e["name"] for e in self.entries()]
 
-    def put(self, items) -> list[str]:
-        v = clean_items(items)
-        self.store.set(KV, v)
-        return v
+    def put(self, items, place: str = "pantry") -> list[str]:
+        """Replace the set of names: kept names keep their entry (place, quantity, expiry)."""
+        want = clean_items(items)
+        old = {key(e["name"]): e for e in self.entries()}
+        self._save([old.get(key(n)) or self._new(n, place) for n in want])
+        return want
 
-    def add(self, items) -> list[str]:
-        return self.put(self.items() + clean_items(items))
+    def add(self, items, place: str = "pantry") -> list[str]:
+        es = self.entries()
+        have = {key(e["name"]) for e in es}
+        for n in clean_items(items):
+            if key(n) not in have:
+                have.add(key(n))
+                es.append(self._new(n, place))
+        self._save(es)
+        return [e["name"] for e in es]
 
     def remove(self, items) -> list[str]:
         gone = {key(x) for x in clean_items(items)}
-        return self.put([x for x in self.items() if key(x) not in gone])
+        es = [e for e in self.entries() if key(e["name"]) not in gone]
+        self._save(es)
+        return [e["name"] for e in es]
 
 
 # -- search --------------------------------------------------------------------------------------

@@ -60,6 +60,12 @@ class RecipesPlugin(Plugin):
          "help": "A notification in the afternoon with what's for dinner."},
         {"key": "pantry_from_shopping", "label": "Ticked shopping items go to the pantry", "type": "bool",
          "default": True},
+        {"key": "pantry_place", "label": "Where ticked shopping items go", "type": "select", "default": "fridge",
+         "options": [{"value": "fridge", "label": "Fridge"}, {"value": "freezer", "label": "Freezer"},
+                     {"value": "pantry", "label": "Pantry"}],
+         "help": "Place in the Fridge tab for items moved from the shopping list."},
+        {"key": "expiry_alerts", "label": "Alert for food about to expire", "type": "bool", "default": True,
+         "help": "One notification a day when something in the fridge expires tomorrow or has expired."},
     ]
 
     def __init__(self, hub, config):
@@ -74,6 +80,7 @@ class RecipesPlugin(Plugin):
         self.pantry = pantry_mod.Pantry(self.hub.store)
         if self.book.tidy_titles(sources.clean_title):
             self.log.info("tidied imported recipe titles")
+        self.hub.every(3600, self._expiry_check, name="recipes.expiry", initial_delay=45)
         self.hub.every(60, self._remind, name="recipes.plan_reminder", initial_delay=20)
         # calories are shown per recipe and in the Today tab, not as a chart
         self.hub.store.delete_series("recipes.calories")
@@ -118,6 +125,12 @@ class RecipesPlugin(Plugin):
             web.put("/pantry", self.r_pantry_put),
             web.post("/pantry/add", self.r_pantry_add),
             web.post("/pantry/remove", self.r_pantry_remove),
+            web.get("/fridge", self.r_fridge),
+            web.get("/fridge/summary", self.r_fridge_summary),
+            web.post("/fridge", self.r_fridge_add),
+            web.patch("/fridge/{id}", self.r_fridge_patch),
+            web.delete("/fridge/{id}", self.r_fridge_delete),
+            web.post("/fridge/{id}/finish", self.r_fridge_finish),
             web.get("/ingredients", self.r_ingredients),
             web.post("/cook-with", self.r_cook_with),
             web.get("/log", self.r_log),
@@ -273,7 +286,7 @@ class RecipesPlugin(Plugin):
         row = self.book.store.query("SELECT name FROM recipes_shop WHERE id=?", (sid,))
         self.book.shop_patch(sid, b)
         if b.get("checked") and row and self.config.get("pantry_from_shopping", True):
-            self.pantry.add([row[0]["name"]])
+            self.pantry.add([row[0]["name"]], place=self._place())
         return _json({"items": self.book.shopping()})
 
     async def r_shop_delete(self, request):
@@ -304,6 +317,63 @@ class RecipesPlugin(Plugin):
 
     async def r_pantry_remove(self, request):
         return _json({"items": self.pantry.remove(self._items(await _body(request)))})
+
+    # -- fridge ("Frigo"): structured inventory ------------------------------------------
+
+    def _place(self) -> str:
+        p = self.config.get("pantry_place", "fridge")
+        return p if p in pantry_mod.PLACES else "fridge"
+
+    def _fridge_out(self):
+        return {"items": self.pantry.entries(), "places": list(pantry_mod.PLACES)}
+
+    async def r_fridge(self, request):
+        return _json(self._fridge_out())
+
+    async def r_fridge_summary(self, request):
+        return _json(self.pantry.summary())
+
+    async def r_fridge_add(self, request):
+        e = self.pantry.add_entry(await _body(request))
+        return _json({**self._fridge_out(), "item": e})
+
+    async def r_fridge_patch(self, request):
+        e = self.pantry.patch_entry(request.match_info["id"], await _body(request))
+        return _json({**self._fridge_out(), "item": e})
+
+    async def r_fridge_delete(self, request):
+        self.pantry.remove_entry(request.match_info["id"])
+        return _json(self._fridge_out())
+
+    async def r_fridge_finish(self, request):
+        try:
+            b = await _body(request)
+        except ValueError:
+            b = {}
+        e = self.pantry.remove_entry(request.match_info["id"])
+        if b.get("to_shopping"):
+            self.book.shop_add_manual(e["name"])
+        return _json({**self._fridge_out(), "finished": e})
+
+    async def _expiry_check(self, today=None, hour=None):
+        """Once a day (from 8:00): one notification if something expires tomorrow or already has."""
+        if not self.config.get("expiry_alerts", True) or not self.pantry:
+            return
+        now = time.localtime()
+        if (now.tm_hour if hour is None else hour) < 8:
+            return
+        today = today or pantry_mod._today()
+        if self.hub.store.get("recipes.expiry_sent") == today.isoformat():
+            return
+        due = [e for e in self.pantry.summary(today)["expiring"] if e["days"] <= 1]
+        if not due:
+            return
+        self.hub.store.set("recipes.expiry_sent", today.isoformat())
+        names = ", ".join(e["name"] for e in due[:6]) + ("…" if len(due) > 6 else "")
+        gone = [e for e in due if e["days"] < 0]
+        title = _("Expired in the fridge: {names}", names=", ".join(e["name"] for e in gone[:4])) if gone and len(gone) == len(due) \
+            else _("Expiring soon: {names}", names=names)
+        await self.hub.notify.send(title, body=_("Open the Fridge to check"), url="#/recipes/fridge", tag="note")
 
     async def r_ingredients(self, request):
         return _json({"items": pantry_mod.known_ingredients(self.book)})
