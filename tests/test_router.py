@@ -139,8 +139,36 @@ def test_media_accept_download():
     asyncio.run(go())
 
 
+def test_site_categories():
+    """Game/music searches on the media sites use those sites' own categories, not films."""
+    from hub.plugins.media import indexers as ix
+    from hub.plugins.torrents.media_adapter import MediaBackend, MediaProvider
+    seen = []
+
+    class Fake:
+        def __init__(self, cfg):
+            self.health = {"knaben": {"ok": True, "mirror": "https://k"}}
+
+        async def open(self):
+            pass
+
+        async def _s_knaben(self, base, q):
+            seen.append((q.type, q.cat, ix.KNABEN_CATS.get(q.cat)))
+            return []
+
+    async def go():
+        b = MediaBackend({}, Fake)
+        for c in ("games", "music", "series", ""):
+            await MediaProvider(b, "knaben").search(None, "x", 1, 20, 10, category=c)
+    asyncio.run(go())
+    assert seen == [("movie", "games", [4001000, 7000000]), ("movie", "music", [1000000]),
+                    ("series", "series", [2000000]), ("movie", "", None)], seen
+    assert ix.Query(titles=["x"], type="series").cat == "series"   # the media plugin's own searches
+
+
 if __name__ == "__main__":
     test_identify()
     test_route_dispatch()
     test_media_accept_download()
-    print("3 tests passed")
+    test_site_categories()
+    print("4 tests passed")

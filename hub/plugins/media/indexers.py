@@ -77,6 +77,12 @@ def parse_size(text: str) -> int:
     return int(num * (1024 if "i" in unit else 1000) ** exp)
 
 
+# torrent-search category -> each site's own category ids ("" = every category)
+KNABEN_CATS = {"movie": [3000000], "series": [2000000], "music": [1000000], "games": [4001000, 7000000]}
+APIBAY_CATS = {"movie": 200, "series": 200, "music": 100, "games": 400}
+X1337_CATS = {"movie": "Movies", "series": "TV", "music": "Music", "games": "Games"}
+
+
 @dataclass
 class Query:
     titles: list[str]
@@ -85,6 +91,11 @@ class Query:
     imdb_id: str | None = None   # "tt1234567"
     season: int | None = None
     episode: int | None = None   # None + season = whole season
+    category: str | None = None  # torrent search: "" (all) | movie | series | music | games; None = from type
+
+    @property
+    def cat(self) -> str:
+        return self.type if self.category is None else self.category
 
     def text(self, title: str) -> str:
         if self.type == "series" and self.season is not None:
@@ -260,12 +271,12 @@ class Indexers:
         return out
 
     async def _s_knaben(self, base: str, q: Query) -> list[dict]:
-        cat = [2000000] if q.type == "series" else [3000000]
+        cat = KNABEN_CATS.get(q.cat)
         out = []
         for title in _distinct(q.titles)[:2]:
             body = {"search_type": "100%", "search_field": "title", "query": q.text(title),
                     "order_by": "seeders", "order_direction": "desc", "size": 50,
-                    "categories": cat, "hide_unsafe": True, "hide_xxx": True}
+                    "hide_unsafe": True, "hide_xxx": True, **({"categories": cat} if cat else {})}
             async with self._post(f"{base}/v1", json=body) as r:
                 r.raise_for_status()
                 data = await r.json(content_type=None)
@@ -283,7 +294,7 @@ class Indexers:
     async def _s_apibay(self, base: str, q: Query) -> list[dict]:
         out = []
         for title in _distinct(q.titles)[:2]:
-            data = await self.get_json(f"{base}/q.php?q={quote_plus(q.text(title))}&cat=200")
+            data = await self.get_json(f"{base}/q.php?q={quote_plus(q.text(title))}&cat={APIBAY_CATS.get(q.cat, 0)}")
             for t in data:
                 if t.get("id") == "0":
                     continue
@@ -314,6 +325,8 @@ class Indexers:
         return out
 
     async def _s_yts(self, base: str, q: Query) -> list[dict]:
+        if q.cat not in ("movie", ""):
+            return []   # films only
         term = q.imdb_id or q.text(q.titles[0])
         data = await self.get_json(f"{base}/api/v2/list_movies.json?query_term={quote_plus(term)}&limit=5")
         out = []
@@ -339,9 +352,9 @@ class Indexers:
         return await self._with_magnets(base, _dedupe_rows(rows)[:12], "ilCorSaRoNeRo")
 
     async def _s_x1337(self, base: str, q: Query) -> list[dict]:
-        cat = "TV" if q.type == "series" else "Movies"
-        page = await self.get_text(
-            f"{base}/category-search/{quote(q.text(q.titles[0]))}/{cat}/1/")
+        cat = X1337_CATS.get(q.cat)
+        term = quote(q.text(q.titles[0]))
+        page = await self.get_text(f"{base}/category-search/{term}/{cat}/1/" if cat else f"{base}/search/{term}/1/")
         rows = _html_rows(page, r'href="(/torrent/\d+/[^"]*)"')
         return await self._with_magnets(base, _dedupe_rows(rows)[:10], "1337x")
 

@@ -61,7 +61,7 @@ class MediaProvider(Provider):
         self.backend, self.site = backend, site
         self.id, self.name = site, SITES[site]
 
-    async def search(self, session, query, page, page_size, timeout):
+    async def search(self, session, query, page, page_size, timeout, category=""):
         if page > 1:
             return []   # these sites answer one fixed page
         b = self.backend
@@ -69,7 +69,8 @@ class MediaProvider(Provider):
             await b.ensure()
             base = await b.base(self.site)
             fn = getattr(b.idx, "_s_" + self.site.replace("1337x", "x1337"))
-            rows = await fn(base, b.ix.Query(titles=[query], type="movie"))
+            rows = await fn(base, b.ix.Query(titles=[query], type="series" if category == "series" else "movie",
+                                         category=category))
         except ProviderError:
             raise
         except asyncio.TimeoutError as err:

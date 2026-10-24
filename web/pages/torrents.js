@@ -2,12 +2,13 @@
 // Route: #/torrents. Results are normalised by the hub; filters and sorting run server-side.
 import { api, h, icon, toast, ensureCss, fmt, t, sheet, act } from "../app.js";
 
-const state = { q: "", sort: "relevance", order: "desc", minSeeders: 0, maxGb: 0, page: 1, results: [], ids: new Set() };
+const state = { q: "", category: "", sort: "relevance", order: "desc", minSeeders: 0, maxGb: 0, page: 1, results: [], ids: new Set() };
 let seq = 0;          // ignore answers of superseded searches
 let els = {};
 
 const qs = () => {
   const p = new URLSearchParams({ q: state.q, sort: state.sort, order: state.order, page: state.page });
+  if (state.category) p.set("category", state.category);
   if (state.minSeeders > 0) p.set("min_seeders", state.minSeeders);
   if (state.maxGb > 0) p.set("max_size", Math.round(state.maxGb * 1024 ** 3));
   return p.toString();
@@ -325,6 +326,10 @@ export default {
         h("button", { onclick: trackerMenu }, icon("settings"), t("Trackers"))),
       h("form.tr-form", { onsubmit: (e) => { e.preventDefault(); run(); } }, input, els.go),
       h("div.tr-filters",
+        h("label", t("Category"), h("select", { onchange: (e) => { state.category = e.target.value; again(); } },
+          option("", t("All"), state.category), option("movie", t("Films"), state.category),
+          option("series", t("Series"), state.category), option("music", t("Music"), state.category),
+          option("games", t("Games"), state.category))),
         h("label", t("Sort"), h("select", { onchange: (e) => { state.sort = e.target.value; again(); } },
           option("relevance", t("Relevance"), state.sort), option("seeders", t("Seeders"), state.sort),
           option("size", t("Size"), state.sort))),

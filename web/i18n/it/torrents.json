@@ -73,5 +73,10 @@
   "It will go to": "Finirà in",
   "Downloading: {what}": "Download avviato: {what}",
   "Pick the film or series first": "Prima scegli il film o la serie",
-  "Pick what it is: film, series, music or game": "Scegli cos'è: film, serie, musica o gioco"
+  "Pick what it is: film, series, music or game": "Scegli cos'è: film, serie, musica o gioco",
+  "Category": "Categoria",
+  "Films": "Film",
+  "Series": "Serie TV",
+  "Games": "Giochi",
+  "Unknown category": "Categoria sconosciuta"
 }

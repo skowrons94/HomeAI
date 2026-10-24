@@ -17,7 +17,7 @@ import aiohttp
 from .model import HEX40, Provider, ProviderError, Result, to_int
 
 MAX_BODY = 5 * 1024 * 1024
-CATEGORIES = {"games": "4000,1000", "music": "3000"}   # Torznab: PC + Console; Audio
+CATEGORIES = {"movie": "2000", "series": "5000", "games": "4000,1000", "music": "3000"}  # Torznab ids
 
 
 def local(tag) -> str:

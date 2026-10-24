@@ -22,6 +22,7 @@ from .torznab import TorznabProvider, clean_url
 
 log = logging.getLogger("hub.torrents")
 MAX_QUERY = 100
+CATEGORIES = ("", "movie", "series", "music", "games")   # torrent search: "" = all
 MAX_CUSTOM = 30
 STORE_TRACKERS = "torrents.trackers"   # custom Torznab trackers [{id, name, url, key}]
 STORE_ENABLED = "torrents.enabled"     # ids to search; absent = the `providers` config list
@@ -241,6 +242,9 @@ class TorrentsPlugin(Plugin):
         sort = q.get("sort", "relevance")
         if sort not in SORTS:
             raise ValueError(_("Unknown sort"))
+        category = q.get("category", "")
+        if category not in CATEGORIES:
+            raise ValueError(_("Unknown category"))
         page = min(max(to_int(q.get("page")) or 1, 1), 50)
         size = min(max(to_int(self.config.get("page_size", 20)) or 20, 5), 50)
         ids = self.enabled_ids()
@@ -250,7 +254,8 @@ class TorrentsPlugin(Plugin):
         if not ids:
             return _json({"query": query, "page": page, "results": [], "providers": [], "has_more": False,
                           "error": _("No tracker is enabled. Turn one on in Trackers.")})
-        merged, statuses, has_more = await self.engine.search(self.session, query, page, size, sorted(ids))
+        merged, statuses, has_more = await self.engine.search(self.session, query, page, size, sorted(ids),
+                                                             category=category)
         for st in statuses:
             self._note(st)
         results = refine(merged, sort, q.get("order", "desc"), to_int(q.get("min_seeders")) or 0,
