@@ -1043,6 +1043,37 @@ def gog_installer(folder: Path, name="setup_hades_1.37_(12345).exe"):
     put(folder / name.replace(".exe", "-1.bin"), b"B" * 400)
 
 
+def test_bonus_archive_failure_does_not_block_gog():
+    """Gothic 2 case: bonus .rar extras next to a GOG installer; unar fails on the NAS share (attributes)."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        tool = fake_inno(tmp)
+        os.environ.update(FAKE_INNO="ok", FAKE_INNO_LOG=str(tmp / "inno.log"))
+        bad = tmp / "bin" / "unar"
+        bad.write_text("#!/bin/sh\nexit 1\n")
+        bad.chmod(0o755)
+        root = tmp / "games"
+        g = root / "pc/Gothic 2 [GOG]"
+        gog_installer(g, "setup_gothic_2_(1).exe")
+        put(g / "gothic_2_manuals.rar", b"Rar!" + b"\0" * 20)
+        orig = F.shutil.which
+        F.shutil.which = lambda n, *a, **k: (str(tool) if n == "innoextract" else str(bad) if n == "unar"
+                                             else None if n in ("unrar", "7z", "7zz", "7za") else orig(n, *a, **k))
+        try:
+            assert asyncio.run(F.unpack_payload(g, root)) == ""
+            assert (g / "Hades.exe").is_file() and (g / "gothic_2_manuals.rar").is_file()   # game out, bonus kept
+            # without a GOG installer the same failure is an error
+            plain = root / "pc/Plain Game"
+            put(plain / "game.rar", b"Rar!" + b"\0" * 20)
+            try:
+                asyncio.run(F.unpack_payload(plain, root))
+                raise AssertionError("should fail")
+            except F.UnpackError:
+                pass
+        finally:
+            F.shutil.which = orig
+
+
 def test_gog_detection_rules():
     with tempfile.TemporaryDirectory() as d:
         t = Path(d)

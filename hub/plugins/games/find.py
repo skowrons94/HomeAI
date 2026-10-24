@@ -408,6 +408,9 @@ async def unpack_payload(payload: Path, root: Path, created: list | None = None)
         return ""   # ROMs: emulators read .zip/.7z directly, and arcade/Neo Geo sets must stay zipped
     loop = asyncio.get_running_loop()
     made: list[Path] = []
+    # with a GOG installer in the download, other archives are bonus extras (manuals, soundtrack…):
+    # one that fails to unpack is kept as it is and must not stop the game
+    has_gog = bool(await loop.run_in_executor(None, find_gog, payload)) if payload.is_dir() else False
     for arc in await loop.run_in_executor(None, find_archives, payload):   # NAS walk: off the event loop
         if not _inside(root, arc.resolve()):
             continue
@@ -438,6 +441,11 @@ async def unpack_payload(payload: Path, root: Path, created: list | None = None)
             _UNPACKING.add(key)
             try:
                 await run_tool(cmd, arc, dest)
+            except UnpackError as err:
+                if not has_gog:
+                    raise
+                log.warning("bonus archive %s not unpacked (%s): kept as it is", arc.name, err)
+                continue
             finally:
                 _UNPACKING.discard(key)
         await loop.run_in_executor(None, arc.unlink)
