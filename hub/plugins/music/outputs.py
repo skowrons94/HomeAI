@@ -110,6 +110,10 @@ class AirPlayOutput(Output):
         confs = await pyatv.scan(loop, timeout=4, identifier=self.id, hosts=[self.desc["address"]],
                                  protocol={Protocol.RAOP})
         if not confs:
+            # some speakers (the KEF LSX) only answer multicast mDNS, not a query sent to their address
+            confs = [c for c in await pyatv.scan(loop, timeout=5, protocol={Protocol.RAOP})
+                     if self._is_me(c)]
+        if not confs:
             raise OutputError(_("{name} not found on the network", name=self.name))
         src = confs[0].get_service(Protocol.RAOP)
         cred = self.p.output_creds().get(self.id) or {}
@@ -125,6 +129,11 @@ class AirPlayOutput(Output):
                 raise OutputError(_("{name} needs pairing or a password: open the output list and set it up", name=self.name)) from err
             raise OutputError(text) from err
         return self.atv
+
+    def _is_me(self, conf) -> bool:
+        plain = lambda v: str(v or "").replace(":", "").upper()
+        ids = {plain(i) for i in (getattr(conf, "all_identifiers", None) or [conf.identifier])}
+        return plain(self.id) in ids or str(conf.address) == self.desc.get("address")
 
     def _borrowed_credentials(self) -> str | None:
         """The Apple TV plugin paired AirPlay already: those credentials work for audio too."""
