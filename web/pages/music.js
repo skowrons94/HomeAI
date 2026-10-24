@@ -911,6 +911,9 @@ function dlRow(d) {
       active || d.state === "done" ? h("div.progress" + (d.state === "importing" ? ".ind" : ""),
         h("div", { style: { width: d.state === "importing" ? "100%" : `${p}%` } })) : null,
       h("div.mu-note" + (d.state === "error" ? ".err" : ""), d.state === "downloading" ? `${p}% · ${dlState(d)}` : dlState(d))),
+    d.state === "error" && h("button.icon.ghost", { "aria-label": t("Try again"), title: t("Try again"), onclick: (e) => act(async () => {
+      await P(`downloads/${encodeURIComponent(d.hash)}/retry`, { body: {} }); await loadDownloads();
+    }, e.currentTarget) }, icon("refresh")),
     h("button.icon.ghost", { "aria-label": active ? t("Cancel") : t("Remove"), onclick: (e) => act(async () => {
       await P(`downloads/${encodeURIComponent(d.hash)}`, { method: "DELETE" }); await loadDownloads();
     }, e.currentTarget) }, icon(active ? "x" : "trash")));

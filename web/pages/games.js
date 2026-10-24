@@ -638,6 +638,10 @@ function dlRow(d) {
       h("div.gm-res-title", d.title),
       active || d.state === "done" ? h("div.progress" + (d.state === "extracting" ? ".ind" : ""), h("div", { style: { width: d.state === "extracting" ? "100%" : `${p}%` } })) : null,
       h("div.gm-note" + (bad ? ".err" : ""), active && d.state === "downloading" ? `${p}% · ${dlState(d)}` : dlState(d))),
+    (bad || d.state === "needs_extraction") && h("button.icon.ghost", { "aria-label": t("Try again"), title: t("Try again"),
+      onclick: (e) => act(async () => {
+        await P(`find/downloads/${encodeURIComponent(d.hash)}/retry`, { body: {} }); await loadDownloads(); schedule();
+      }, e.currentTarget) }, icon("refresh")),
     h("button.icon.ghost", { "aria-label": active ? t("Cancel") : t("Remove"), onclick: (e) => act(async () => {
       await P(`find/downloads/${encodeURIComponent(d.hash)}`, { method: "DELETE" });
       await loadDownloads(); schedule();

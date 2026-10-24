@@ -300,7 +300,7 @@ class MusicPlugin(Plugin):
                 g("/discover/artist/{id}", self.r_disc_artist), g("/discover/search", self.r_disc_search),
                 g("/discover/resolve", self.r_disc_resolve),
                 g("/find", self.r_find), p("/download", self.r_download), g("/downloads", self.r_downloads),
-                d("/downloads/{hash}", self.r_cancel),
+                d("/downloads/{hash}", self.r_cancel), p("/downloads/{hash}/retry", self.r_retry),
                 g("/outputs", self.r_outputs), p("/outputs/scan", self.r_outputs_scan),
                 p("/outputs/{id}/pair", self.r_pair), p("/outputs/{id}/password", self.r_password),
                 g("/player", self.r_player), p("/player/play", self.r_play), p("/player/{action}", self.r_control),
@@ -474,6 +474,10 @@ class MusicPlugin(Plugin):
 
     async def r_downloads(self, request):
         return _json(self.finder.listing())
+
+    async def r_retry(self, request):
+        await self.finder.retry(request.match_info["hash"].lower())
+        return _json({"ok": True})
 
     async def r_cancel(self, request):
         await self.finder.cancel(request.match_info["hash"].lower())

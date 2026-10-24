@@ -365,6 +365,15 @@ class Finder:
         self.live.pop(h, None)
 
     # -- background
+    async def retry(self, h: str) -> None:
+        e = next((x for x in self.entries() if x["hash"] == h), None)
+        if not e:
+            raise KeyError(_("Download not found"))
+        if e["state"] not in ("error", "needs_extraction") or not e.get("payload"):
+            raise ValueError(_("Only a failed import can be retried"))
+        self._update(h, state="extracting", error=None)
+        self.p.hub.spawn(self._finish(h), name="games-finish")
+
     async def resume(self) -> None:
         """After a restart: finish downloads that were being unpacked."""
         for e in self.entries():

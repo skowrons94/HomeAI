@@ -126,5 +126,7 @@
   "The music service is not reachable": "Il servizio musicale non è raggiungibile",
   "The music service sent an unexpected answer": "Il servizio musicale ha inviato una risposta inattesa",
   "The music service is busy, try again in a moment": "Il servizio musicale è occupato, riprova tra poco",
-  "This album was not found": "Album non trovato"
+  "This album was not found": "Album non trovato",
+  "Only a failed import can be retried": "Si può riprovare solo un'importazione non riuscita",
+  "Download not found": "Download non trovato"
 }

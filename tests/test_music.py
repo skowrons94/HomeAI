@@ -688,6 +688,36 @@ def test_discover_routes():
         asyncio.run(go())
 
 
+def test_move_across_shares_without_permissions():
+    """Download -> Multimedia are two SMB shares: rename fails (EXDEV) and chmod/utime fail (EPERM)."""
+    import os
+    import shutil
+    from unittest import mock
+    from hub.plugins.music import find as mf
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        src, music = d / "dl" / "01.flac", d / "music"
+        src.parent.mkdir()
+        src.write_bytes(b"x" * 1000)
+        dest = music / "A" / "B (1995)" / "01.flac"
+        calls = []
+
+        def fake_replace(a, b):     # the first call is the cross-share rename, the next the .part rename
+            calls.append(a)
+            if len(calls) == 1:
+                raise OSError(18, "Invalid cross-device link")
+            os.rename(a, b)
+        with mock.patch.object(os, "replace", side_effect=fake_replace), \
+                mock.patch.object(shutil, "copystat", side_effect=PermissionError(1, "Operation not permitted")):
+            assert mf._move(src, dest, music) is True
+        assert dest.read_bytes() == b"x" * 1000 and not src.exists()
+        assert not list(dest.parent.glob("*.part"))
+        # an earlier interrupted import left the copy behind: the original is removed, no duplicate
+        src.write_bytes(b"x" * 1000)
+        assert mf._move(src, dest, music) is False and not src.exists()
+        assert sorted(x.name for x in dest.parent.iterdir()) == ["01.flac"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -232,6 +232,7 @@ class GamesPlugin(Plugin):
             web.post("/find/download", self.r_find_download),
             web.get("/find/downloads", self.r_find_downloads),
             web.delete("/find/downloads/{hash}", self.r_find_cancel),
+            web.post("/find/downloads/{hash}/retry", self.r_find_retry),
             web.get("/dl/{id}/{path:.*}", self.r_download),
         ]
 
@@ -481,6 +482,10 @@ class GamesPlugin(Plugin):
 
     async def r_find_downloads(self, request):
         return _json(self.finder.listing())
+
+    async def r_find_retry(self, request):
+        await self.finder.retry(request.match_info["hash"].lower())
+        return _json({"ok": True})
 
     async def r_find_cancel(self, request):
         await self.finder.cancel(request.match_info["hash"].lower())

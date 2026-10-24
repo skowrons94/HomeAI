@@ -19,6 +19,7 @@ from pathlib import Path
 
 from ...i18n import _
 from ..games.find import UnpackError, unzip
+from ..media.downloads import copy_file
 
 log = logging.getLogger("hub.music")
 
@@ -98,8 +99,16 @@ def _move(src: Path, dest: Path, music_dir: Path) -> bool:
         raise UnpackError("destination outside the music folder")
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and dest.stat().st_size == src.stat().st_size:
+        src.unlink()        # already there (an earlier, interrupted import): no second copy left behind
         return False
-    shutil.move(str(src), str(_unique(dest)))
+    dest = _unique(dest)
+    try:
+        os.replace(src, dest)                   # same share: a rename
+    except OSError:
+        # Download -> Multimedia are two SMB shares: copy (without the permission bits the NAS
+        # refuses with EPERM), then delete the original
+        copy_file(str(src), str(dest))
+        src.unlink()
     return True
 
 
@@ -311,6 +320,15 @@ class Finder:
                 log.info("cancel %s: %s", h, err)
         self._save([x for x in es if x["hash"] != h])
         self.live.pop(h, None)
+
+    async def retry(self, h: str) -> None:
+        e = next((x for x in self.entries() if x["hash"] == h), None)
+        if not e:
+            raise KeyError(_("Download not found"))
+        if e["state"] != "error" or not e.get("payload"):
+            raise ValueError(_("Only a failed import can be retried"))
+        self._update(h, state="importing", error=None)
+        self.p.hub.spawn(self._finish(h), name="music-finish")
 
     async def resume(self) -> None:
         for e in self.entries():
