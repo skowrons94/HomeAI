@@ -366,6 +366,16 @@ def test_category_hint_only_reaches_providers_that_take_it():
         assert seen["params"].get("cat") == want
 
 
+def test_torznab_music_category_is_audio():
+    prov = TorznabProvider("tz1", "JK", "http://jk/api")
+    sess = Sess(TextResp(200, text=TZ_EMPTY))
+    seen = {}
+    orig = sess.get
+    sess.get = lambda url, _o=orig, **k: (seen.update(k), _o(url, **k))[1]
+    asyncio.run(prov.search(sess, "q", 1, 10, 5, category="music"))
+    assert seen["params"]["cat"] == "3000"
+
+
 class JReq:
     def __init__(self, body=None, id=None, query=None):
         self._b, self.match_info, self.query = body, {"id": id}, query or {}
