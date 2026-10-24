@@ -14,6 +14,7 @@ See docs/music.md.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import secrets
@@ -34,6 +35,7 @@ from ...i18n import _
 from ...settings import get_path
 from . import find as findmod
 from . import dlna
+from . import libfiles
 from . import outputs as outmod
 from .discover import Discover
 from .find import Finder
@@ -381,6 +383,7 @@ class MusicPlugin(Plugin):
                 g("/outputs", self.r_outputs), p("/outputs/scan", self.r_outputs_scan),
                 p("/outputs/{id}/pair", self.r_pair), p("/outputs/{id}/password", self.r_password),
                 g("/speaker/{exp}/{sig}/{name}", self.r_speaker_stream),
+                g("/library/{kind}/{id}/files", self.r_lib_files), p("/library/{kind}/{id}/delete", self.r_lib_delete),
                 g("/player", self.r_player), p("/player/play", self.r_play), p("/player/{action}", self.r_control),
                 p("/test", self.r_test), p("/rescan", self.r_rescan), g("/scan", self.r_scan)]
 
@@ -426,6 +429,43 @@ class MusicPlugin(Plugin):
 
     async def r_album(self, request):
         return _json(await self._call(self.nav.album(self._id(request))))
+
+    # -- delete songs / albums from the library (the files on the NAS) --------------------------------
+    async def _lib_files(self, request) -> tuple[list[dict], list[tuple[dict, Path | None]]]:
+        kind, iid = request.match_info["kind"], self._id(request)
+        if kind == "album":
+            songs = (await self._call(self.nav.album(iid)))["tracks"]
+        elif kind == "song":
+            songs = [await self._call(self.nav.song(iid))]
+        else:
+            raise KeyError(_("Not found"))
+        music = Path(self.music_dir)
+        loop = asyncio.get_running_loop()
+        found = await loop.run_in_executor(None, lambda: [(x, libfiles.locate(music, x)) for x in songs])
+        return songs, found
+
+    async def r_lib_files(self, request):
+        _songs, found = await self._lib_files(request)
+        music = Path(self.music_dir).resolve()
+        ok = [(x, f) for x, f in found if f]
+        return _json({"files": [{"title": x["title"], "path": str(f.resolve().relative_to(music)), "size": x["size"]}
+                                for x, f in ok],
+                      "missing": [x["title"] for x, f in found if not f],
+                      "size": sum(x["size"] for x, _f in ok), "folder": self.music_dir})
+
+    async def r_lib_delete(self, request):
+        b = await self._body(request)
+        if b.get("confirm") is not True:
+            raise ValueError(_("Confirm the deletion first"))
+        _songs, found = await self._lib_files(request)
+        files = [f for _x, f in found if f]
+        if not files:
+            raise ValueError(_("The files of this music were not found on the NAS"))
+        loop = asyncio.get_running_loop()
+        n = await loop.run_in_executor(None, libfiles.delete, Path(self.music_dir), files)
+        with contextlib.suppress(Exception):
+            await self.rescan()
+        return _json({"ok": True, "deleted": n, "missing": len(found) - len(files)})
 
     async def r_search(self, request):
         q = " ".join(request.query.get("q", "").split())

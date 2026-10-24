@@ -395,9 +395,16 @@ async function openAlbum(id) {
         h("span.mu-num", x.track || i + 1),
         h("span.mu-trk-t", h("b", x.title), x.artist && x.artist !== a.artist ? h("span.mu-meta", x.artist) : null),
         h("span.mu-meta", mins(x.duration))),
-      h("a.mu-pv", { href: saveHref(x.id, "track"), download: "",
-        title: joinMeta(t("Download to phone"), sizeText(x.size)), "aria-label": t("Download to phone") }, icon("download"))));
+      h("a.mu-pv.mu-when-view", { href: saveHref(x.id, "track"), download: "",
+        title: joinMeta(t("Download to phone"), sizeText(x.size)), "aria-label": t("Download to phone") }, icon("download")),
+      h("button.icon.ghost.mu-when-edit.mu-del", { "aria-label": t("Delete from library"), title: t("Delete from library"),
+        onclick: () => confirmLibDelete("song", x.id, x.title, () => { s.close(); openAlbum(id); }) }, icon("trash"))));
   });
+  const tracksBox = h("div.mu-tracks", rows);
+  const manage = h("button.ghost.mu-manage", { onclick: () => {
+    const on = tracksBox.classList.toggle("editing");
+    manage.replaceChildren(icon(on ? "check" : "edit"), on ? t("Done") : t("Manage"));
+  } }, icon("edit"), t("Manage"));
   put(s.el, 
     h("div.mu-ahead", navCover(a.cover, a.name, 400, ".big"),
       h("div.mu-ainfo", h("div.mu-dtitle", a.name),
@@ -411,7 +418,32 @@ async function openAlbum(id) {
       h("button", { onclick: () => playTracks(tracks, 0, { album: id, mode: "queue" }) }, ic("list"), t("Queue")),
       h("a.btn", { href: saveHref(id, "album"), download: "" }, icon("download"),
         joinMeta(t("Download to phone"), sizeText(a.size)))),
-    h("div.mu-tracks", rows));
+    h("div.row.mu-manage-row", manage, h("div.spacer"),
+      h("button.danger", { onclick: () => confirmLibDelete("album", id, a.name, () => { s.close(); loadLibrary(); }) },
+        icon("trash"), t("Delete album"))),
+    tracksBox);
+}
+
+/** Delete a song or album from the library (the files on the NAS), after showing exactly what goes. */
+async function confirmLibDelete(kind, id, name, done) {
+  const s = sheet(kind === "album" ? t("Delete album") : t("Delete song"), [h("div.mu-empty-s", h("span.spin"))]);
+  let info;
+  try { info = await P(`library/${kind}/${encodeURIComponent(id)}/files`); }
+  catch (e) { sheetError(s, e.message, () => { s.close(); confirmLibDelete(kind, id, name, done); }); return; }
+  const files = info.files || [];
+  const go = h("button.danger", { disabled: !files.length, onclick: (e) => act(async () => {
+    const r = await P(`library/${kind}/${encodeURIComponent(id)}/delete`, { body: { confirm: true } });
+    toast(t("Deleted {n} files", { n: r.deleted }));
+    s.close(); done?.();
+  }, e.currentTarget) }, icon("trash"), t("Delete for good"));
+  put(s.el,
+    h("p", h("b", name)),
+    files.length ? h("div.mu-note", t("{n} files · {size} will be deleted from the NAS:", { n: files.length, size: sizeText(info.size) }))
+      : h("div.mu-note.err", t("The files of this music were not found on the NAS")),
+    files.length ? h("pre.mu-paths", files.slice(0, 40).map((f) => f.path).join("\n") + (files.length > 40 ? "\n…" : "")) : null,
+    info.missing?.length ? h("div.mu-note.err", t("Not found (left alone): {list}", { list: info.missing.join(", ") })) : null,
+    h("div.mu-note", t("This can't be undone.")),
+    h("div.row.mu-actions", h("button", { onclick: () => s.close() }, t("Cancel")), go));
 }
 
 async function openArtist(id, name) {

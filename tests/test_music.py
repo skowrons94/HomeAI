@@ -1015,6 +1015,37 @@ def test_stream_links_are_signed():
     asyncio.run(go())
 
 
+def test_library_files_locate_and_delete():
+    from hub.plugins.music import libfiles
+    with tempfile.TemporaryDirectory() as d:
+        music = Path(d).resolve() / "music"
+        a1 = music / "Radiohead" / "The Bends (1995)" / "CD 1"
+        a1.mkdir(parents=True)
+        (a1 / "01. Planet Telex.flac").write_bytes(b"x" * 500)
+        (a1 / "02. The Bends.flac").write_bytes(b"y" * 600)
+        (a1.parent / "cover.jpg").write_bytes(b"jpg")
+        other = music / "Radiohead" / "OK Computer (1997)"
+        other.mkdir()
+        (other / "01. Airbag.flac").write_bytes(b"z" * 500)        # same size as Planet Telex: title decides
+        song = {"title": "Planet Telex", "artist": "Radiohead", "suffix": "flac", "size": 500}
+        assert libfiles.locate(music, song) == a1 / "01. Planet Telex.flac"
+        assert libfiles.locate(music, {**song, "title": "Unknown"}) is None          # ambiguous: refuse
+        assert libfiles.locate(music, {**song, "size": 0}) is None
+        n = libfiles.delete(music, [a1 / "01. Planet Telex.flac"])
+        assert n == 1 and (a1 / "02. The Bends.flac").exists()
+        libfiles.delete(music, [a1 / "02. The Bends.flac"])
+        assert not (music / "Radiohead" / "The Bends (1995)").exists()              # only the cover was left
+        assert (other / "01. Airbag.flac").exists()
+        for bad in (Path(d) / "outside.flac", music / "Radiohead" / "OK Computer (1997)"):
+            if bad.suffix:
+                bad.write_bytes(b"q")
+            try:
+                libfiles.delete(music, [bad])
+                raise AssertionError(bad)
+            except ValueError:
+                pass
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

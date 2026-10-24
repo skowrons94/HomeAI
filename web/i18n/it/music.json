@@ -145,5 +145,17 @@
   "The albums are deleted from the music folder and the library is rescanned.": "Gli album vengono eliminati dalla cartella musica e la libreria viene riscansionata.",
   "These albums are no longer in the library": "Questi album non sono più nella libreria",
   "Top albums": "Album più ascoltati",
-  "Top artists": "Artisti più ascoltati"
+  "Top artists": "Artisti più ascoltati",
+  "Manage": "Gestisci",
+  "Done": "Fatto",
+  "Delete album": "Elimina album",
+  "Delete song": "Elimina brano",
+  "Deleted {n} files": "Eliminati {n} file",
+  "Delete for good": "Elimina definitivamente",
+  "{n} files · {size} will be deleted from the NAS:": "{n} file · {size} verranno eliminati dal NAS:",
+  "The files of this music were not found on the NAS": "I file di questa musica non sono stati trovati sul NAS",
+  "Not found (left alone): {list}": "Non trovati (lasciati stare): {list}",
+  "This can't be undone.": "Non si può annullare.",
+  "Confirm the deletion first": "Conferma prima l'eliminazione",
+  "Cancel": "Annulla"
 }
