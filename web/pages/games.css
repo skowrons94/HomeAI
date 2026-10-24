@@ -340,3 +340,6 @@
 .gm-log summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; color: var(--muted); }
 .gm-log pre { max-height: 220px; overflow: auto; margin: 4px 0 0; padding: 8px; white-space: pre-wrap; word-break: break-word;
   background: var(--surface-2); border-radius: 8px; font-size: 0.78rem; }
+
+/* Trova: the "In progress" list and what follows it must not touch */
+.gm-dls { margin-bottom: 16px; }
