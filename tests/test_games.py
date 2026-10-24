@@ -693,7 +693,7 @@ def test_agent_writes_art_into_steam_grid():
         (steam / "userdata/0/config").mkdir(parents=True)
         A.steam_running = lambda: False
         agent = A.Agent(TOKEN, tmp / "Games", tmp / "roms", steam, tmp / "data")
-        assert A.VERSION == "1.2"
+        assert A.VERSION == "1.3"
         art = A.decode_art({"grid": base64.b64encode(PNG).decode(), "hero": base64.b64encode(JPG).decode()})
         assert art["grid"] == (PNG, ".png") and art["hero"][1] == ".jpg" and A.decode_art(None) == {}
         for bad in ({"grid": "!!notbase64"}, {"grid": base64.b64encode(b"GIF89a....").decode()}, {"evil": "AAAA"}, "x",
@@ -1374,7 +1374,7 @@ def test_deck_agent_location_validation():
         a = A.Agent(TOKEN, home / "Games", tmp / "roms", tmp / "s", tmp / "data", home=home, media_roots=roots,
                     mount_check=lambda p: str(p) in mounts)
         loc = a.locations()
-        assert loc["agent"] == "1.2" and loc["default"] == str(home / "Games")
+        assert loc["agent"] == A.VERSION and loc["default"] == str(home / "Games")
         assert [x["id"] for x in loc["locations"]] == ["internal", "sd:SDCARD", "sd:USB"], loc
         assert all(x["free"] > 0 and x["total"] >= x["free"] for x in loc["locations"])
         assert loc["locations"][1]["path"] == str(media / "deck/SDCARD/Games") and loc["locations"][1]["label"] == "SDCARD"
@@ -1427,7 +1427,7 @@ def test_install_to_a_chosen_location_and_old_agents():
                 async with TestClient(TestServer(casa_app(p))) as c:
                     post = lambda path, body: c.post("/api/p/games" + path, json=body)
                     lj = await (await c.get("/api/p/games/library")).json()
-                    assert lj["deck"]["agent"] == "1.2" and lj["deck"]["locations"] is True and lj["deck"]["location"] == ""
+                    assert lj["deck"]["agent"] == A.VERSION and lj["deck"]["locations"] is True and lj["deck"]["location"] == ""
                     locs = await (await c.get("/api/p/games/deck/locations")).json()
                     assert locs["supported"] and [x["id"] for x in locs["locations"]] == ["internal", "sd:SDCARD"]
                     assert locs["locations"][1]["path"] == str(sd / "Games") and locs["locations"][1]["free"] > 0
@@ -1692,6 +1692,344 @@ def test_discover_genres():
         except D.DiscoverError:
             pass
     asyncio.run(go())
+
+
+# -- Windows installers through Proton (agent 1.3) ------------------------------------------------------
+
+INNO = b"MZ" + b"\0" * 300 + b"Inno Setup Setup Data (6.2.0)" + b"\0" * 100
+NSIS = b"MZ" + b"\0" * 300 + b"Nullsoft Install System v3.08" + b"\0" * 100
+
+FAKE_PROTON = r"""#!/usr/bin/env python3
+import json, os, sys, time
+from pathlib import Path
+args = sys.argv[1:]
+log = Path(os.environ["FAKE_PROTON_LOG"])
+log.write_text(json.dumps({"args": args, "prefix": os.environ.get("STEAM_COMPAT_DATA_PATH"),
+                           "client": os.environ.get("STEAM_COMPAT_CLIENT_INSTALL_PATH"), "debug": os.environ.get("WINEDEBUG")}))
+mode = os.environ.get("FAKE_PROTON_MODE", "ok")
+if mode == "hang":
+    print("starting", flush=True)
+    time.sleep(60)
+assert args[0] == "run"
+arg = next(a for a in args if a.startswith("/DIR=") or a.startswith("/D="))
+target = Path(arg.split("=", 1)[1][2:].replace("\\", "/"))
+print("installing to", target, flush=True)
+if mode == "fail":
+    print("wine: err: boom", file=sys.stderr)
+    sys.exit(3)
+if mode == "empty":
+    sys.exit(0)
+(target / "bin").mkdir(parents=True, exist_ok=True)
+(target / "bin/Game.exe").write_bytes(b"G" * 5000)
+(target / "bin/unins000.exe").write_bytes(b"U" * 9000)
+(target / "data").mkdir(exist_ok=True)
+(target / "data/x.dat").write_bytes(b"x")
+if mode == "gog":
+    (target / "goggame-1.info").write_text(json.dumps({"gameId": "1", "rootGameId": "1", "name": "G", "playTasks": [
+        {"isPrimary": True, "type": "FileTask", "category": "game", "path": "bin\\GAME.EXE", "workingDir": "bin"}]}))
+    (target / "bin/Other.exe").write_bytes(b"O" * 99999)
+"""
+
+
+class ProtonEnv:
+    """A temp Deck for the installer tests: Proton folders, a fake proton script, Agent with short timeouts."""
+
+    def __init__(self, tmp: Path, mode="ok", timeout=20):
+        self.tmp = tmp
+        self.common = tmp / "steam/steamapps/common"
+        for name in ("Proton - Experimental", "Proton 9.0 (Beta)", "Proton 10.0", "Proton Hotfix", "Proton 8.0"):
+            d = self.common / name
+            put(d / "proton", FAKE_PROTON.encode())
+            (d / "proton").chmod(0o755)
+        (self.common / "Proton 10.0 Voice Files").mkdir()
+        ul = tmp / "steam/compatibilitytools.d/ULWGL-Proton-8.0-5-3"
+        put(ul / "proton", FAKE_PROTON.encode())
+        (ul / "proton").chmod(0o755)
+        put(ul / "compatibilitytool.vdf", b'"compatibilitytools"\n{\n "compat_tools"\n {\n  "ULWGL-Proton-8.0-5-3"\n  {\n  }\n }\n}\n')
+        self.log = tmp / "fake_proton.json"
+        os.environ["FAKE_PROTON_LOG"] = str(self.log)
+        os.environ["FAKE_PROTON_MODE"] = mode
+        (tmp / "steam/userdata/12345/config").mkdir(parents=True)
+        (tmp / "steam/config").mkdir(parents=True, exist_ok=True)
+        (tmp / "steam/config/config.vdf").write_text(
+            '"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n'
+            '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n\t\t\t\t\t"570"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"proton_9"\n\t\t\t\t\t}\n'
+            '\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n')
+        self.agent = A.Agent(TOKEN, tmp / "Games", tmp / "roms", tmp / "steam", tmp / "data", home=tmp, media_roots=[],
+                             install_timeout=timeout)
+
+    def stage(self, name="Gothic 3 [GOG]", exe=INNO, setup="setup_gothic_3.exe"):
+        d = self.tmp / "Games/_installers" / name
+        put(d / setup, exe)
+        put(d / "setup_gothic_3-1.bin", b"B", 1000)
+        return d
+
+    def wait(self, gid, want=("done", "failed", "needs_manual"), timeout=20):
+        end = time.time() + timeout
+        while time.time() < end:
+            j = self.agent.status()["jobs"].get(gid)
+            if j and j["state"] in want:
+                return j
+            time.sleep(0.05)
+        raise AssertionError("timeout: %s" % self.agent.status()["jobs"])
+
+    def called(self):
+        return json.loads(self.log.read_text())
+
+
+def test_proton_choice_and_installer_detection():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        env = ProtonEnv(tmp)
+        lst = env.agent.protons()
+        names = [p["name"] for p in lst["protons"]]
+        assert names[0] == "Proton - Experimental" and names[1] == "Proton 10.0" and names[2] == "Proton 9.0 (Beta)", names
+        assert "Proton 10.0 Voice Files" not in names and names.index("Proton Hotfix") > names.index("Proton 8.0")
+        assert lst["default"] == "Proton - Experimental"
+        tools = {p["name"]: p["tool"] for p in lst["protons"]}
+        assert tools["Proton - Experimental"] == "proton_experimental" and tools["Proton 9.0 (Beta)"] == "proton_9"
+        assert tools["ULWGL-Proton-8.0-5-3"] == "ULWGL-Proton-8.0-5-3"
+        assert env.agent.protons("Proton 8.0")["default"] == "Proton 8.0"
+        assert env.agent.protons("nonsense")["default"] == "Proton - Experimental"
+        assert A.pick_proton([]) is None
+        put(tmp / "a.exe", INNO)
+        put(tmp / "b.exe", NSIS)
+        put(tmp / "c.exe", b"MZ" + b"\0" * 5000)
+        put(tmp / "big.exe", b"\0" * (A.SCAN_BYTES + 100) + INNO)         # signature in the tail of a large setup
+        assert [A.detect_installer(tmp / n) for n in ("a.exe", "b.exe", "c.exe", "big.exe", "none.exe")] == ["inno", "nsis", None, "inno", None]
+
+
+def test_installer_arguments_and_wine_paths():
+    t = Path("/home/deck/Games/Gothic 3")
+    assert A.wine_path(t) == "Z:\\home\\deck\\Games\\Gothic 3"
+    assert A.installer_args("inno", t) == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/NOICONS",
+                                          "/DIR=Z:\\home\\deck\\Games\\Gothic 3"]
+    nsis = A.installer_args("nsis", Path("/home/deck/Games/G3"))
+    assert nsis == ["/S", "/D=Z:\\home\\deck\\Games\\G3"] and nsis[-1].startswith("/D=")
+    try:
+        A.installer_args("zip", t)
+        raise AssertionError("unknown type")
+    except ValueError:
+        pass
+    assert A.clean_title("Gothic 3 [GOG]") == "Gothic 3" and A.clean_title("Gothic 2 Gold Edition (2005) [GOG]") == "Gothic 2 Gold Edition (2005)"
+
+
+def test_game_exe_heuristic():
+    with tempfile.TemporaryDirectory() as d:
+        t = Path(d) / "plain"
+        put(t / "unins000.exe", b"U", 9000)
+        put(t / "setup.exe", b"S", 9000)
+        put(t / "vcredist_x86.exe", b"V", 9000)
+        put(t / "UnityCrashHandler64.exe", b"C", 9000)
+        put(t / "Game Launcher.exe", b"L", 8000)
+        put(t / "bin/Game.exe", b"G", 500)
+        put(t / "bin/Small.exe", b"G", 50)
+        put(t / "a/b/c/deep.exe", b"D", 99999)
+        assert A.find_game_exe(t)[0] == t / "bin/Game.exe"              # largest allowed, no launcher, not too deep
+        (t / "bin/Game.exe").unlink()
+        (t / "bin/Small.exe").unlink()
+        assert A.find_game_exe(t)[0] == t / "Game Launcher.exe"          # a launcher only when nothing else exists
+        # GOG info beats size; case-insensitive path, working dir
+        g = Path(d) / "gog"
+        put(g / "System/Gothic2.exe", b"G", 10)
+        put(g / "System/Huge.exe", b"H", 99999)
+        put(g / "goggame-1207658.info", json.dumps({"gameId": "1207658", "rootGameId": "1207658", "playTasks": [
+            {"isPrimary": True, "type": "FileTask", "category": "game", "path": "System\\GOTHIC2.EXE", "workingDir": "System"}]}).encode())
+        exe, work = A.find_game_exe(g)
+        assert exe == g / "System/Gothic2.exe" and work == "System"
+        assert A.find_game_exe(Path(d) / "empty")[0] is None
+
+
+def test_installer_runs_through_proton_and_becomes_a_shortcut():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        env = ProtonEnv(tmp, mode="gog")
+        a = env.agent
+        env.stage()
+        env.stage("Gothic 2 Gold Edition (2005) [GOG]", NSIS)
+        assert [i["title"] for i in a.installers()["installers"]] == ["Gothic 2 Gold Edition (2005)", "Gothic 3"]
+        assert {i["type"] for i in a.installers()["installers"]} == {"inno", "nsis"}
+        for bad in ({"folder": "../x"}, {"folder": "Nope"}, {"path": "/etc"}, {"path": str(tmp / "Games")}, {}):
+            try:
+                a.run_staged(bad)
+                raise AssertionError(bad)
+            except ValueError:
+                pass
+        r = a.run_staged({"folder": "Gothic 3 [GOG]"})
+        j = env.wait(r["id"])
+        assert j["state"] == "done" and j["phase"] == "done", j
+        call = env.called()
+        assert call["args"][0] == "run" and call["args"][1].endswith("setup_gothic_3.exe")
+        assert call["args"][2:] == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/NOICONS",
+                                    "/DIR=Z:" + str(tmp / "Games/Gothic 3").replace("/", "\\")]
+        assert call["prefix"] == str(tmp / "Games/_prefixes/Gothic 3") and (tmp / "Games/_prefixes/Gothic 3").is_dir()
+        assert call["client"] == str(tmp / "steam") and call["debug"] == "-all"
+        assert (tmp / "Games/Gothic 3/bin/Game.exe").is_file()
+        assert not (tmp / "Games/_installers/Gothic 3 [GOG]").exists()                 # staged copy removed on success
+        assert (tmp / "Games/_installers/Gothic 2 Gold Edition (2005) [GOG]").exists()
+        pend = a.pending()["shortcuts"]
+        assert len(pend) == 1 and pend[0]["exe"] == str(tmp / "Games/Gothic 3/bin/Game.exe") and pend[0]["name"] == "Gothic 3"
+        assert pend[0]["startdir"] == str(tmp / "Games/Gothic 3/bin") and pend[0]["compat"] == "proton_experimental"
+        assert a.status()["installed"][r["id"]]["kind"] == "installer"
+        # apply: shortcut plus compat tool, an existing mapping is left alone, one backup
+        A.steam_running = lambda: False
+        assert a.apply(False)["shortcuts"] == 1
+        cfg = (tmp / "steam/config/config.vdf").read_text()
+        appid = A.shortcut_appid('"%s"' % pend[0]["exe"], "Gothic 3")
+        assert '"%d"' % appid in cfg and '"proton_experimental"' in cfg and '"570"' in cfg and '"proton_9"' in cfg
+        assert (tmp / "steam/config/config.vdf.casa.bak").exists()
+        assert not A.set_compat_tool(tmp / "steam/config/config.vdf", appid, "proton_8")
+        # NSIS one: target without spaces, /S ... /D= last
+        r2 = a.run_staged({"folder": "Gothic 2 Gold Edition (2005) [GOG]"})
+        assert env.wait(r2["id"])["state"] == "done"
+        args = env.called()["args"]
+        assert args[2] == "/S" and args[-1].startswith("/D=") and " " not in args[-1]
+        # uninstall removes the game folder (the prefix stays: saves)
+        assert a.uninstall(r["id"])["ok"] and not (tmp / "Games/Gothic 3").exists()
+        assert (tmp / "Games/_prefixes/Gothic 3").is_dir()
+
+
+def test_installer_failure_unknown_type_and_missing_proton():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        env = ProtonEnv(tmp, mode="fail")
+        stage = env.stage()
+        j = env.wait(env.agent.run_staged({"folder": stage.name})["id"])
+        assert j["state"] == "failed" and j["phase"] == "error" and "exit code 3" in j["message"] and "kept" in j["message"]
+        assert "boom" in j["log_tail"] and stage.exists() and (stage / "setup_gothic_3.exe").is_file()
+        assert env.agent.pending()["shortcuts"] == [] and env.agent.registry() == {}
+        # unknown installer type: manual, nothing run
+        env.log.unlink()
+        stage2 = env.stage("Mystery", b"MZ" + b"\0" * 400, "setup_mystery.exe")
+        j = env.wait(env.agent.run_staged({"folder": "Mystery"})["id"])
+        assert j["state"] == "needs_manual" and j["phase"] == "manual" and "Inno Setup or NSIS" in j["message"]
+        assert not env.log.exists() and stage2.exists()
+        # exit 0 but nothing installed: failure, installer kept
+        os.environ["FAKE_PROTON_MODE"] = "empty"
+        j = env.wait(env.agent.run_staged({"folder": stage.name})["id"])
+        assert j["state"] == "failed" and "nothing was installed" in j["message"] and stage.exists()
+        # no Proton at all
+        env.agent.proton_dirs = []
+        os.environ["FAKE_PROTON_MODE"] = "ok"
+        j = env.wait(env.agent.run_staged({"folder": stage.name})["id"])
+        assert j["state"] == "needs_manual" and "No Proton" in j["message"] and stage.exists()
+
+
+def test_installer_timeout_and_cancel_kill_the_process_group():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        env = ProtonEnv(tmp, mode="hang", timeout=1.5)
+        stage = env.stage()
+        t0 = time.time()
+        j = env.wait(env.agent.run_staged({"folder": stage.name})["id"])
+        assert j["state"] == "failed" and "did not finish" in j["message"] and "starting" in j["log_tail"] and time.time() - t0 < 15
+        assert stage.exists()
+        env.agent.install_timeout = 60
+        env.log.unlink()
+        r = env.agent.run_staged({"folder": stage.name})
+        end = time.time() + 10
+        while time.time() < end and not env.log.exists():
+            time.sleep(0.05)
+        time.sleep(0.5)
+        env.agent.cancel(r["id"])
+        j = env.wait(r["id"])
+        assert j["state"] == "failed" and j["message"].startswith("Cancelled") and stage.exists()
+        try:
+            env.agent.cancel(r["id"])
+            raise AssertionError("not running")
+        except KeyError:
+            pass
+
+
+def test_hub_sends_installer_jobs_and_runs_them_on_the_deck():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        env = ProtonEnv(tmp, mode="gog")
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), A.make_handler(env.agent))
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        lib = tmp / "nas/games"
+        put(lib / "pc/Old Game/setup_old_game.exe", INNO)
+        put(lib / "pc/Old Game/setup_old_game-1.bin", b"B", 700)
+
+        async def go():
+            (tmp / "hubdata").mkdir(exist_ok=True)
+            hub = Hub({"homekit": {"enabled": False}}, tmp / "hubdata")
+            p = GamesPlugin(hub, {"library": str(lib), "deck": {"host": "127.0.0.1", "port": port, "token": TOKEN}})
+            await p.start()
+            await p._scan()
+            async with TestClient(TestServer(casa_app(p))) as c:
+                d0 = await (await c.get("/api/p/games/library")).json()
+                assert d0["deck"]["installers_supported"] and d0["deck"]["run_installers"]
+                assert (await c.post("/api/p/games/install", json={"id": "pc-old-game"})).status == 200
+                g, _ = await wait_state(c, "pc-old-game", ("installed", "failed", "needs_manual"))
+                assert g["state"] == "installed", g
+                assert (tmp / "Games/Old Game/bin/Game.exe").is_file() and not (tmp / "Games/_installers/Old Game").exists()
+                env.stage()
+                r = await (await c.get("/api/p/games/deck/installers")).json()
+                assert r["supported"] and [i["title"] for i in r["installers"]] == ["Gothic 3"]
+                path = r["installers"][0]["path"]
+                assert (await c.post("/api/p/games/deck/installers/run", json={"path": "/etc"})).status in (400, 502)
+                assert (await c.post("/api/p/games/deck/installers/run", json={"path": path})).status == 200
+                env.wait("staged-gothic-3")
+                r = await (await c.get("/api/p/games/deck/installers")).json()
+                assert r["installers"] == [] and r["jobs"]["staged-gothic-3"]["state"] == "done"
+            await p.stop()
+        try:
+            asyncio.run(go())
+        finally:
+            srv.shutdown()
+
+
+def test_old_agent_keeps_copy_only_and_auto_install_gates_installers():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        hub, lib, cfg = _plugin_env(tmp, {"deck": {"host": "deck", "token": "t" * 20, "auto_install": True}})
+        put(lib / "pc/Setup Only/setup_x.exe", INNO)
+
+        async def go():
+            p = GamesPlugin(hub, cfg)
+            await p.start()
+            await p._scan()
+            calls = FakeDeckCalls()
+            p.deck.call = calls
+            try:
+                assert not p.agent_runs_installers("1.2") and p.agent_runs_installers("1.3") and p.agent_runs_installers("1.10")
+                entry = [{"hash": "b" * 40, "title": "Setup", "platform": "pc", "state": "done", "owned": [str(lib / "pc/Setup Only")],
+                          "payload": str(lib / "pc/Setup Only"), "dir": str(lib / "pc"), "added": 2}]
+                p.finder._save(entry)
+                calls.agent = "1.2"
+                p._deck_cache = (0, await p._deck_state(fresh=True))
+                p.auto_queue("b" * 40)
+                assert p.auto_for_game("pc-setup-only") is None                       # agent 1.2: skipped, as before
+                calls.agent = "1.3"
+                p._deck_cache = (0, await p._deck_state(fresh=True))
+                p.config["deck"]["run_installers"] = False
+                p.auto_queue("b" * 40)
+                assert p.auto_for_game("pc-setup-only") is None                       # setting off: skipped
+                p.config["deck"]["run_installers"] = True
+                p.config["deck"]["proton"] = "Proton 10.0"
+                p.auto_queue("b" * 40)
+                assert p.auto_for_game("pc-setup-only")["state"] == "pending"
+                await p._auto_tick()
+                assert len(calls.sent) == 1 and calls.sent[0]["run"] is True and calls.sent[0]["proton"] == "Proton 10.0"
+                calls.jobs = {"pc-setup-only": {"state": "installing", "done": 0.99, "message": "x", "phase": "installing"}}
+                await p._auto_tick()
+                assert len(calls.sent) == 1 and p.auto_for_game("pc-setup-only")["state"] == "sent"
+                st = p._state(p.games["pc-setup-only"], await p._deck_state(fresh=True))
+                assert st["state"] == "installing" and st["phase"] == "installing"
+                # the agent went back to an old version: a queued installer is dropped
+                calls.jobs = {}
+                p._auto_clear("pc-setup-only")
+                p.auto_queue("b" * 40)
+                calls.agent = "1.2"
+                await p._auto_tick()
+                assert p.auto_for_game("pc-setup-only") is None and len(calls.sent) == 1
+                await p._send_install(p.games["pc-setup-only"], "http://hub")        # explicit, old agent: copy only
+                assert "run" not in calls.sent[-1]
+            finally:
+                await p.stop()
+        asyncio.run(go())
 
 
 if __name__ == "__main__":

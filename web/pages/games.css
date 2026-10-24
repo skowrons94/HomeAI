@@ -330,3 +330,13 @@
 .gm-disc > .gm-chipwrap { margin-bottom: 8px; }
 .gm-loc, .gm-where { border-radius: var(--radius-sm); }
 .gm-manage button { border-radius: var(--radius-sm); }
+
+/* installers waiting on the Deck */
+.gm-waiting { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; padding: 12px; }
+.gm-wrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.gm-wmain { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.gm-wrow button { min-height: 44px; }
+.gm-log { font-size: 0.85rem; }
+.gm-log summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; color: var(--muted); }
+.gm-log pre { max-height: 220px; overflow: auto; margin: 4px 0 0; padding: 8px; white-space: pre-wrap; word-break: break-word;
+  background: var(--surface-2); border-radius: 8px; font-size: 0.78rem; }

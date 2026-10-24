@@ -35,7 +35,10 @@ const fx = { platforms: [], q: "", results: [], providers: [], page: 1, more: fa
 try { view = { ...view, ...JSON.parse(localStorage.getItem(KEY) || "{}") }; } catch { /* private mode */ }
 const saveView = () => { try { localStorage.setItem(KEY, JSON.stringify(view)); } catch { /* ignore */ } };
 
-const busyNow = () => data.games.some((g) => g.state === "installing");
+// installers already copied to the Deck, and the jobs that run them (GET deck/installers)
+let waiting = { items: [], jobs: {}, at: 0, busy: false };
+const stagedBusy = () => Object.values(waiting.jobs).some((j) => j.state === "queued" || j.state === "installing" || j.state === "downloading");
+const busyNow = () => data.games.some((g) => g.state === "installing") || stagedBusy();
 const activeDl = () => fx.downloads.filter((d) => d.state === "downloading" || d.state === "extracting");
 const platName = (k) => ({ pc: t("PC"), linux: t("Linux") }[k] || String(k || "").toUpperCase());
 const gtitle = (g) => g.meta?.title || g.title;
@@ -52,6 +55,54 @@ async function loadLibrary(path = "library", opts, quiet = false) {
   }
   loaded = true;
   drawLibrary();
+  loadWaiting();
+}
+
+async function loadWaiting(force = false) {
+  const d = data.deck || {};
+  if (!d.online || !d.installers_supported) {
+    if (waiting.items.length || Object.keys(waiting.jobs).length) { waiting = { items: [], jobs: {}, at: 0, busy: false }; drawLibrary(); }
+    return;
+  }
+  if (waiting.busy || (!force && Date.now() - waiting.at < (stagedBusy() ? 2000 : 20000))) return;
+  waiting.busy = true;
+  try {
+    const r = await P("deck/installers");
+    waiting = { items: r.installers || [], jobs: r.jobs || {}, at: Date.now(), busy: false };
+  } catch { waiting.busy = false; waiting.at = Date.now(); return; }
+  drawLibrary();
+  schedule();
+}
+
+const runStaged = (it, e) => act(async () => {
+  await P("deck/installers/run", { body: { path: it.path, title: it.title } });
+  toast(t("Installing on the Steam Deck…"));
+  await loadWaiting(true);
+}, e.currentTarget);
+
+const cancelStaged = (id, e) => act(async () => {
+  await P("deck/cancel", { body: { id } });
+  await loadWaiting(true);
+}, e.currentTarget);
+
+/** "On the Deck: waiting installers": staged setup files with a button, plus the jobs running them. */
+function waitingSection() {
+  const jobs = Object.entries(waiting.jobs);
+  const running = jobs.some(([, j]) => j.state === "queued" || j.state === "installing");
+  if (!waiting.items.length && !jobs.length) return null;
+  const jobRows = jobs.map(([id, j]) => {
+    const active = j.state === "queued" || j.state === "installing";
+    return h("div.gm-wrow", h("div.gm-wmain", h("b", j.title || id),
+      h("div.gm-note", active ? (j.phase === "installing" ? t("Running the installer…") : t("Installing on the Steam Deck…"))
+        : j.state === "done" ? t("Done. Apply to Steam to add it.") : j.state === "needs_manual" ? t("Needs a manual step") : t("Failed")),
+      !active && j.message ? h("div.gm-note", j.message) : null,
+      j.log_tail ? h("details.gm-log", h("summary", t("Details")), h("pre", j.log_tail)) : null),
+      active ? h("button", { onclick: (e) => cancelStaged(id, e) }, t("Cancel")) : null);
+  });
+  const rows = waiting.items.map((it) => h("div.gm-wrow", h("div.gm-wmain", h("b", it.title),
+    h("div.gm-note", [fmt.bytes(it.size), it.type === "inno" ? "Inno Setup" : it.type === "nsis" ? "NSIS" : t("Unknown installer type")].join(" · "))),
+    h("button.primary", { disabled: running || !it.type, onclick: (e) => runStaged(it, e) }, icon("download"), t("Install now"))));
+  return h("div.gm-card.gm-waiting", h("b", t("On the Deck: waiting installers")), ...jobRows, ...rows);
 }
 
 async function loadDownloads() {
@@ -80,7 +131,7 @@ function schedule() {
 
 async function tick() {
   if (!root?.isConnected) return;
-  const [, finished] = await Promise.all([loadLibrary("library", undefined, true), loadDownloads()]);
+  const [, finished] = await Promise.all([loadLibrary("library", undefined, true), loadDownloads(), loadWaiting()]);
   if (finished) await loadLibrary("library", undefined, true);
   schedule();
 }
@@ -125,6 +176,8 @@ function cornerBadge(g) {
     return h("span.gm-corner.wait", { title: t("Waiting to install on the Steam Deck") }, icon("wifi"), t("Deck"));
   return null;
 }
+
+const logBox = (g) => h("details.gm-log", h("summary", t("Details")), h("pre", g.log_tail));
 
 function stateChip(g) {
   const m = {
@@ -174,7 +227,7 @@ function actions(g) {
   const primary = g.state === "not_installed" || g.state === "update";
   const rm = (g.state === "installed" || g.state === "update")
     ? h("button.danger", { disabled: !online, onclick: (e) => remove(g, e) }, icon("trash"), t("Remove")) : null;
-  const steam = online && data.deck.pending && g.state === "installed" && g.kind !== "installer"
+  const steam = online && data.deck.pending && g.state === "installed" && (g.kind !== "installer" || data.deck.installers_supported)
     ? h("button", { onclick: applySteam }, t("Apply to Steam")) : null;
   return h("div.gm-actions",
     h("button" + (primary ? ".primary" : ""), {
@@ -240,9 +293,15 @@ function detailBody(g) {
     m?.genres?.length ? h("div.gm-genres", m.genres.map((x) => h("span.chip", x))) : null,
     g.state === "installing" ? h("div.stack", { style: { gap: "6px" } },
       h("div.progress", h("div", { style: { width: `${pct(g)}%` } })),
-      h("div.gm-note", `${pct(g)}%${g.message ? " · " + g.message : ""}`)) : null,
+      h("div.gm-note", g.kind === "installer" && data.deck?.installers_supported
+        ? (g.phase === "installing" ? t("Running the installer…") : t("Installing on the Steam Deck…"))
+        : `${pct(g)}%${g.message ? " · " + g.message : ""}`),
+      g.phase === "installing" && g.log_tail ? logBox(g) : null) : null,
     g.message && g.state !== "installing" ? h("div.gm-banner" + (g.state === "failed" ? ".bad" : ""), g.message) : null,
-    g.state === "needs_manual" ? h("div.gm-banner", t("This is an installer: it was downloaded to the Deck but you must run it there (Desktop Mode, with Proton).")) : null,
+    g.state === "needs_manual" ? h("div.gm-banner", data.deck?.installers_supported
+      ? t("This installer could not be run automatically. It is saved on the Deck: run it by hand with Proton from Desktop Mode.")
+      : t("This is an installer: it was downloaded to the Deck but you must run it there (Desktop Mode, with Proton). Update the Deck agent to run installers automatically.")) : null,
+    g.state !== "installing" && g.log_tail ? logBox(g) : null,
     g.note && g.note !== g.message ? h("div.gm-note", g.note) : null,
     autoBanner(g),
     m?.summary ? summary(m.summary) : null,
@@ -307,7 +366,7 @@ async function redrawWhere(g, btn) {
   if (l) fillWhere(g, btn, l);
 }
 
-const sig = (g) => JSON.stringify([g.state, g.progress != null ? pct(g) : null, g.message, g.installed_version, g.meta?.igdb_id,
+const sig = (g) => JSON.stringify([g.state, g.phase, g.log_tail, g.progress != null ? pct(g) : null, g.message, g.installed_version, g.meta?.igdb_id,
   g.cover, data.deck?.online, data.deck?.pending, g.auto?.state, g.meta?.rev, data.deck?.locations, g.meta?.title]);
 
 function openDetail(id) {
@@ -902,6 +961,8 @@ function banner() {
       h("span", t("{n} waiting to be added to Steam. This closes and reopens Steam; use Desktop Mode.", { n: d.pending })),
       h("button.primary", { onclick: applySteam }, t("Apply to Steam"))));
   }
+  const w = waitingSection();
+  if (w) out.push(w);
   return out;
 }
 

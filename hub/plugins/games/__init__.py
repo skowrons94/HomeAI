@@ -71,6 +71,12 @@ class GamesPlugin(Plugin):
         {"key": "deck.auto_install", "label": "Install new games on the Steam Deck automatically", "type": "bool",
          "default": True, "help": "When a download finishes and the game shows up in the library, send it to the Deck "
          "(retried until the Deck is awake and online)."},
+        {"key": "deck.run_installers", "label": "Run Windows installers on the Deck", "type": "bool", "default": True,
+         "help": "GOG and repack installers (Inno Setup, NSIS) are run silently through Proton on the Deck, then added "
+         "to Steam. Needs Deck agent 1.3 or newer; otherwise they are only copied there."},
+        {"key": "deck.proton", "label": "Proton version for installers", "type": "text", "advanced": True,
+         "placeholder": "Proton - Experimental", "help": "Folder name of the Proton to run installers with. "
+         "Empty = Proton - Experimental, else the newest installed."},
         {"key": "deck.location", "label": "Install location on the Deck", "type": "text", "advanced": True,
          "placeholder": "/home/deck/Games", "help": "Folder on the Deck where PC games are installed. Empty = internal "
          "storage (~/Games). Choose it from the list in Games settings; needs agent 1.2 or newer."},
@@ -214,18 +220,31 @@ class GamesPlugin(Plugin):
             return False
 
     @staticmethod
+    def agent_runs_installers(agent) -> bool:
+        """Deck agents from 1.3 can run Windows installers through Proton."""
+        try:
+            return tuple(int(x) for x in str(agent).split(".")[:2]) >= (1, 3)
+        except ValueError:
+            return False
+
+    def _run_installers(self, agent) -> bool:
+        return bool(get_path(self.config, "deck.run_installers", True)) and self.agent_runs_installers(agent)
+
+    @staticmethod
     def _state(g: dict, st: dict) -> dict:
         inst, job = st["installed"].get(g["id"]), st["jobs"].get(g["id"])
         out = {"state": "not_installed", "installed_version": inst.get("version") if inst else None,
-               "note": (inst or {}).get("note") or None, "progress": None, "message": None}
+               "note": (inst or {}).get("note") or None, "progress": None, "message": None, "phase": None, "log_tail": None}
         if inst:
             out["state"] = "update" if g["version"] and inst.get("version") != g["version"] else "installed"
-        if job and job["state"] in ("queued", "downloading", "finalizing"):
-            out.update(state="installing", progress=job.get("done"), message=job.get("message"))
+        if job and job["state"] in ("queued", "downloading", "finalizing", "installing"):
+            out.update(state="installing", progress=job.get("done"), message=job.get("message"),
+                       phase=job.get("phase") or ("installing" if job["state"] == "installing" else "copying"),
+                       log_tail=job.get("log_tail"))
         elif job and job["state"] == "failed":
-            out.update(state="failed", message=job.get("message"))
+            out.update(state="failed", message=job.get("message"), phase=job.get("phase"), log_tail=job.get("log_tail"))
         elif job and job["state"] == "needs_manual":
-            out.update(state="needs_manual", message=job.get("message"))
+            out.update(state="needs_manual", message=job.get("message"), phase=job.get("phase"), log_tail=job.get("log_tail"))
         return out
 
     # -- routes ------------------------------------------------------------------------------
@@ -250,6 +269,9 @@ class GamesPlugin(Plugin):
             web.post("/meta/image", self.r_meta_image),
             web.post("/delete", self.r_delete),
             web.get("/deck/locations", self.r_deck_locations),
+            web.get("/deck/installers", self.r_deck_installers),
+            web.post("/deck/installers/run", self.r_deck_installer_run),
+            web.post("/deck/cancel", self.r_deck_cancel),
             web.post("/deck/location/check", self.r_deck_location_check),
             web.get("/discover/genres", self.r_discover_genres),
             web.get("/discover/genre/{key}", self.r_discover_genre),
@@ -365,8 +387,8 @@ class GamesPlugin(Plugin):
             return
         auto = self._auto_all()
         for gid in ids:
-            if self.games[gid]["kind"] == "installer":
-                continue              # an installer would only be copied to the Deck, to run by hand
+            if self.games[gid]["kind"] == "installer" and not self._run_installers(self._deck_cache[1].get("agent")):
+                continue              # an old agent would only copy it to the Deck, to run by hand
             auto[gid] = {"state": "pending", "hash": h, "since": time.time(), "tries": 0, "message": None}
         self._auto_save(auto)
         self.hub.spawn(self._auto_tick(), name="games-auto-install-now")
@@ -413,9 +435,13 @@ class GamesPlugin(Plugin):
                         del auto[gid]
                         changed = True
                     continue
+                if g["kind"] == "installer" and not self._run_installers(st.get("agent")):
+                    del auto[gid]         # the Deck agent is too old (or the setting is off): copy-only, not automatic
+                    changed = True
+                    continue
                 inst, job = st["installed"].get(gid), st["jobs"].get(gid)
                 jstate = (job or {}).get("state")
-                if jstate in ("queued", "downloading", "finalizing"):
+                if jstate in ("queued", "downloading", "finalizing", "installing"):
                     if a.get("state") != "sent":
                         a["state"], changed = "sent", True
                     continue
@@ -466,7 +492,9 @@ class GamesPlugin(Plugin):
                                "configured": self.deck.configured, "host": self.deck.host,
                                "locations": self.agent_has_locations(st.get("agent")) if st.get("online") else None,
                                "location": str(get_path(self.config, "deck.location", "") or ""),
-                               "auto_install": self._auto_enabled()}})
+                               "auto_install": self._auto_enabled(),
+                               "run_installers": bool(get_path(self.config, "deck.run_installers", True)),
+                               "installers_supported": self.agent_runs_installers(st.get("agent"))}})
 
     async def r_test(self, request):
         """Ask the Deck agent right now (no cache) and say what is wrong, if anything."""
@@ -483,7 +511,7 @@ class GamesPlugin(Plugin):
 
     def _art(self, g: dict) -> dict:
         """Cover art for the Steam shortcut of a portable/native game (only what we have, small)."""
-        if g["kind"] not in ("portable", "native"):
+        if g["kind"] not in ("portable", "native", "installer"):
             return {}
         out, used = {}, 0
         local = Path(g["_cover"]) if g.get("_cover") else None
@@ -518,6 +546,12 @@ class GamesPlugin(Plugin):
                "files": g["_list"], "base": base, "exp": exp, "sig": self._sig(g["id"], exp)}
         if g.get("workdir"):
             job["workdir"] = g["workdir"]
+        if g["kind"] == "installer":
+            st0 = await self._deck_state()
+            if self._run_installers(st0.get("agent")):
+                job["run"] = True
+                if get_path(self.config, "deck.proton", ""):
+                    job["proton"] = str(get_path(self.config, "deck.proton", ""))
         if art:
             job["art"] = art
         loc = (location or "").strip()
@@ -568,6 +602,54 @@ class GamesPlugin(Plugin):
         return _json({"online": True, "supported": True, "agent": st.get("agent"), "locations": locs,
                       "default": d.get("default"), "home": d.get("home"),
                       "current": str(get_path(self.config, "deck.location", "") or "")})
+
+    async def r_deck_installers(self, request):
+        """Installers already copied to the Deck (~/Games/_installers) that can be run now."""
+        st = await self._deck_state()
+        if not st["online"]:
+            return _json({"online": False, "supported": False, "installers": [], "error": st.get("error")})
+        if not self._run_installers(st.get("agent")):
+            return _json({"online": True, "supported": False, "installers": [],
+                          "error": _("Update the Deck agent to run installers on the Deck")
+                          if not self.agent_runs_installers(st.get("agent")) else None})
+        try:
+            d = await self.deck.call("GET", "/installers", timeout=20)
+        except DeckError as err:
+            raise _fail(err)
+        return _json({"online": True, "supported": True, "installers": d.get("installers") or [],
+                      "jobs": d.get("jobs") or {}})
+
+    async def r_deck_installer_run(self, request):
+        b = await self._body(request)
+        path = b.get("path")
+        if not isinstance(path, str) or not path.startswith("/") or len(path) > 400:
+            raise ValueError(_("Invalid install location"))
+        st = await self._deck_state()
+        if not self.agent_runs_installers(st.get("agent")):
+            raise ValueError(_("Update the Deck agent to run installers on the Deck"))
+        body = {"path": path}
+        if isinstance(b.get("title"), str) and b["title"].strip():
+            body["title"] = b["title"][:150]
+        if get_path(self.config, "deck.proton", ""):
+            body["proton"] = str(get_path(self.config, "deck.proton", ""))
+        loc = str(get_path(self.config, "deck.location", "") or "")
+        if loc and self.agent_has_locations(st.get("agent")):
+            body["install_to"] = loc
+        try:
+            res = await self.deck.call("POST", "/installers/run", body, timeout=15)
+        except DeckError as err:
+            raise _fail(err)
+        self._deck_cache = (0, {})
+        return _json(res if isinstance(res, dict) else {"ok": True})
+
+    async def r_deck_cancel(self, request):
+        gid = str((await self._body(request)).get("id") or "")
+        try:
+            res = await self.deck.call("POST", "/cancel", {"id": gid}, timeout=15)
+        except DeckError as err:
+            raise _fail(err)
+        self._deck_cache = (0, {})
+        return _json(res if isinstance(res, dict) else {"ok": True})
 
     async def r_deck_location_check(self, request):
         b = await self._body(request)

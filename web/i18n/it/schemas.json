@@ -198,5 +198,9 @@
   "Install new games on the Steam Deck automatically": "Installa automaticamente i nuovi giochi sullo Steam Deck",
   "When a download finishes and the game shows up in the library, send it to the Deck (retried until the Deck is awake and online).": "Quando un download finisce e il gioco compare in libreria, invialo al Deck (si riprova finché il Deck è acceso e online).",
   "Install location on the Deck": "Dove installare sul Deck",
-  "Folder on the Deck where PC games are installed. Empty = internal storage (~/Games). Choose it from the list in Games settings; needs agent 1.2 or newer.": "Cartella sul Deck dove installare i giochi PC. Vuoto = memoria interna (~/Games). Sceglila dall'elenco nelle impostazioni Giochi; serve l'agent 1.2 o più recente."
+  "Folder on the Deck where PC games are installed. Empty = internal storage (~/Games). Choose it from the list in Games settings; needs agent 1.2 or newer.": "Cartella sul Deck dove installare i giochi PC. Vuoto = memoria interna (~/Games). Sceglila dall'elenco nelle impostazioni Giochi; serve l'agent 1.2 o più recente.",
+  "Run Windows installers on the Deck": "Esegui gli installer Windows sul Deck",
+  "GOG and repack installers (Inno Setup, NSIS) are run silently through Proton on the Deck, then added to Steam. Needs Deck agent 1.3 or newer; otherwise they are only copied there.": "Gli installer GOG e dei repack (Inno Setup, NSIS) vengono eseguiti in silenzio con Proton sul Deck e poi aggiunti a Steam. Serve l'agent del Deck 1.3 o più recente; altrimenti vengono solo copiati.",
+  "Proton version for installers": "Versione di Proton per gli installer",
+  "Folder name of the Proton to run installers with. Empty = Proton - Experimental, else the newest installed.": "Nome della cartella di Proton con cui eseguire gli installer. Vuoto = Proton - Experimental, altrimenti la più recente installata."
 }

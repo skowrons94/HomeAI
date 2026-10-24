@@ -262,5 +262,16 @@
   "innoextract produced no files": "innoextract non ha prodotto file",
   "GOG installers need innoextract on the hub to unpack": "Gli installer GOG richiedono innoextract sull'hub per essere estratti",
   "Refusing to delete outside the games folder": "Rifiuto di eliminare fuori dalla cartella dei giochi",
-  "SD card": "Scheda SD"
+  "SD card": "Scheda SD",
+  "Running the installer…": "Esecuzione dell'installer…",
+  "Details": "Dettagli",
+  "Install now": "Installa ora",
+  "On the Deck: waiting installers": "Sul Deck: installer in attesa",
+  "Unknown installer type": "Tipo di installer sconosciuto",
+  "Done. Apply to Steam to add it.": "Fatto. Applica a Steam per aggiungerlo.",
+  "Failed": "Non riuscito",
+  "This installer could not be run automatically. It is saved on the Deck: run it by hand with Proton from Desktop Mode.": "Questo installer non può essere eseguito in automatico. È salvato sul Deck: avvialo a mano con Proton dalla modalità Desktop.",
+  "This is an installer: it was downloaded to the Deck but you must run it there (Desktop Mode, with Proton). Update the Deck agent to run installers automatically.": "Questo è un installer: è stato copiato sul Deck ma devi eseguirlo lì (modalità Desktop, con Proton). Aggiorna l'agent sul Deck per eseguire gli installer in automatico.",
+  "Update the Deck agent to run installers on the Deck": "Aggiorna l'agent sul Deck per eseguire gli installer sul Deck",
+  "Cancel": "Annulla"
 }

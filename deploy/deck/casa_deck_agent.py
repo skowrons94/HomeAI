@@ -24,6 +24,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -36,12 +37,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-VERSION = "1.2"
+VERSION = "1.3"
 MEDIA_ROOT = Path("/run/media")      # SD cards are mounted here: /run/media/deck/<label> or /run/media/<label>
 SYSTEM_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 MAX_BODY = 8 * 1024 * 1024
 MAX_ART = 3 * 1024 * 1024                 # per image, after decoding
 ART_KINDS = ("grid", "wide", "hero", "logo")
+INSTALL_TIMEOUT = 3 * 3600                # FitGirl-style repacks are slow, especially on the Deck's CPU
+SCAN_BYTES = 32 << 20                     # how much of a setup.exe is searched for the installer's signature
+JOB_ACTIVE = ("queued", "downloading", "finalizing", "installing")
 
 
 # ------------------------------------------------------------------ binary VDF (shortcuts.vdf)
@@ -254,14 +258,284 @@ def safe_name(s) -> str | None:
     return s if s and s not in (".", "..") else None
 
 
+# ------------------------------------------------------------------ Proton and Windows installers
+
+def _tool_name(d: Path) -> str:
+    """The name Steam stores in CompatToolMapping for a Proton folder."""
+    vdf = d / "compatibilitytool.vdf"
+    if vdf.is_file():
+        m = re.search(r'"compat_tools"\s*\{\s*"([^"]+)"', vdf.read_text(errors="replace")[:20000])
+        if m:
+            return m.group(1)
+    n = d.name
+    if "Experimental" in n:
+        return "proton_experimental"
+    if "Hotfix" in n:
+        return "proton_hotfix"
+    m = re.match(r"Proton (\d+)", n)
+    return "proton_%s" % m.group(1) if m else ""
+
+
+def _proton_rank(name: str) -> tuple:
+    if name == "Proton - Experimental":
+        return (0, 0, 0)
+    m = re.match(r"Proton (\d+)\.(\d+)", name)
+    if m and not re.search(r"Voice|Hotfix", name):
+        return (1, -int(m.group(1)), -int(m.group(2)))
+    if re.search(r"Voice|Hotfix", name):
+        return (3, 0, 0)
+    return (2, 0, 0)
+
+
+def find_protons(dirs: list[Path]) -> list[dict]:
+    """Proton installs found in the given folders, best first: [{name, path, tool}]."""
+    out, seen = [], set()
+    for root in dirs:
+        try:
+            kids = sorted(root.iterdir())
+        except OSError:
+            continue
+        for d in kids:
+            try:
+                real = str(d.resolve())
+                if real in seen or not d.is_dir() or not (d / "proton").is_file():
+                    continue
+            except OSError:
+                continue
+            if "proton" not in d.name.lower() and "ulwgl" not in d.name.lower() and not (d / "compatibilitytool.vdf").is_file():
+                continue
+            seen.add(real)
+            out.append({"name": d.name, "path": str(d), "tool": _tool_name(d)})
+    out.sort(key=lambda x: (_proton_rank(x["name"]), x["name"]))
+    return out
+
+
+def pick_proton(protons: list[dict], wanted: str = "") -> dict | None:
+    if wanted:
+        for p in protons:
+            if p["name"] == wanted:
+                return p
+    return protons[0] if protons else None
+
+
+def detect_installer(path: Path) -> str | None:
+    """'inno' / 'nsis' from signature strings inside the exe, None if neither."""
+    inno = (b"Inno Setup Setup Data", b"Inno Setup")
+    nsis = (b"Nullsoft Install System", b"Nullsoft")
+    seen_inno = seen_nsis = False
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            pos, tail = 0, b""
+            while pos < min(size, SCAN_BYTES):
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    break
+                buf = tail + chunk
+                seen_inno |= any(m in buf for m in inno)
+                seen_nsis |= any(m in buf for m in nsis)
+                if seen_inno:
+                    break
+                tail = buf[-32:]
+                pos += len(chunk)
+            if size > SCAN_BYTES and not seen_inno:
+                f.seek(max(size - (2 << 20), SCAN_BYTES))
+                buf = f.read(2 << 20)
+                seen_inno |= any(m in buf for m in inno)
+                seen_nsis |= any(m in buf for m in nsis)
+    except OSError:
+        return None
+    return "inno" if seen_inno else "nsis" if seen_nsis else None
+
+
+def wine_path(p) -> str:
+    """/home/deck/Games/X → Z:\\home\\deck\\Games\\X (Wine maps / to Z:)."""
+    return "Z:" + str(p).replace("/", "\\")
+
+
+def installer_args(kind: str, target: Path) -> list[str]:
+    """Silent-install arguments (a list, never a shell string). NSIS wants /D= last and unquoted, so its
+    target must not contain spaces (Wine would quote the argument)."""
+    if kind == "inno":
+        return ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/NOICONS", "/DIR=" + wine_path(target)]
+    if kind == "nsis":
+        return ["/S", "/D=" + wine_path(target)]
+    raise ValueError("unknown installer type")
+
+
+BAD_EXE = re.compile(r"^(unins|setup|install|dxsetup|vcredist|vc_redist|dotnet|oalinst|physx|directx|crashpad|"
+                     r"unitycrashhandler|crashreport|dxwebsetup|ue4prereq|quicksfv|redist)|redist|_redist|uninst", re.I)
+
+
+def _files_lower(dest: Path) -> dict:
+    out = {}
+    for root, dirs, names in os.walk(dest, followlinks=False):
+        dirs.sort()
+        for n in names:
+            f = Path(root) / n
+            if not f.is_symlink():
+                out[f.relative_to(dest).as_posix().lower()] = f
+    return out
+
+
+def goggame_exe(dest: Path, files: dict | None = None) -> tuple[Path | None, str]:
+    """Primary playTask of a GOG goggame-*.info (depth 0 or 1) → (exe path, working dir relative or '')."""
+    files = files if files is not None else _files_lower(dest)
+    infos = sorted((k for k in files if k.count("/") <= 1 and re.fullmatch(r"goggame-\d+\.info", k.rsplit("/", 1)[-1])),
+                   key=lambda k: (k.count("/"), k))
+    best = (None, "")
+    for rel in infos[:8]:
+        try:
+            data = json.loads(files[rel].read_bytes().decode("utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        prefix = rel.rsplit("/", 1)[0] + "/" if "/" in rel else ""
+        tasks = [t for t in data.get("playTasks") or [] if isinstance(t, dict) and t.get("type", "FileTask") == "FileTask"
+                 and str(t.get("category", "game")) == "game"]
+        tasks.sort(key=lambda t: not t.get("isPrimary"))
+        for t in tasks:
+            raw = str(t.get("path") or "").replace("\\", "/").strip().lstrip("./").lstrip("/")
+            if not raw or ".." in raw.split("/"):
+                continue
+            exe = files.get((prefix + raw).lower())
+            if not exe:
+                continue
+            wd = str(t.get("workingDir") or "").replace("\\", "/").strip().strip("/")
+            work = ""
+            if wd and ".." not in wd.split("/") and (dest / (prefix + wd)).is_dir():
+                work = (prefix + wd).rstrip("/")
+            main = str(data.get("rootGameId") or data.get("gameId") or "") == str(data.get("gameId") or "")
+            if best[0] is None or main:
+                best = (exe, work)
+            break
+        if best[0] is not None and main:
+            break
+    return best
+
+
+def find_game_exe(dest: Path) -> tuple[Path | None, str]:
+    """The game's executable inside a freshly installed folder → (exe, working dir relative to dest or '')."""
+    files = _files_lower(dest)
+    exe, work = goggame_exe(dest, files)
+    if exe:
+        return exe, work
+    cands = []
+    for rel, f in files.items():
+        if rel.endswith(".exe") and rel.count("/") <= 2 and not BAD_EXE.search(f.name):
+            try:
+                cands.append((f.stat().st_size, f))
+            except OSError:
+                pass
+    nolaunch = [c for c in cands if "launcher" not in c[1].name.lower()]
+    cands = nolaunch or cands
+    if not cands:
+        return None, ""
+    cands.sort(key=lambda c: (-c[0], str(c[1])))
+    return cands[0][1], ""
+
+
+def tail_text(f: Path, lines: int = 40, limit: int = 4000) -> str:
+    try:
+        with f.open("rb") as h:
+            h.seek(0, 2)
+            h.seek(max(0, h.tell() - 16384))
+            txt = h.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    return "\n".join(txt.splitlines()[-lines:])[-limit:]
+
+
+def kill_group(proc: subprocess.Popen) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            proc.wait(timeout=8)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def run_logged(argv: list[str], env: dict, log: Path, timeout: float, cancelled, tick=None) -> tuple[int | None, str]:
+    """Run ``argv`` in its own process group, output to ``log``. → (exit code, '' | 'timeout' | 'cancelled')."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("wb") as out:
+        proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+        t0, last = time.monotonic(), 0.0
+        while True:
+            try:
+                return proc.wait(timeout=0.5), ""
+            except subprocess.TimeoutExpired:
+                pass
+            if cancelled():
+                kill_group(proc)
+                return None, "cancelled"
+            if time.monotonic() - t0 > timeout:
+                kill_group(proc)
+                return None, "timeout"
+            if tick and time.monotonic() - last > 5:
+                last = time.monotonic()
+                tick()
+
+
+def set_compat_tool(config_vdf: Path, appid: int, tool: str) -> bool:
+    """Add ``appid → tool`` to Steam's CompatToolMapping (text VDF) unless the app already has one.
+    Steam must not be running. Both the unsigned and signed spelling of the id are written. True if changed."""
+    if not tool or not config_vdf.is_file():
+        return False
+    txt = config_vdf.read_text(errors="replace")
+    m = re.search(r'"CompatToolMapping"\s*\{', txt)
+    if not m:
+        return False
+    depth, i = 1, m.end()
+    while i < len(txt) and depth:
+        depth += {"{": 1, "}": -1}.get(txt[i], 0)
+        i += 1
+    if depth:
+        return False
+    end = i - 1                               # the closing brace of the block
+    block = txt[m.end():end]
+    ids = [str(appid), str(appid - (1 << 32) if appid >= 1 << 31 else appid)]
+    add = ""
+    for k in dict.fromkeys(ids):
+        if re.search(r'"%s"\s*\{' % re.escape(k), block):
+            continue
+        add += ('\t\t\t\t\t"%s"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"%s"\n\t\t\t\t\t\t"config"\t\t""\n'
+                '\t\t\t\t\t\t"priority"\t\t"250"\n\t\t\t\t\t}\n') % (k, tool)
+    if not add:
+        return False
+    bak = config_vdf.with_name(config_vdf.name + ".casa.bak")
+    if not bak.exists():
+        shutil.copy2(config_vdf, bak)
+    tmp = config_vdf.with_name(config_vdf.name + ".tmp")
+    tmp.write_text(txt[:end].rstrip("\t") + add + "\t\t\t\t" + txt[end:])
+    os.replace(tmp, config_vdf)
+    return True
+
+
+def clean_title(name: str) -> str:
+    """'Gothic 3 [GOG]' → 'Gothic 3'."""
+    return re.sub(r"\s*\[[^\]]*\]", "", name).strip() or name
+
+
 class Agent:
     def __init__(self, token: str, games_dir: Path, roms_dir: Path, steam_dir: Path, data_dir: Path,
-                 srm: str = "", home: Path | None = None, media_roots: list[Path] | None = None, mount_check=None):
+                 srm: str = "", home: Path | None = None, media_roots: list[Path] | None = None, mount_check=None,
+                 proton_dirs: list[Path] | None = None, proton: str = "", install_timeout: float = INSTALL_TIMEOUT):
         self.token, self.games_dir, self.roms_dir = token, games_dir, roms_dir
         self.steam_dir, self.data_dir, self.srm = steam_dir, data_dir, srm
         self.home = home or Path.home()
         self.media_roots = media_roots if media_roots is not None else [MEDIA_ROOT / self.home.name, MEDIA_ROOT]
         self.mount_check = mount_check or is_mount
+        self.proton_dirs = proton_dirs if proton_dirs is not None else [
+            steam_dir / "steamapps/common", steam_dir / "compatibilitytools.d", steam_dir.parent / "root/compatibilitytools.d",
+            self.home / ".local/share/Steam/steamapps/common", self.home / ".local/share/Steam/compatibilitytools.d"]
+        self.proton_default, self.install_timeout = proton, install_timeout
         self.lock = threading.RLock()
         self.jobs: dict[str, dict] = {}
         self.q: queue.Queue = queue.Queue()
@@ -291,10 +565,100 @@ class Agent:
     def status(self) -> dict:
         with self.lock:
             reg = {k: {x: v.get(x) for x in ("version", "kind", "note", "installed_at", "dest")} for k, v in self.registry().items()}
-            jobs = {k: {x: j.get(x) for x in ("state", "done", "message")} for k, j in self.jobs.items()}
+            jobs = {k: {x: j.get(x) for x in ("state", "done", "message", "phase", "log_tail") if j.get(x) is not None}
+                    for k, j in self.jobs.items()}
             p = self.pending()
         return {"agent": VERSION, "installed": reg, "jobs": jobs, "pending": len(p["shortcuts"]) + (1 if p["srm"] else 0),
                 "steam_running": steam_running()}
+
+    def protons(self, wanted: str = "") -> dict:
+        lst = find_protons(self.proton_dirs)
+        pick = pick_proton(lst, wanted or self.proton_default)
+        return {"protons": [{"name": p["name"], "tool": p["tool"]} for p in lst], "default": pick["name"] if pick else None}
+
+    # -- staged installers (copied earlier, waiting to be run)
+    def _installer_roots(self) -> list[Path]:
+        roots = [self.games_dir / "_installers"]
+        for m in self.media_roots:
+            try:
+                kids = sorted(c for c in m.iterdir() if c.is_dir())
+            except OSError:
+                continue
+            roots += [c / "Games/_installers" for c in kids if self.mount_check(c)]
+        return roots
+
+    @staticmethod
+    def _setup_exe(folder: Path, hint: str = "") -> Path | None:
+        """The setup program inside a staged folder: the hinted one, else setup*.exe / the only exe, top level first."""
+        if hint:
+            rel = safe_rel(hint)
+            f = (folder / rel) if rel else None
+            if f and f.is_file() and f.resolve().is_relative_to(folder.resolve()):
+                return f
+        exes = sorted((f for f in folder.rglob("*.exe") if f.is_file() and not f.is_symlink()
+                       and len(f.relative_to(folder).parts) <= 3), key=lambda f: (len(f.relative_to(folder).parts), f.name.lower()))
+        pref = [f for f in exes if re.match(r"(setup|install)", f.name, re.I)]
+        return (pref or exes or [None])[0]
+
+    def installers(self) -> dict:
+        out = []
+        for root in self._installer_roots():
+            try:
+                kids = sorted(c for c in root.iterdir() if c.is_dir() and not c.is_symlink())
+            except OSError:
+                continue
+            for d in kids:
+                exe = self._setup_exe(d)
+                size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file() and not f.is_symlink())
+                out.append({"folder": d.name, "path": str(d), "title": clean_title(d.name), "size": size,
+                            "exe": exe.relative_to(d).as_posix() if exe else "",
+                            "type": detect_installer(exe) if exe else None})
+        with self.lock:
+            busy = {k: {"title": j.get("title"), **{x: j.get(x) for x in ("state", "message", "phase", "log_tail", "done")
+                                                    if j.get(x) is not None}}
+                    for k, j in self.jobs.items() if j.get("_staged")}
+        return {"agent": VERSION, "installers": out, "jobs": busy}
+
+    def run_staged(self, body: dict) -> dict:
+        """Run an installer that is already on the Deck: {path} (full folder) or {folder} (in ~/Games/_installers)."""
+        raw = body.get("path")
+        if raw:
+            folder = self.location(raw)
+        else:
+            nm = safe_name(body.get("folder"))
+            if not nm:
+                raise ValueError("bad folder")
+            folder = (self.games_dir / "_installers" / nm).resolve()
+        if folder.parent.name != "_installers" or not folder.is_dir() or folder.is_symlink():
+            raise ValueError("not a staged installer folder")
+        if not any(folder.resolve() == r.resolve() / folder.name for r in self._installer_roots()):
+            raise ValueError("not a staged installer folder")
+        title = body.get("title") if isinstance(body.get("title"), str) and body["title"].strip() else clean_title(folder.name)
+        gid = "staged-" + (re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "game")[:80]
+        job = {"id": gid, "title": title[:150], "kind": "installer", "folder": folder.name, "run": True,
+               "files": [{"p": "x", "s": 0}], "base": "http://staged", "_staged": str(folder)}
+        for k in ("exe", "proton", "workdir"):
+            if body.get(k):
+                job[k] = body[k]
+        loc = body.get("install_to")
+        base = str(self.location(loc)) if loc else None
+        art = decode_art(body.get("art")) if body.get("art") else {}
+        with self.lock:
+            cur = self.jobs.get(gid)
+            if cur and cur["state"] in JOB_ACTIVE:
+                raise ValueError("already installing")
+            self.jobs[gid] = {**job, "state": "queued", "done": 0.0, "message": "queued", "phase": "copying",
+                              "_art": art, "_base": base}
+        self.q.put(gid)
+        return {"ok": True, "id": gid}
+
+    def cancel(self, gid: str) -> dict:
+        with self.lock:
+            j = self.jobs.get(gid)
+            if not j or j.get("state") not in JOB_ACTIVE:
+                raise KeyError("no such running job")
+            j["_cancel"] = True
+        return {"ok": True}
 
     # -- where games can go
     def location(self, raw) -> Path:
@@ -368,17 +732,26 @@ class Agent:
         if work not in (None, "") and not safe_rel(work):
             raise ValueError("bad working directory")
         raw_art = job.pop("art", None)
-        art = decode_art(raw_art) if kind in ("portable", "native") else {}
+        art = decode_art(raw_art) if kind in ("portable", "native", "installer") else {}
+        if job.get("exe") not in (None, "") and kind == "installer" and not safe_rel(job["exe"]):
+            raise ValueError("bad executable")
+        job["run"] = bool(job.get("run")) and kind == "installer"
+        if job.get("proton") is not None and not isinstance(job["proton"], str):
+            raise ValueError("bad proton")
+        if job.get("title") is not None and not isinstance(job["title"], str):
+            raise ValueError("bad title")
         with self.lock:
             cur = self.jobs.get(gid)
-            if cur and cur["state"] in ("queued", "downloading", "finalizing"):
+            if cur and cur["state"] in JOB_ACTIVE:
                 raise ValueError("already installing")
-            job = {**job, "state": "queued", "done": 0.0, "message": "queued", "_art": art, "_base": base}
+            job = {**job, "state": "queued", "done": 0.0, "message": "queued", "phase": "copying", "_art": art, "_base": base}
             self.jobs[gid] = job
         self.q.put(gid)
 
     def _dest(self, job: dict) -> Path:
         kind = job["kind"]
+        if job.get("_staged"):
+            return Path(job["_staged"])
         if kind == "rom":
             root = self.roms_dir / job["system"]
             return root / safe_name(job["folder"]) if job.get("folder") else root
@@ -448,13 +821,16 @@ class Agent:
         probe = dest if dest.exists() else dest.parent
         while not probe.exists():
             probe = probe.parent
-        if shutil.disk_usage(probe).free < total * 1.02 + (50 << 20):
+        if not job.get("_staged") and shutil.disk_usage(probe).free < total * 1.02 + (50 << 20):
             raise RuntimeError("not enough free space on the Deck")
         self._set(job, state="downloading", message="downloading", done=0.0)
         counter = [0]
-        for f in job["files"]:
-            self._download(job, f["p"], f["s"], dest / f["p"], counter)
+        if not job.get("_staged"):
+            for f in job["files"]:
+                self._download(job, f["p"], f["s"], dest / f["p"], counter)
         self._set(job, state="finalizing", message="finishing", done=0.99)
+        if job["kind"] == "installer" and job.get("run"):
+            return self._install_windows(job, dest)
         files = [str(dest / f["p"]) for f in job["files"]]
         note, state = "", "done"
         entry = {"id": job["id"], "version": job.get("version", ""), "kind": job["kind"], "dest": str(dest),
@@ -489,7 +865,96 @@ class Agent:
                 entry["note"] = note
                 reg[job["id"]] = entry
                 self._save(self.reg_file, reg)
-        self._set(job, state=state, done=1.0, message=note or "installed")
+        self._set(job, state=state, done=1.0, message=note or "installed", phase="manual" if state == "needs_manual" else "done")
+
+    # -- Windows installers through Proton
+    def _fail(self, job: dict, msg: str, log: Path | None = None, state: str = "failed") -> None:
+        self._set(job, state=state, done=1.0, message=msg, phase="manual" if state == "needs_manual" else "error",
+                  log_tail=tail_text(log) if log else None)
+
+    def _inside_roots(self, p: Path) -> bool:
+        roots = [self.games_dir.resolve()]
+        try:
+            roots += [self.location(str(p.parent.parent))] if p.parent.name == "_installers" else []
+        except ValueError:
+            pass
+        return any(p != r and p.is_relative_to(r) for r in roots)
+
+    def _install_windows(self, job: dict, staged: Path) -> None:
+        self._set(job, state="installing", phase="installing", message="Running the installer…", done=0.99)
+        setup = self._setup_exe(staged, job.get("exe") or "")
+        if setup is None or not setup.resolve().is_relative_to(staged.resolve()):
+            return self._fail(job, "No setup program found in %s. Run it by hand from Desktop Mode." % staged, state="needs_manual")
+        kind = detect_installer(setup)
+        if kind is None:
+            return self._fail(job, "%s is not an Inno Setup or NSIS installer, so it cannot be run silently. "
+                              "Saved in %s: run it with Proton from Desktop Mode." % (setup.name, staged), state="needs_manual")
+        pr = pick_proton(find_protons(self.proton_dirs), job.get("proton") or self.proton_default)
+        if pr is None:
+            return self._fail(job, "No Proton found on the Deck (install one from Steam). Installer saved in %s." % staged,
+                              state="needs_manual")
+        title = safe_name(clean_title(job.get("title") or job["folder"])) or safe_name(job["folder"])
+        base = Path(job["_base"]) if job.get("_base") else self.games_dir
+        target = base / (title.replace(" ", "_") if kind == "nsis" else title)
+        prefix = self.games_dir / "_prefixes" / title
+        log = self.data_dir / "logs" / ("%s.log" % job["id"])
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            prefix.mkdir(parents=True, exist_ok=True)
+        except OSError as err:
+            return self._fail(job, "Cannot create the install folder: %s" % err)
+        env = {**os.environ, "STEAM_COMPAT_DATA_PATH": str(prefix), "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(self.steam_dir),
+               "WINEDEBUG": "-all"}
+        if Path("/tmp/.X11-unix/X0").exists() and not env.get("DISPLAY"):
+            env["DISPLAY"] = ":0"
+        argv = ["nice", "-n", "10", str(Path(pr["path"]) / "proton"), "run", str(setup)] + installer_args(kind, target)
+        t0 = time.monotonic()
+        self._set(job, log_tail=None)
+
+        def tick():
+            self._set(job, message="Running the installer (%s, %d min)…" % (pr["name"], (time.monotonic() - t0) // 60),
+                      log_tail=tail_text(log) or None)
+        try:
+            rc, why = run_logged(argv, env, log, self.install_timeout, lambda: bool(job.get("_cancel")), tick)
+        except OSError as err:
+            return self._fail(job, "Cannot start Proton: %s" % err)
+        if why == "cancelled":
+            return self._fail(job, "Cancelled.", log)
+        if why == "timeout":
+            return self._fail(job, "The installer did not finish within %d hours and was stopped." % (self.install_timeout // 3600), log)
+        now = {p for p in target.rglob("*") if p.is_file()}
+        if rc != 0 or not now:
+            return self._fail(job, "The installer failed (exit code %s%s). The installer files were kept." % (
+                rc, "" if now else ", nothing was installed"), log)
+        exe, work = find_game_exe(target)
+        if exe is None:
+            return self._fail(job, "Installed in %s but no game executable was found: add it to Steam by hand." % target,
+                              log, state="needs_manual")
+        entry = {"id": job["id"], "version": job.get("version", ""), "kind": "installer", "dest": str(target),
+                 "files": [], "tree": True, "installed_at": int(time.time()), "exe": str(exe),
+                 "root": job.get("_base") or ""}
+        staged_art = self._stage_art(job)
+        startdir = str(target / work) if work and (target / work).is_dir() else str(exe.parent)
+        note = "Apply to Steam to add the shortcut."
+        with self.lock:
+            p = self.pending()
+            p["shortcuts"] = [s for s in p["shortcuts"] if s["exe"] != str(exe)] + [
+                {"name": job["title"], "exe": str(exe), "startdir": startdir, "compat": pr["tool"],
+                 **({"art": staged_art} if staged_art else {})}]
+            self._save(self.pend_file, p)
+            entry["note"] = note
+            reg = self.registry()
+            reg[job["id"]] = entry
+            self._save(self.reg_file, reg)
+        removed = False
+        try:
+            if self._inside_roots(staged.resolve()):
+                shutil.rmtree(staged)
+                removed = True
+        except OSError:
+            pass
+        self._set(job, state="done", phase="done", done=1.0, log_tail=None,
+                  message=note + ("" if removed else " (The installer folder could not be removed.)"))
 
     @staticmethod
     def _startdir(dest: Path, exe: Path, workdir) -> str:
@@ -566,6 +1031,12 @@ class Agent:
                     for f in files:
                         added += add_shortcut(f, s["name"], s["exe"], s["startdir"])
                     self._write_art(s, files)
+                    if s.get("compat"):
+                        try:
+                            set_compat_tool(self.steam_dir / "config/config.vdf",
+                                            shortcut_appid('"%s"' % s["exe"], s["name"]), s["compat"])
+                        except OSError:
+                            pass
                     for src in (s.get("art") or {}).values():
                         try:
                             Path(src).unlink()
@@ -585,6 +1056,14 @@ class Agent:
             cur = self.jobs.get(gid)
             if cur and cur.get("state") in ("queued", "downloading", "finalizing"):
                 raise ValueError("still installing: wait for it to finish")
+            if cur and cur.get("state") == "installing":
+                cur["_cancel"] = True          # the Windows installer is killed, then the files go
+        for _ in range(40):
+            with self.lock:
+                if (self.jobs.get(gid) or {}).get("state") != "installing":
+                    break
+            time.sleep(0.5)
+        with self.lock:
             reg = self.registry()
             e = reg.pop(gid, None)
             if not e:
@@ -604,6 +1083,8 @@ class Agent:
                 if inside(fp) and fp.is_file():
                     fp.unlink()
             dest = Path(e["dest"]).resolve()
+            if e.get("tree") and inside(dest) and dest.is_dir():
+                shutil.rmtree(dest, ignore_errors=True)
             shared = e["kind"] == "rom" and dest.parent.resolve() == self.roms_dir.resolve()  # roms/<system>
             if inside(dest) and dest.is_dir() and not shared:
                 dirs = [d for d in dest.rglob("*") if d.is_dir()] + [dest]
@@ -670,6 +1151,10 @@ def make_handler(agent: Agent):
                 return self._send(200, agent.status())
             if self.path.split("?")[0] == "/locations":
                 return self._send(200, agent.locations())
+            if self.path.split("?")[0] == "/protons":
+                return self._send(200, agent.protons())
+            if self.path.split("?")[0] == "/installers":
+                return self._send(200, agent.installers())
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
@@ -683,6 +1168,10 @@ def make_handler(agent: Agent):
                     return self._send(200, {"ok": True})
                 if path == "/location/check":
                     return self._send(200, agent.check_location(body.get("path")))
+                if path == "/installers/run":
+                    return self._send(200, agent.run_staged(body))
+                if path == "/cancel":
+                    return self._send(200, agent.cancel(str(body.get("id", ""))))
                 if path == "/uninstall":
                     return self._send(200, agent.uninstall(str(body.get("id", ""))))
                 if path == "/apply":
@@ -719,12 +1208,13 @@ def main(argv=None) -> None:
     ap.add_argument("--roms-dir", default=str(home / "Emulation/roms"))
     ap.add_argument("--steam-dir", default=str(home / ".steam/steam"))
     ap.add_argument("--data-dir", default=str(home / ".local/share/casa-deck"))
+    ap.add_argument("--proton", default="", help="name of the Proton folder to run Windows installers with (default: best found)")
     ap.add_argument("--srm", default="", help="path to the Steam ROM Manager AppImage (auto-detected)")
     a = ap.parse_args(argv)
     token = Path(a.token_file).read_text().strip()
     if len(token) < 16:
         sys.exit("token in %s is too short (min 16 characters)" % a.token_file)
-    agent = Agent(token, Path(a.games_dir), Path(a.roms_dir), Path(a.steam_dir), Path(a.data_dir), find_srm(a.srm))
+    agent = Agent(token, Path(a.games_dir), Path(a.roms_dir), Path(a.steam_dir), Path(a.data_dir), find_srm(a.srm), proton=a.proton)
     srv = ThreadingHTTPServer((a.host, a.port), make_handler(agent))
     print("Casa Deck agent %s on %s:%d" % (VERSION, a.host, a.port), flush=True)
     srv.serve_forever()

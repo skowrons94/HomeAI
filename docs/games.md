@@ -103,7 +103,7 @@ resolve that name, set *Address of this hub* (`base_url`) to an IP URL. Updating
 | `portable` (.exe) | `~/Games/<Title>/` | queues a non-Steam shortcut |
 | `native` (AppImage/.sh) | `~/Games/<Title>/`, made executable | queues a shortcut |
 | `rom` | `~/Emulation/roms/<system>/` | queues a Steam ROM Manager run |
-| `installer` (setup.exe) | `~/Games/_installers/<Title>/` | status "needs a manual step": run it with Proton |
+| `installer` (setup.exe) | copied to `~/Games/_installers/<Title>/`; agent 1.3+ runs it silently through Proton (Inno Setup `/VERYSILENT`, NSIS `/S`) into `~/Games/<Title>`, prefix in `~/Games/_prefixes/<Title>`, then adds a Steam shortcut and removes the copy | unknown type or no Proton: "needs a manual step"; agent < 1.3: copy only |
 
 Downloads resume after a Wi-Fi drop, are size-checked and refuse to start without free space.
 **Update** shows when the version in the library differs from the installed one. **Remove** deletes
@@ -133,7 +133,7 @@ Do this in Desktop Mode. Without a Steam ROM Manager the ROM is still in the rig
 
 - Proton: a new Windows shortcut still needs a compatibility tool picked once
   (Steam → game → Properties → Compatibility), or set it with ProtonUp-Qt / Steam ROM Manager.
-- Installers are downloaded, not run (silent switches differ per installer; some need clicks).
+- Installers are run silently only when they are Inno Setup or NSIS (agent 1.3+, setting `deck.run_installers`); anything else is only copied. Installers already staged in `_installers` are listed in the app ("On the Deck: waiting installers") with an Install now button.
 - The agent is plain HTTP with a bearer token: LAN only, don't expose the port.
 - Not verified on a real Deck: the agent, `shortcuts.vdf` writer and the UI are tested here against
   fake Steam/Deck folders. First run: install something small and check the shortcut shows up.
