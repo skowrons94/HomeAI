@@ -718,6 +718,28 @@ def test_move_across_shares_without_permissions():
         assert sorted(x.name for x in dest.parent.iterdir()) == ["01.flac"]
 
 
+def test_failed_import_keeps_the_download():
+    from unittest import mock
+    from hub.plugins.music import find as mf
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        inc, music = d / "incoming", d / "music"
+        payload = inc / "Radiohead - The Bends [FLAC]"
+        payload.mkdir(parents=True)
+        for n in ("01.flac", "02.flac"):
+            (payload / n).write_bytes(b"x" * 100)
+        with mock.patch.object(mf, "copy_file", side_effect=PermissionError(1, "Operation not permitted")), \
+                mock.patch.object(mf.os, "replace", side_effect=OSError(18, "cross-device")):
+            try:
+                mf.import_payload(payload, inc, music, "Radiohead", "The Bends", 1995)
+                raise AssertionError("should fail")
+            except PermissionError:
+                pass
+        assert sorted(p.name for p in payload.iterdir()) == ["01.flac", "02.flac"]   # nothing lost
+        out = mf.import_payload(payload, inc, music, "Radiohead", "The Bends", 1995)   # "Try again"
+        assert out["files"] == 2 and not payload.exists()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

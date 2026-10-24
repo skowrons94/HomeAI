@@ -173,17 +173,19 @@ def import_payload(payload: Path, incoming: Path, music_dir: Path, artist: str, 
                     _move(p, dest / ("cover" + p.suffix.lower()), music_dir)
                     break
             albums.append(str(dest))
-        return {"files": moved, "albums": sorted(set(albums))}
-    finally:
-        for tmp in temps:
-            if inside(incoming, tmp) and tmp != incoming:
-                shutil.rmtree(tmp, ignore_errors=True)
-        # leftovers: only what this download created inside the incoming folder
+        # leftovers (scans, logs, .cue…): only after every audio file is safely in the library, and only
+        # what this download created inside the incoming folder. A failed import keeps the download so
+        # "Try again" can finish it.
         if inside(incoming, payload) and payload != incoming:
             if payload.is_dir():
                 shutil.rmtree(payload, ignore_errors=True)
             else:
                 payload.unlink(missing_ok=True)
+        return {"files": moved, "albums": sorted(set(albums))}
+    finally:
+        for tmp in temps:
+            if inside(incoming, tmp) and tmp != incoming:
+                shutil.rmtree(tmp, ignore_errors=True)
 
 
 # -- the service ----------------------------------------------------------------------------------
