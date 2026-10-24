@@ -1441,6 +1441,37 @@ def test_delete_waits_for_scan_and_retries_full():
         asyncio.run(go())
 
 
+def test_cover_is_read_whole():
+    """A cover that arrives in pieces must come back complete (it used to be cut after the first chunk)."""
+    import aiohttp
+    from aiohttp import web
+    from hub.plugins.music.musicbrainz import read_capped
+    img = b"\xff\xd8\xff" + bytes(range(256)) * 400 + b"\xff\xd9"
+
+    async def slow(request):
+        resp = web.StreamResponse(headers={"Content-Type": "image/jpeg"})
+        await resp.prepare(request)
+        await resp.write(img[:5000])
+        await asyncio.sleep(0.2)
+        await resp.write(img[5000:])
+        await resp.write_eof()
+        return resp
+
+    async def go():
+        app = web.Application()
+        app.router.add_get("/c", slow)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        async with aiohttp.ClientSession() as s, s.get(f"http://127.0.0.1:{port}/c") as r:
+            body = await read_capped(r, 10 << 20)
+        await runner.cleanup()
+        assert body == img, (len(body), len(img))
+    asyncio.run(go())
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

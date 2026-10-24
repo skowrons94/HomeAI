@@ -50,7 +50,7 @@ function cover(src, title, cls = "") {
     onload: (e) => e.target.classList.add("in"), onerror: (e) => e.target.remove() }));
   return box;
 }
-const navCover = (id, title, size = 300, cls = "") => cover(id ? `/api/p/music/cover/${encodeURIComponent(id)}?size=${size}` : "", title, cls);
+const navCover = (id, title, size = 300, cls = "") => cover(id ? `/api/p/music/cover/${encodeURIComponent(id)}?size=${size}&v=2` : "", title, cls);
 const mbCover = (mbid, title, cls = "") => cover(mbid ? `/api/p/music/mbcover/${mbid}` : "", title, cls);
 const mins = (s) => (s ? fmt.duration(s) : "");
 const total = (tracks) => tracks.reduce((a, x) => a + (x.duration || 0), 0);
@@ -117,7 +117,7 @@ function phoneLoad(i) {
   if ("mediaSession" in navigator) {
     try {
       navigator.mediaSession.metadata = new MediaMetadata({ title: tr.title, artist: tr.artist, album: tr.album,
-        artwork: tr.cover ? [{ src: `/api/p/music/cover/${encodeURIComponent(tr.cover)}?size=300`, sizes: "300x300" }] : [] });
+        artwork: tr.cover ? [{ src: `/api/p/music/cover/${encodeURIComponent(tr.cover)}?size=300&v=2`, sizes: "300x300" }] : [] });
     } catch { /* unsupported */ }
   }
   emit();
@@ -199,7 +199,7 @@ registerLocalPlayer({
     if (!audio.src || !tr) return null;
     return { state: pl.state, title: tr.title, artist: tr.artist, position: audio.currentTime || 0,
              duration: (Number.isFinite(audio.duration) && audio.duration) || tr.duration || 0,
-             artwork: tr.cover ? `/api/p/music/cover/${encodeURIComponent(tr.cover)}?size=100` : "" };
+             artwork: tr.cover ? `/api/p/music/cover/${encodeURIComponent(tr.cover)}?size=100&v=2` : "" };
   },
   control(action) {
     if (action === "toggle") { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); }

@@ -41,7 +41,7 @@ from . import outputs as outmod
 from .discover import Discover
 from .find import Finder
 from .listens import Listens
-from .musicbrainz import MBID, MetaError, MusicBrainz, find_owned
+from .musicbrainz import MBID, MetaError, MusicBrainz, find_owned, read_capped
 from .player import Player
 from .subsonic import Subsonic, SubsonicError, valid_id
 
@@ -297,7 +297,7 @@ class MusicPlugin(Plugin):
         tr = pl.track or {}
         self.hub.update(self.eid, state=pl.state,
                         title=tr.get("title", ""), artist=tr.get("artist", ""), album=tr.get("album", ""),
-                        artwork=f"/api/p/music/cover/{tr['cover']}?size=300" if tr.get("cover") else "",
+                        artwork=f"/api/p/music/cover/{tr['cover']}?size=300&v=2" if tr.get("cover") else "",
                         position=round(pl.position(), 1), duration=tr.get("duration") or 0,
                         position_at=time.time(), output=pl.output.name, volume=pl.volume)
 
@@ -571,7 +571,9 @@ class MusicPlugin(Plugin):
                 ctype = r.headers.get("Content-Type", "")
                 if r.status != 200 or not ctype.startswith("image/"):
                     raise KeyError(_("No cover"))
-                body = await r.content.read(6 * 1024 * 1024)
+                body = await read_capped(r, 6 * 1024 * 1024)
+                if r.content_length and len(body) != r.content_length:
+                    raise KeyError(_("No cover"))
         except aiohttp.ClientError:
             raise KeyError(_("No cover"))
         return web.Response(body=body, content_type=ctype.split(";")[0],

@@ -29,6 +29,17 @@ CACHE_CAP = 120 * 1024 * 1024
 MBID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
+
+async def read_capped(resp: aiohttp.ClientResponse, limit: int) -> bytes:
+    """The whole body, up to ``limit`` bytes. (``content.read(n)`` returns only what has arrived so far:
+    images came back cut off, a grey block under the first rows.)"""
+    buf = bytearray()
+    async for chunk in resp.content.iter_chunked(1 << 16):
+        buf += chunk
+        if len(buf) >= limit:
+            break
+    return bytes(buf[:limit])
+
 class MetaError(Exception):
     pass
 
@@ -235,7 +246,7 @@ class MusicBrainz:
                 if r.status != 200:
                     self.store.set(miss, time.time())
                     return None
-                data = await r.content.read(MAX_IMAGE + 1)
+                data = await read_capped(r, MAX_IMAGE + 1)
         except (aiohttp.ClientError, asyncio.TimeoutError):
             return None
         if len(data) > MAX_IMAGE or not (data.startswith(b"\xff\xd8\xff") or data.startswith(b"\x89PNG")):
