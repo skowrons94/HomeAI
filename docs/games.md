@@ -115,6 +115,20 @@ Steam's back. Installs queue them; *Apply to Steam* closes Steam, writes all que
 Steam ROM Manager if the agent finds its AppImage (`--srm PATH` to point at it) and reopens Steam.
 Do this in Desktop Mode. Without a Steam ROM Manager the ROM is still in the right folder.
 
+## GOG, genres, editing, deleting, where to install
+
+- **GOG offline installers** (`setup_*.exe` + `-N.bin`): after a download Casa runs `innoextract --gog -e` (needs
+  `innoextract` on the hub), keeps the game files, drops `tmp`, `commonappdata`, `__support` and the installers (kept
+  only if extraction fails). The library reads `goggame-*.info` for the title, primary exe and working directory.
+- **Auto-install** (Settings → Steam Deck): a finished download is sent to the Deck, retried every minute until it is online.
+- **Install location** (agent 1.2+): internal storage, an SD card or a custom folder under /home/deck or /run/media,
+  default in Settings, override per game; the agent validates the path (`GET /locations`, `POST /location/check`).
+- **Genres** in Discover: Steam store tags (no key), IGDB genres/themes per console with keys. The Library filters by genre.
+- **Edit details**: title, year, genres, description, cover/banner (SteamGridDB or an https URL, cached on the hub); overrides
+  live in the store (`games.override.<id>`) on top of fetched metadata.
+- **Delete**: downloads can be removed from the list or with their files; library games can be deleted. Only paths under
+  `pc/<x>` or `emu/<system>/<x>` are touched, never symlinks.
+
 ## Known limits
 
 - Proton: a new Windows shortcut still needs a compatibility tool picked once

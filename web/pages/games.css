@@ -257,3 +257,76 @@
 .gm-trailer-link svg.i, .gm-ext svg.i { width: 18px; height: 18px; flex: none; }
 .gm-chips-in .chip { max-width: 100%; }
 .gm-chips-in .chip svg.i { width: 12px; height: 12px; }
+
+/* ---- control: Deck location, edit details, delete, downloads ------------------------------------------ */
+.gm-corner.wait { background: rgb(0 0 0 / .62); width: auto; padding: 0 8px 0 6px; }
+.gm-corner.wait svg.i { stroke-width: 2.5; }
+.gm-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.gm-bad { color: var(--bad) !important; }
+.gm-sublabel { margin-top: 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 650; }
+.gm-edited { margin-left: 6px; padding: 1px 7px; font-size: 11px; vertical-align: 1px; }
+.gm-two { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; }
+.gm-esheet textarea { width: 100%; min-height: 110px; resize: vertical; font-size: 16px; line-height: 1.45; }
+.gm-esheet input, .gm-esheet textarea { font-size: 16px; }
+.gm-esheet label.field > span { display: flex; align-items: center; }
+
+/* "Install to: SD card · 120 GB free" row + the manage buttons under a game */
+.gm-where { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px 14px; text-align: left;
+  justify-content: flex-start; background: var(--surface-2); white-space: normal; }
+.gm-where > svg.i:first-child { flex: none; width: 22px; height: 22px; color: var(--accent); }
+.gm-where > svg.i:last-child { flex: none; margin-left: auto; color: var(--muted); width: 18px; height: 18px; }
+.gm-where-t { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.gm-where-t b { font-weight: 650; font-size: 14px; overflow-wrap: anywhere; }
+.gm-manage { display: flex; flex-wrap: wrap; gap: 8px; }
+.gm-manage button { flex: 1 1 130px; min-height: 44px; white-space: normal; }
+
+/* location chooser */
+.gm-loc { display: flex; align-items: center; gap: 12px; justify-content: flex-start; text-align: left; padding: 10px 14px; min-height: 76px; white-space: normal; }
+.gm-loc > svg.i { flex: none; width: 22px; height: 22px; }
+.gm-loc > svg.i:last-child { margin-left: auto; }
+.gm-loc-t { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; color: var(--text); }
+.gm-loc.on .gm-loc-t { color: inherit; }
+.gm-loc[disabled] { opacity: .5; }
+.gm-space { height: 5px; margin: 3px 0 1px; }
+.gm-custom { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.gm-custom .gm-find { margin-bottom: 0; }
+.gm-custom input { flex: 1; min-width: 0; font-size: 16px; }
+
+/* pictures: previews in the edit sheet, grid in the picker */
+.gm-imgrow { display: flex; gap: 12px; align-items: center; padding: 8px 0; }
+.gm-imgprev { flex: none; border-radius: 8px; overflow: hidden; background: var(--surface-2); display: grid; place-items: center; }
+.gm-imgprev.cover { width: 48px; height: 72px; }
+.gm-imgprev.hero { width: 96px; height: 54px; }
+.gm-imgprev img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gm-imginfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.gm-imgrow > button { flex: none; min-height: 44px; }
+.gm-artgrid { display: grid; gap: 10px; }
+.gm-artgrid.cover { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.gm-artgrid.hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 700px) { .gm-artgrid.cover { grid-template-columns: repeat(5, minmax(0, 1fr)); } .gm-artgrid.hero { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.gm-artopt { position: relative; padding: 0; overflow: hidden; border-radius: 10px; background: var(--surface-2); min-height: 0; }
+.gm-artgrid.cover .gm-artopt { aspect-ratio: 2 / 3; }
+.gm-artgrid.hero .gm-artopt { aspect-ratio: 16 / 9; }
+.gm-artopt img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gm-artopt:active { transform: scale(.97); }
+.gm-artdim { position: absolute; left: 4px; bottom: 4px; font-size: 10px; font-weight: 700; color: #fff; background: rgb(0 0 0 / .62);
+  padding: 1px 5px; border-radius: 5px; }
+.gm-artopt.gm-skel { animation: gm-pulse 1.4s ease-in-out infinite; }
+
+/* downloads */
+.gm-deckline { display: flex; align-items: center; gap: 6px; }
+.gm-deckline svg.i { flex: none; width: 14px; height: 14px; stroke-width: 3; }
+.gm-deckline.ok { color: var(--ok); }
+.gm-deckline.err { color: var(--bad); }
+.gm-dl-main > .gm-meta { display: flex; align-items: center; gap: 6px; white-space: normal; }
+.gm-dl-main > .gm-meta svg.i { flex: none; width: 13px; height: 13px; }
+.gm-sub2 { display: block; font-size: 12px; font-weight: 500; opacity: .75; margin-top: 2px; }
+.gm-btnt { display: flex; flex-direction: column; align-items: flex-start; text-align: left; line-height: 1.25; }
+.sheet button:has(> .gm-btnt) { min-height: 56px; justify-content: flex-start; white-space: normal; }
+
+/* genre chips: the library "Genre" filter and the Discover row */
+.gm-genrechip svg.i { width: 14px; height: 14px; margin-left: 4px; }
+.gm-genrerow { margin: 0 0 6px; }
+.gm-disc > .gm-chipwrap { margin-bottom: 8px; }
+.gm-loc, .gm-where { border-radius: var(--radius-sm); }
+.gm-manage button { border-radius: var(--radius-sm); }

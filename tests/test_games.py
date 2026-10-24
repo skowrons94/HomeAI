@@ -634,6 +634,9 @@ def test_find_and_download_flow():
                     assert sorted(tx.removed) == sorted([(h1, False), (h2, False)])      # data kept
                     assert not (lib / "pc/Celeste.zip").exists() and (lib / "pc/Celeste/Celeste.exe").is_file()
                     assert "pc-celeste" in p.games and "snes-super-game" in p.games       # rescanned
+                    owned = {e["hash"]: e.get("owned") for e in p.finder.entries()}
+                    assert [Path(x).resolve() for x in owned[h1]] == [(lib / "pc/Celeste").resolve()]      # what a delete may touch
+                    assert [Path(x) for x in owned[h2]] == [lib / "emu/snes/Super Game.sfc"]
                     # forget a finished entry: files stay
                     assert (await c.delete("/api/p/games/find/downloads/" + h1)).status == 200
                     assert (lib / "pc/Celeste/Celeste.exe").exists() and len(p.finder.entries()) == 1
@@ -690,7 +693,7 @@ def test_agent_writes_art_into_steam_grid():
         (steam / "userdata/0/config").mkdir(parents=True)
         A.steam_running = lambda: False
         agent = A.Agent(TOKEN, tmp / "Games", tmp / "roms", steam, tmp / "data")
-        assert A.VERSION == "1.1"
+        assert A.VERSION == "1.2"
         art = A.decode_art({"grid": base64.b64encode(PNG).decode(), "hero": base64.b64encode(JPG).decode()})
         assert art["grid"] == (PNG, ".png") and art["hero"][1] == ".jpg" and A.decode_art(None) == {}
         for bad in ({"grid": "!!notbase64"}, {"grid": base64.b64encode(b"GIF89a....").decode()}, {"evil": "AAAA"}, "x",
@@ -729,6 +732,16 @@ class FakeResp:
 
     async def json(self, content_type=None):
         return self.data
+
+    @property
+    def content(self):
+        raw = json.dumps(self.data).encode()
+
+        class _Body:
+            async def iter_chunked(self, n):
+                for i in range(0, len(raw), n):
+                    yield raw[i:i + n]
+        return _Body()
 
 
 class FakeSession:
@@ -945,6 +958,739 @@ def test_discover_igdb_rails_degrade_silently():
         assert keys["platform:switch"]["label"] == "Nintendo Switch" and keys["platform:switch"]["items"][0]["platform"] == "switch"
         assert {e["rail"] for e in r["errors"]} == {"popular", "platform:ps2", "platform:gba", "platform:snes"}
         assert d.platform_rails() == ["switch", "ps2", "gba", "snes"]
+    asyncio.run(go())
+
+
+
+# -- GOG installers, innoextract, library detection --------------------------------------------------
+
+import stat  # noqa: E402
+
+
+def goggame(root: Path, gid="1207658930", name="Hades", exe="Hades.exe", work="", main=True, prefix=""):
+    info = {"gameId": gid, "rootGameId": gid if main else "999", "name": name, "playTasks": [
+        {"category": "launcher", "isPrimary": False, "name": "Config", "path": "Config.exe", "type": "FileTask"},
+        {"category": "game", "isPrimary": True, "name": name, "path": exe, "type": "FileTask", "workingDir": work},
+        {"category": "document", "name": "Manual", "link": "http://x", "type": "URLTask"}]}
+    put(root / (prefix + "goggame-%s.info" % gid), json.dumps(info).encode())
+
+
+def test_gog_info_in_library_scan():
+    with tempfile.TemporaryDirectory() as d:
+        lib = Path(d)
+        put(lib / "pc/Hades GOG/Hades.exe", b"E", 500)
+        put(lib / "pc/Hades GOG/Config.exe", b"C", 900)             # bigger, but not the primary task
+        put(lib / "pc/Hades GOG/unins000.exe", b"U", 2000)
+        goggame(lib / "pc/Hades GOG", name="Hades: Edition", exe="hades.EXE")     # case differs on purpose
+        put(lib / "pc/Witcher/app/bin/w3.exe", b"W", 100)
+        put(lib / "pc/Witcher/app/bin/launcher.exe", b"L", 900)
+        goggame(lib / "pc/Witcher", gid="55", name="The Witcher", exe="bin\\w3.exe", work="bin", prefix="app/")
+        goggame(lib / "pc/Witcher", gid="56", name="Witcher DLC", exe="dlc.exe", main=False, prefix="app/")
+        put(lib / "pc/Broken/Broken.exe", b"B", 10)
+        put(lib / "pc/Broken/goggame-9.info", b"{not json")
+        games, problems = library.scan(str(lib))
+        by = {g["title"]: g for g in games}
+        h = by["Hades: Edition"]
+        assert h["kind"] == "portable" and h["exe"] == "Hades.exe" and h["gog"] and h["workdir"] == ""
+        assert h["id"] == "pc-hades-edition" and h["entry"] == "pc/Hades GOG"
+        w = by["The Witcher"]
+        assert w["exe"] == "app/bin/w3.exe" and w["workdir"] == "app/bin" and w["kind"] == "portable"
+        assert by["Broken"]["gog"] is False and by["Broken"]["exe"] == "Broken.exe"
+        assert not problems
+
+
+FAKE_INNO = """#!%(py)s
+import json, os, sys, time
+a = sys.argv[1:]
+d, inst = a[a.index("-d") + 1], a[-1]
+mode = os.environ.get("FAKE_INNO", "ok")
+with open(os.environ["FAKE_INNO_LOG"], "a") as f:
+    f.write(" ".join(a) + "\\n")
+def put(rel, data=b"x"):
+    p = os.path.join(d, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "wb").write(data)
+if mode == "fail":
+    put("app/half.dat")
+    sys.stderr.write("Error: bad data\\n")
+    sys.exit(1)
+if mode == "slow":
+    open(os.environ["FAKE_INNO_PID"], "w").write(str(os.getpid()))
+    put("app/half.dat")
+    time.sleep(60)
+put("app/Hades.exe", b"E" * 100)
+put("app/data/pak.bin", b"P" * 300)
+put("app/__support/uninstall.bat")
+put("app/unins000.exe", b"U")
+put("tmp/setup.tmp")
+put("commonappdata/gog/x.cfg")
+info = {"gameId": "1", "rootGameId": "1", "name": "Hades", "playTasks": [
+    {"category": "game", "isPrimary": True, "path": "Hades.exe", "type": "FileTask"}]}
+put("app/goggame-1.info", json.dumps(info).encode())
+"""
+
+
+def fake_inno(tmp: Path) -> Path:
+    tool = tmp / "bin" / "innoextract"
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    tool.write_text(FAKE_INNO % {"py": sys.executable})
+    tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    return tool
+
+
+def gog_installer(folder: Path, name="setup_hades_1.37_(12345).exe"):
+    put(folder / name, b"MZ" + b"Inno Setup" + b"\0" * 50)
+    put(folder / name.replace(".exe", "-1.bin"), b"B" * 400)
+
+
+def test_gog_detection_rules():
+    with tempfile.TemporaryDirectory() as d:
+        t = Path(d)
+        put(t / "setup_plain.exe", b"MZ" + b"\0" * 50)                       # no marker, no .bin: not an Inno installer
+        put(t / "setup_inno.exe", b"MZ Inno Setup")
+        put(t / "setup_big.exe", b"MZ")
+        put(t / "setup_big-1.bin", b"B")
+        put(t / "game.exe", b"MZ Inno Setup")                                # name does not look like a GOG installer
+        put(t / "patch_x_1.1.exe", b"MZ Inno Setup")
+        found = [p.name for p in F.find_gog(t)]
+        assert sorted(found) == ["patch_x_1.1.exe", "setup_big.exe", "setup_inno.exe"] and found[-1] == "patch_x_1.1.exe", found
+        assert F.gog_title(Path("setup_the_witcher_3_1.2_(12345).exe")) == "The Witcher 3"
+        assert F.gog_title(Path("setup_hades_1.37_(64bit)_(1).exe")) == "Hades"
+
+
+def test_gog_extraction_with_fake_innoextract():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        tool = fake_inno(tmp)
+        log = tmp / "inno.log"
+        os.environ.update(FAKE_INNO="ok", FAKE_INNO_LOG=str(log))
+        root = tmp / "games"
+        (root / "pc").mkdir(parents=True)
+        orig = F.shutil.which
+        F.shutil.which = lambda n, *a, **k: str(tool) if n == "innoextract" else orig(n, *a, **k)
+        try:
+            # a payload folder: extracted in place, installers gone, scaffolding gone
+            gog_installer(root / "pc/Hades [GOG]")
+            put(root / "pc/Hades [GOG]/readme.txt", b"r")
+            owned = []
+            msg = asyncio.run(F.unpack_payload(root / "pc/Hades [GOG]", root, owned))
+            g = root / "pc/Hades [GOG]"
+            assert msg == "" and owned == [g]
+            assert (g / "Hades.exe").stat().st_size == 100 and (g / "data/pak.bin").is_file() and (g / "readme.txt").is_file()
+            assert not (g / "app").exists() and not (g / "tmp").exists() and not (g / "commonappdata").exists()
+            assert not (g / "__support").exists() and not (g / F.GOG_TEMP).exists()
+            assert sorted(p.name for p in g.iterdir() if p.suffix in (".exe", ".bin")) == ["Hades.exe", "unins000.exe"]
+            args = log.read_text().split()
+            assert "--gog" in args and "-e" in args and "-d" in args and args[-1].endswith("setup_hades_1.37_(12345).exe")
+            games, _p = library.scan(str(root))
+            assert len(games) == 1 and games[0]["title"] == "Hades" and games[0]["exe"] == "Hades.exe" and games[0]["kind"] == "portable"
+
+            # a bare installer straight in pc/ gets a folder named after the game
+            shutil_rm = __import__("shutil").rmtree
+            shutil_rm(root / "pc/Hades [GOG]")
+            gog_installer(root / "pc", "setup_celeste_1.4_(9).exe")
+            owned = []
+            assert asyncio.run(F.unpack_payload(root / "pc/setup_celeste_1.4_(9).exe", root, owned)) == ""
+            assert [x.resolve() for x in owned] == [(root / "pc/Celeste").resolve()] and (root / "pc/Celeste/Hades.exe").is_file(), (owned, sorted(str(x) for x in root.rglob("*")))
+            assert not (root / "pc/setup_celeste_1.4_(9).exe").exists() and not (root / "pc/setup_celeste_1.4_(9)-1.bin").exists()
+
+            # failure: installers stay, nothing half-extracted is left behind, the error is readable
+            gog_installer(root / "pc/Bad Game")
+            os.environ["FAKE_INNO"] = "fail"
+            try:
+                asyncio.run(F.unpack_payload(root / "pc/Bad Game", root))
+                raise AssertionError("must fail")
+            except F.UnpackError as err:
+                assert "innoextract" in str(err) and "bad data" in str(err), str(err)
+            bad = root / "pc/Bad Game"
+            assert sorted(p.name for p in bad.iterdir()) == ["setup_hades_1.37_(12345)-1.bin", "setup_hades_1.37_(12345).exe"]
+
+            # cancel: the extractor process is killed and the temp folder removed
+            os.environ.update(FAKE_INNO="slow", FAKE_INNO_PID=str(tmp / "pid"))
+
+            async def cancel_it():
+                task = asyncio.ensure_future(F.unpack_payload(bad, root))
+                for _i in range(100):
+                    if (tmp / "pid").exists() and (tmp / "pid").read_text():
+                        break
+                    await asyncio.sleep(0.05)
+                pid = int((tmp / "pid").read_text())
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                return pid
+            pid = asyncio.run(cancel_it())
+            time.sleep(0.2)
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except OSError:
+                alive = False
+            assert not alive and not (bad / F.GOG_TEMP).exists() and (bad / "setup_hades_1.37_(12345).exe").exists()
+
+            # no tool installed: the entry says what is missing instead of failing
+            F.shutil.which = lambda n, *a, **k: None
+            assert "innoextract" in asyncio.run(F.unpack_payload(bad, root))
+        finally:
+            F.shutil.which = orig
+
+
+def test_deletable_refuses_anything_but_a_downloads_own_files():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        root = tmp / "games"
+        put(root / "pc/Celeste/Celeste.exe", b"E", 10)
+        put(root / "emu/snes/Game.sfc", b"R", 10)
+        outside = tmp / "outside"
+        put(outside / "precious.txt", b"keep")
+        (root / "pc/Link").symlink_to(outside, target_is_directory=True)
+        (root / "pc/Sneaky").mkdir()
+        (root / "pc/Sneaky/inner").symlink_to(outside, target_is_directory=True)
+        ok = F.deletable(root, root / "pc/Celeste")
+        assert ok == (root / "pc/Celeste").resolve()
+        assert F.deletable(root, root / "emu/snes/Game.sfc")
+        for bad in (root, root / "pc", root / "emu", root / "emu/snes", root / "pc/Link", outside, tmp,
+                    root / "pc/../..", root / "pc/Celeste/../../../outside", Path("pc/Celeste"), root / "other/x",
+                    root / "pc/.hidden", Path("/")):
+            try:
+                F.deletable(root, bad)
+                raise AssertionError("should refuse %s" % bad)
+            except ValueError:
+                pass
+        # a link inside a game folder is removed as a link: the target is never followed
+        F.delete_tree(root / "pc/Sneaky")
+        assert (outside / "precious.txt").read_bytes() == b"keep" and not (root / "pc/Sneaky").exists()
+        assert (outside / "precious.txt").exists()
+
+
+def _plugin_env(tmp: Path, cfg_extra=None):
+    lib = tmp / "games"
+    (lib / "pc").mkdir(parents=True, exist_ok=True)
+    (tmp / "hubdata").mkdir(exist_ok=True)
+    hub = Hub({"homekit": {"enabled": False}}, tmp / "hubdata")
+    cfg = {"library": str(lib), "base_url": "http://hub:8080", **(cfg_extra or {})}
+    return hub, lib, cfg
+
+
+def test_delete_download_and_library_game_files():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        hub, lib, cfg = _plugin_env(tmp)
+        outside = tmp / "outside"
+        put(outside / "precious.txt", b"keep")
+        put(lib / "pc/Celeste/Celeste.exe", b"E", 3000)
+        put(lib / "pc/Celeste/Content/d.bin", b"D", 1000)
+        put(lib / "pc/Other/Other.exe", b"E", 30)
+        put(lib / "pc/Third/Third.exe", b"E", 30)
+        put(lib / "emu/snes/Super.sfc", b"R", 70)
+        put(lib / "emu/snes/Super.jpg", b"J", 5)
+
+        async def go():
+            p = GamesPlugin(hub, cfg)
+            await p.start()
+            await p._scan()
+            try:
+                f = p.finder
+                f._save([
+                    {"hash": "a" * 40, "title": "Celeste", "platform": "pc", "state": "done", "payload": str(lib / "pc/Celeste"),
+                     "owned": [str(lib / "pc/Celeste")], "dir": str(lib / "pc"), "added": 1},
+                    {"hash": "b" * 40, "title": "Evil", "platform": "pc", "state": "done", "payload": str(lib / "pc"),
+                     "owned": [str(lib / "pc"), str(outside)], "dir": str(lib / "pc"), "added": 2},
+                    {"hash": "c" * 40, "title": "Old", "platform": "pc", "state": "done", "payload": str(lib / "pc/Other"),
+                     "dir": str(lib / "pc"), "added": 3},                             # entry from before "owned" existed
+                    {"hash": "d" * 40, "title": "Busy", "platform": "pc", "state": "extracting", "payload": str(lib / "pc/Third"),
+                     "owned": [], "dir": str(lib / "pc"), "added": 4}])
+                info = await f.files_info("a" * 40)
+                assert info["paths"] == [{"path": "pc/Celeste", "size": 4000, "files": 2}] and info["size"] == 4000
+                assert (await f.files_info("b" * 40))["paths"] == []                # nothing deletable: root, outside
+                async with TestClient(TestServer(casa_app(p))) as c:
+                    lst = await (await c.get("/api/p/games/find/downloads")).json()
+                    assert lst[0]["path"] == "pc/Celeste"
+                    r = await c.get("/api/p/games/find/downloads/" + "a" * 40 + "/files")
+                    assert (await r.json())["size"] == 4000
+                    # plain remove keeps the files
+                    r = await c.delete("/api/p/games/find/downloads/" + "a" * 40)
+                    assert r.status == 200 and (await r.json())["deleted"] == 0 and (lib / "pc/Celeste/Celeste.exe").exists()
+                    f._save(f.entries() + [{"hash": "a" * 40, "title": "Celeste", "platform": "pc", "state": "done",
+                                            "payload": str(lib / "pc/Celeste"), "owned": [str(lib / "pc/Celeste")], "dir": str(lib / "pc")}])
+                    # remove + delete: only the download's own folder
+                    r = await c.delete("/api/p/games/find/downloads/" + "a" * 40 + "?files=1")
+                    assert r.status == 200 and (await r.json())["deleted"] == 1
+                    assert not (lib / "pc/Celeste").exists() and (lib / "pc/Other/Other.exe").exists()
+                    assert "pc-celeste" not in p.games                                 # rescanned
+                    # a hostile entry (payload = the pc folder, or a path outside) deletes nothing at all
+                    r = await c.delete("/api/p/games/find/downloads/" + "b" * 40 + "?files=1")
+                    assert r.status == 200 and (await r.json())["deleted"] == 0
+                    assert (lib / "pc/Other/Other.exe").exists() and (outside / "precious.txt").exists()
+                    # an old entry without "owned" falls back to its payload
+                    r = await c.delete("/api/p/games/find/downloads/" + "c" * 40 + "?files=1")
+                    assert (await r.json())["deleted"] == 1 and not (lib / "pc/Other").exists()
+                    assert (await c.delete("/api/p/games/find/downloads/" + "9" * 40 + "?files=1")).status == 404
+
+                    # library game: files on the NAS, with the ROM's side picture
+                    await p._scan()
+                    assert (await c.post("/api/p/games/delete", json={"id": "nope"})).status == 404
+                    r = await c.post("/api/p/games/delete", json={"id": "snes-super"})
+                    assert r.status == 200 and not (lib / "emu/snes/Super.sfc").exists() and not (lib / "emu/snes/Super.jpg").exists()
+                    assert (lib / "emu/snes").is_dir() and "snes-super" not in p.games
+                    # not while it is being unpacked
+                    r = await c.post("/api/p/games/delete", json={"id": "pc-third"})
+                    assert r.status == 400 and (lib / "pc/Third/Third.exe").exists()
+                    f._save([])
+                    r = await c.post("/api/p/games/delete", json={"id": "pc-third"})
+                    assert r.status == 200 and not (lib / "pc/Third").exists() and (lib / "pc").is_dir()
+                    # a game whose entry points outside the library is refused
+                    p.games["pc-x"] = {**dict(id="pc-x", title="x", kind="portable", platform="pc", system="", version=""),
+                                       "_entry": str(outside), "_dir": str(outside), "_list": []}
+                    assert (await c.post("/api/p/games/delete", json={"id": "pc-x"})).status == 400
+                    assert (outside / "precious.txt").exists()
+            finally:
+                await p.stop()
+        asyncio.run(go())
+
+
+class FakeDeckCalls:
+    """Replaces Deck.call: scripted status, records installs."""
+    def __init__(self):
+        self.online, self.agent, self.installed, self.jobs, self.sent, self.fail = True, "1.2", {}, {}, [], None
+
+    async def __call__(self, method, path, body=None, timeout=5):
+        from hub.plugins.games.deck import DeckError
+        if not self.online:
+            raise DeckError("The Steam Deck did not answer")
+        if path == "/status":
+            return {"agent": self.agent, "installed": self.installed, "jobs": self.jobs, "pending": 0, "steam_running": False}
+        if path == "/install":
+            if self.fail:
+                raise DeckError(self.fail, 400)
+            self.sent.append(body)
+            return {"ok": True}
+        raise AssertionError(path)
+
+
+def test_auto_install_waits_for_the_deck_and_retries():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        hub, lib, cfg = _plugin_env(tmp, {"deck": {"host": "deck", "token": "t" * 20, "auto_install": True}})
+        put(lib / "pc/Celeste/Celeste.exe", b"E", 300)
+        put(lib / "pc/Setup Only/setup_x.exe", b"S", 30)
+
+        async def go():
+            p = GamesPlugin(hub, cfg)
+            await p.start()
+            await p._scan()
+            calls = FakeDeckCalls()
+            p.deck.call = calls
+            try:
+                f = p.finder
+                f._save([{"hash": "a" * 40, "title": "Celeste", "platform": "pc", "state": "done", "owned": [str(lib / "pc/Celeste")],
+                          "payload": str(lib / "pc/Celeste"), "dir": str(lib / "pc"), "added": 1},
+                         {"hash": "b" * 40, "title": "Setup", "platform": "pc", "state": "done", "owned": [str(lib / "pc/Setup Only")],
+                          "payload": str(lib / "pc/Setup Only"), "dir": str(lib / "pc"), "added": 2}])
+                calls.online = False
+                p.auto_queue("a" * 40)
+                p.auto_queue("b" * 40)
+                assert p.auto_for_game("pc-celeste")["state"] == "pending" and p.auto_for_game("pc-setup-only") is None
+                assert f.entries()[0]["games"] == ["pc-celeste"]
+                await p._auto_tick()                                              # Deck asleep: nothing sent, still pending
+                assert calls.sent == [] and p.auto_for_game("pc-celeste")["state"] == "pending"
+                row = f.listing()[0]["deck"]
+                assert row["state"] == "pending" and row["online"] is False
+                calls.online = True
+                await p._auto_tick()
+                assert len(calls.sent) == 1 and calls.sent[0]["id"] == "pc-celeste" and "location" not in calls.sent[0]
+                assert p.auto_for_game("pc-celeste")["state"] == "sent" and f.listing()[0]["deck"]["state"] == "installing"
+                calls.jobs = {"pc-celeste": {"state": "downloading", "done": 0.3, "message": "x"}}
+                await p._auto_tick()
+                assert len(calls.sent) == 1                                       # not sent twice while it installs
+                calls.jobs = {}
+                calls.installed = {"pc-celeste": {"version": "", "kind": "portable"}}
+                await p._auto_tick()
+                assert p.auto_for_game("pc-celeste") is None and len(calls.sent) == 1
+                p._deck_cache = (0, await p._deck_state(fresh=True))
+                assert f.listing()[0]["deck"]["state"] == "installed"
+                # the Deck says no five times: the card shows the failure instead of retrying forever
+                calls.installed = {}
+                calls.fail = "not enough free space on the Deck"
+                p.auto_queue("a" * 40)
+                for _i in range(6):
+                    await p._auto_tick()
+                a = p.auto_for_game("pc-celeste")
+                assert a["state"] == "failed" and "free space" in a["message"] and calls.sent == calls.sent[:1]
+                # job failed on the Deck after being sent
+                calls.fail = None
+                p._auto_clear("pc-celeste")
+                p.auto_queue("a" * 40)
+                await p._auto_tick()
+                calls.jobs = {"pc-celeste": {"state": "failed", "message": "link expired"}}
+                await p._auto_tick()
+                assert p.auto_for_game("pc-celeste") == {"state": "failed", "message": "link expired"}
+                # setting off: nothing is queued
+                p._auto_clear("pc-celeste")
+                p.config["deck"]["auto_install"] = False
+                p.auto_queue("a" * 40)
+                assert p.auto_for_game("pc-celeste") is None
+                # and the library item carries the state for the card
+                p.config["deck"]["auto_install"] = True
+                p.auto_queue("a" * 40)
+                async with TestClient(TestServer(casa_app(p))) as c:
+                    lib_json = await (await c.get("/api/p/games/library")).json()
+                    item = {g["id"]: g for g in lib_json["games"]}["pc-celeste"]
+                    assert item["auto"] and item["auto"]["state"] in ("pending", "sent") and lib_json["deck"]["auto_install"] is True, (item["auto"], lib_json["deck"])
+            finally:
+                await p.stop()
+        asyncio.run(go())
+
+
+def test_deck_agent_location_validation():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d).resolve()
+        home = tmp / "home/deck"
+        (home / "Games").mkdir(parents=True)
+        media = tmp / "run/media"
+        (media / "deck/SDCARD").mkdir(parents=True)
+        (media / "deck/notmounted").mkdir(parents=True)
+        (media / "USB").mkdir(parents=True)
+        (tmp / "etc").mkdir()
+        (home / "link").symlink_to(tmp / "etc", target_is_directory=True)
+        mounts = {str(media / "deck/SDCARD"), str(media / "USB")}
+        roots = [media / "deck", media]
+        v = lambda raw: A.validate_location(raw, home, roots, lambda p: str(p) in mounts)
+        assert v(str(home / "Games")) == home / "Games"
+        assert v(str(home / "New/Place")) == home / "New/Place"                        # not created yet: fine
+        assert v(str(media / "deck/SDCARD/Games")) == media / "deck/SDCARD/Games"
+        assert v(str(media / "USB/Games")) == media / "USB/Games"                    # /run/media/<label>
+        for bad in ("Games", "", None, 5, "/etc", "/", str(home), str(tmp / "etc"), str(home) + "/../etc",
+                    str(home / "Games/../../x"), str(home / ".ssh"), str(home / "Games/.hidden"),
+                    str(home / "link/x"), str(media / "deck/notmounted/Games"), str(media / "deck"), str(media / "nothing/Games"),
+                    "/run/media/../etc", str(home) + "\\x", str(home / "a\x00b"), "/" + "a" * 500):
+            try:
+                v(bad)
+                raise AssertionError("accepted %r" % (bad,))
+            except ValueError:
+                pass
+        a = A.Agent(TOKEN, home / "Games", tmp / "roms", tmp / "s", tmp / "data", home=home, media_roots=roots,
+                    mount_check=lambda p: str(p) in mounts)
+        loc = a.locations()
+        assert loc["agent"] == "1.2" and loc["default"] == str(home / "Games")
+        assert [x["id"] for x in loc["locations"]] == ["internal", "sd:SDCARD", "sd:USB"], loc
+        assert all(x["free"] > 0 and x["total"] >= x["free"] for x in loc["locations"])
+        assert loc["locations"][1]["path"] == str(media / "deck/SDCARD/Games") and loc["locations"][1]["label"] == "SDCARD"
+        assert a.check_location(str(media / "USB/Games"))["ok"]
+        try:
+            a.check_location("/etc")
+            raise AssertionError("etc")
+        except ValueError:
+            pass
+        ok = {"id": "pc-x", "kind": "portable", "folder": "X", "exe": "x.exe", "base": "http://h",
+              "files": [{"p": "x.exe", "s": 1}], "title": "X", "exp": 1, "sig": "s"}
+        for bad in ({**ok, "location": "/etc"}, {**ok, "location": "../x"}, {**ok, "location": str(media / "deck/notmounted/G")},
+                    {**ok, "workdir": "../x"}):
+            try:
+                a.submit(dict(bad))
+                raise AssertionError(bad)
+            except ValueError:
+                pass
+        a.submit({**ok, "location": str(media / "deck/SDCARD/Games")})            # accepted (it fails later on the fake URL)
+        assert a.jobs["pc-x"]["_base"] == str(media / "deck/SDCARD/Games")
+        # ROMs never move: a location sent for one is ignored
+        a.submit({**ok, "id": "snes-r", "kind": "rom", "system": "snes", "folder": "", "location": "/etc", "files": [{"p": "r.sfc", "s": 1}]})
+        assert a.jobs["snes-r"]["_base"] is None
+
+
+def test_install_to_a_chosen_location_and_old_agents():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d).resolve()
+        lib = tmp / "nas/games"
+        put(lib / "pc/Celeste v1.4/Celeste.exe", b"E", 300)
+        put(lib / "pc/Hades/Hades.exe", b"H", 40)
+        deck = Deck(tmp / "deck")
+        sd = deck.tmp / "run/media/deck/SDCARD"
+        sd.mkdir(parents=True)
+        deck.agent.home = deck.tmp / "home"
+        deck.agent.media_roots = [deck.tmp / "run/media/deck", deck.tmp / "run/media"]
+        deck.agent.mount_check = lambda p: p == sd
+        deck.agent.games_dir = deck.tmp / "home/Games"
+        (deck.tmp / "home/Games").mkdir(parents=True)
+        deck.steam["running"] = False
+
+        async def go():
+            (tmp / "hubdata").mkdir(exist_ok=True)
+            hub = Hub({"homekit": {"enabled": False}}, tmp / "hubdata")
+            cfg = {"library": str(lib), "deck": {"host": "127.0.0.1", "port": deck.port, "token": TOKEN}}
+            p = GamesPlugin(hub, cfg)
+            await p.start()
+            await p._scan()
+            try:
+                async with TestClient(TestServer(casa_app(p))) as c:
+                    post = lambda path, body: c.post("/api/p/games" + path, json=body)
+                    lj = await (await c.get("/api/p/games/library")).json()
+                    assert lj["deck"]["agent"] == "1.2" and lj["deck"]["locations"] is True and lj["deck"]["location"] == ""
+                    locs = await (await c.get("/api/p/games/deck/locations")).json()
+                    assert locs["supported"] and [x["id"] for x in locs["locations"]] == ["internal", "sd:SDCARD"]
+                    assert locs["locations"][1]["path"] == str(sd / "Games") and locs["locations"][1]["free"] > 0
+                    # custom folder check runs on the Deck
+                    ck = await (await post("/deck/location/check", {"path": str(deck.tmp / "home/Roms2")})).json()
+                    assert ck["ok"] and ck["free"] > 0
+                    assert (await post("/deck/location/check", {"path": "/etc"})).status == 400
+                    # per-game override: SD card
+                    assert (await post("/install", {"id": "pc-celeste", "location": str(sd / "Games")})).status == 200
+                    await wait_state(c, "pc-celeste", ("installed",))
+                    assert (sd / "Games/Celeste/Celeste.exe").stat().st_size == 300, deck.agent.registry()
+                    assert not (deck.tmp / "home/Games/Celeste").exists()
+                    st = await (await c.get("/api/p/games/library")).json()
+                    assert deck.agent.registry()["pc-celeste"]["root"] == str(sd / "Games")
+                    # a hostile location is refused by the Deck, nothing is written
+                    r = await post("/install", {"id": "pc-hades", "location": "/etc/evil"})
+                    assert r.status == 400 and not Path("/etc/evil").exists()
+                    # uninstall from the SD card works (and only deletes inside the validated location)
+                    deck.steam["running"] = False
+                    body = await (await post("/uninstall", {"id": "pc-celeste"})).json()
+                    assert body["ok"] and not (sd / "Games/Celeste/Celeste.exe").exists()
+                    # default from Settings
+                    p.config["deck"]["location"] = str(sd / "Games")
+                    assert (await post("/install", {"id": "pc-hades"})).status == 200
+                    await wait_state(c, "pc-hades", ("installed",))
+                    assert (sd / "Games/Hades/Hades.exe").is_file()
+                    # an agent older than 1.2: no choice, a clear message, plain installs still work
+                    A.VERSION = "1.1"
+                    p._deck_cache = (0, {})
+                    locs = await (await c.get("/api/p/games/deck/locations")).json()
+                    assert locs["supported"] is False and "agent" in locs["error"]
+                    r = await post("/install", {"id": "pc-celeste", "location": str(sd / "Games")})
+                    assert r.status == 400 and "agent" in (await r.json())["error"]
+                    p._deck_cache = (0, {})
+                    assert (await post("/install", {"id": "pc-celeste"})).status == 200     # the configured default is not sent
+                    await wait_state(c, "pc-celeste", ("installed",))
+                    assert (deck.tmp / "home/Games/Celeste/Celeste.exe").is_file() or (sd / "Games/Celeste/Celeste.exe").is_file()
+                    lj = await (await c.get("/api/p/games/library")).json()
+                    assert lj["deck"]["locations"] is False
+            finally:
+                A.VERSION = "1.2"
+                await p.stop()
+        try:
+            asyncio.run(go())
+        finally:
+            deck.close()
+
+
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+def test_metadata_overrides_and_images():
+    with tempfile.TemporaryDirectory() as d:
+        hub = Hub({"homekit": {"enabled": False}}, Path(d))
+
+        async def go():
+            import aiohttp
+            async with aiohttp.ClientSession() as sess:
+                m = FakeMeta(hub.store, sess, Path(d) / "art", "id", "secret", "sgdbkey")
+                g = {"id": "pc-celeste", "title": "Celeste", "kind": "portable", "platform": "pc"}
+                assert m.public("pc-celeste") is None
+                await m.fetch(g)
+                base = m.public("pc-celeste")
+                assert base["title"] == "Celeste" and base["edited"] == [] and base["genres"] == ["Platform"]
+                # edits sit on top of the fetched data
+                m.set_fields("pc-celeste", {"title": " My  Celeste ", "year": "2019", "genres": "Horror, indie ,horror", "summary": "Mine.\r\nLine"})
+                pub = m.public("pc-celeste")
+                assert pub["title"] == "My Celeste" and pub["released"] == "2019" and pub["genres"] == ["Horror", "indie"]
+                assert pub["summary"] == "Mine.\nLine" and set(pub["edited"]) == {"title", "year", "genres", "summary"}
+                assert m.display_title("pc-celeste", "x") == "My Celeste"
+                m.set_fields("pc-celeste", {"summary": "", "year": ""})              # back to automatic, field by field
+                assert m.public("pc-celeste")["summary"] == "Climb." and m.public("pc-celeste")["released"] == "2018-01-26"
+                for bad in ({"year": "1800"}, {"year": "abc"}, {"title": "x" * 200}, {"genres": 5}, {"summary": "x" * 5000}):
+                    try:
+                        m.set_fields("pc-celeste", bad)
+                        raise AssertionError(bad)
+                    except M.MetaError:
+                        pass
+                # a refetch keeps the user's edits; a refresh of the match does not lose them
+                await m.fetch(g)
+                assert m.public("pc-celeste")["title"] == "My Celeste"
+
+                # pictures: URL validation, then download → cache → used for cover and the Deck's grid
+                got = {}
+
+                async def fake_get(url):
+                    got["url"] = url
+                    return PNG
+                m._get_bytes = fake_get
+                await m.set_image("pc-celeste", "cover", url="https://example.com/c.png")
+                f = m.file("pc-celeste", "cover")
+                assert f.name == "ov-pc-celeste.cover.png" and f.read_bytes() == PNG and m.file("pc-celeste", "grid") == f
+                assert m.has_override_image("pc-celeste", "cover") and "cover" in m.public("pc-celeste")["edited"]
+                await m.set_image("pc-celeste", "hero", cached=m.get("pc-celeste")["files"]["shots"][0])
+                assert m.file("pc-celeste", "hero").name.startswith("ov-pc-celeste.hero")
+                for bad in ("http://example.com/a.png", "https://127.0.0.1/a.png", "https://10.0.0.5/a.png", "https://[::1]/a",
+                            "https://user:pw@example.com/a.png", "https://example.com:8443/a.png", "https://localhost/a.png",
+                            "https://nas.local/a.png", "https://intranet/a.png", "file:///etc/passwd", "", "https://" + "a" * 700 + ".com/x",
+                            "https://192.168.1.10/x", "https://169.254.169.254/latest"):
+                    try:
+                        M.check_image_url(bad)
+                        raise AssertionError("accepted " + bad)
+                    except M.MetaError:
+                        pass
+                assert M.check_image_url("https://cdn2.steamgriddb.com/grid/x.png")
+                assert [i["host"] for i in M.global_addrs([{"host": "10.0.0.1"}, {"host": "8.8.8.8"}, {"host": "127.0.0.1"},
+                                                           {"host": "fe80::1%en0"}, {"host": "2606:4700::1"}])] == ["8.8.8.8", "2606:4700::1"]
+                # not an image / unknown cache name
+                async def junk(url):
+                    return b"<html>no</html>"
+                m._get_bytes = junk
+                for kw in ({"url": "https://example.com/x"}, {"cached": "../../etc/passwd"}):
+                    try:
+                        await m.set_image("pc-celeste", "cover", **kw)
+                        raise AssertionError(kw)
+                    except M.MetaError:
+                        pass
+                assert m.file("pc-celeste", "cover").read_bytes() == PNG                # the good one survived
+                # the user's pictures survive a refetch and cache eviction
+                await m.fetch(g)
+                m.cache.cap = 1
+                m.cache.evict()
+                assert m.file("pc-celeste", "cover").read_bytes() == PNG
+                m.cache.cap = M.CACHE_CAP
+                await m.fetch(g)                                                    # (the screenshots were evicted)
+                # alternatives: screenshots for the banner, SteamGridDB for both
+                async def sgdb(path):
+                    if "autocomplete" in path:
+                        return [{"id": 5, "name": "Celeste"}]
+                    if "/grids/" in path:
+                        assert "600x900" in path
+                        return [{"id": 1, "url": "https://cdn2.steamgriddb.com/g1.png", "thumb": "https://cdn2.steamgriddb.com/t1.png", "width": 600, "height": 900},
+                                {"id": 2, "url": "http://insecure/x.png", "thumb": "http://insecure/x.png"}]
+                    return [{"id": 3, "url": "https://cdn2.steamgriddb.com/h1.png", "thumb": "https://cdn2.steamgriddb.com/h1t.png"}]
+                m._sgdb = sgdb
+                covers = await m.art_options("pc-celeste", "cover", "Celeste")
+                assert [o["id"] for o in covers] == ["sgdb:1"] and covers[0]["thumb"].endswith("t1.png")
+                heroes = await m.art_options("pc-celeste", "hero", "Celeste")
+                assert heroes[0]["source"] == "igdb" and heroes[-1]["id"] == "sgdb:3"
+                # reset: everything the user chose is gone, the pictures too
+                m.reset("pc-celeste", forget_match=True)
+                assert m.public("pc-celeste") is None and m.cache.path("ov-pc-celeste.cover.png") is None
+                assert hub.store.get("games.override.pc-celeste") is None
+        asyncio.run(go())
+
+
+def test_override_routes_and_deck_art():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        hub, lib, cfg = _plugin_env(tmp)
+        put(lib / "pc/Celeste v1.4/Celeste.exe", b"E", 30)
+        put(lib / "pc/Celeste v1.4/cover.jpg", b"\xff\xd8\xff" + b"J" * 20)
+
+        async def go():
+            p = GamesPlugin(hub, cfg)
+            await p.start()
+            await p._scan()
+            import aiohttp
+            p.meta = FakeMeta(hub.store, p.session, tmp / "art", "", "", "")
+            async def fake_get(url):
+                return PNG
+            p.meta._get_bytes = fake_get
+            try:
+                async with TestClient(TestServer(casa_app(p))) as c:
+                    post = lambda path, body: c.post("/api/p/games" + path, json=body)
+                    r = await post("/meta/override", {"id": "pc-celeste", "title": "Celeste Remix", "genres": ["Horror"], "year": "2020"})
+                    j = await r.json()
+                    assert r.status == 200 and j["game"]["meta"]["title"] == "Celeste Remix" and j["game"]["meta"]["genres"] == ["Horror"]
+                    assert (await post("/meta/override", {"id": "pc-celeste", "year": "1066"})).status == 400
+                    assert (await post("/meta/override", {"id": "nope", "title": "x"})).status == 404
+                    # cover: local cover.jpg first, until the user picks a picture
+                    assert (await (await c.get("/api/p/games/cover/pc-celeste")).read()).startswith(b"\xff\xd8\xff")
+                    assert (await post("/meta/image", {"id": "pc-celeste", "kind": "cover", "url": "http://x/a.png"})).status == 400
+                    r = await post("/meta/image", {"id": "pc-celeste", "kind": "cover", "url": "https://example.com/a.png"})
+                    assert r.status == 200 and (await r.json())["game"]["cover"] is True
+                    assert (await (await c.get("/api/p/games/cover/pc-celeste")).read()) == PNG
+                    art = p._art(p.games["pc-celeste"])
+                    assert base64.b64decode(art["grid"]) == PNG                     # the Deck shortcut uses the chosen picture
+                    assert (await post("/meta/image", {"id": "pc-celeste", "kind": "bogus", "url": "https://example.com/a.png"})).status == 400
+                    r = await c.get("/api/p/games/meta/art?id=pc-celeste&kind=cover")
+                    assert r.status == 400                                          # no SteamGridDB key: explained, not a 500
+                    r = await post("/meta/image", {"id": "pc-celeste", "kind": "cover", "clear": True})
+                    assert (await (await c.get("/api/p/games/cover/pc-celeste")).read()).startswith(b"\xff\xd8\xff")
+                    # reset to automatic
+                    r = await post("/meta/reset", {"id": "pc-celeste"})
+                    j = await r.json()
+                    assert r.status == 200 and j["game"]["meta"] is None
+            finally:
+                await p.stop()
+        asyncio.run(go())
+
+
+def test_discover_genres():
+    from hub.plugins.games import discover as D
+    import json as _json
+    page = {"response": {"metadata": {"total_matching_records": 60}, "ids": [{"appid": i} for i in (10, 11, 12)]}}
+    items = {"response": {"store_items": [
+        {"appid": 10, "name": "Dead by Daylight", "type": 0, "reviews": {"summary_filtered": {"percent_positive": 78, "review_count": 900}},
+         "release": {"steam_release_date": 1465000000}},
+        {"appid": 11, "name": "Phasmophobia", "type": 0, "is_free": False},
+        {"appid": 12, "name": "A Tool", "type": 4}]}}
+
+    async def go():
+        sess = FakeSession({"IStoreQueryService": (200, page), "GetItems": (200, items)})
+        d = D.Discover(sess, None, lambda: {"phasmophobia": {"pc"}}, lambda: "it")
+        gl = d.genre_list()
+        keys = [g["key"] for g in gl["genres"]]
+        assert gl["igdb"] is False and gl["platforms"] == [{"key": "pc", "label": "PC"}]
+        for want in ("horror", "indie", "rpg", "strategy", "racing", "simulation", "sports", "puzzle", "adventure", "action",
+                     "platformer", "roguelike", "survival", "coop"):
+            assert want in keys, want
+        r = await d.genre("horror")
+        assert r["source"] == "steam" and r["more"] is True and r["page"] == 0
+        assert [i["title"] for i in r["items"]] == ["Dead by Daylight", "Phasmophobia"]             # software dropped
+        assert r["items"][0]["rating"] == 78 and r["items"][0]["year"] == "2016" and r["items"][1]["in_library"] is True
+        n = len(sess.calls)
+        await d.genre("horror")
+        assert len(sess.calls) == n                                                                  # cached for hours
+        for bad in (("bogus", "pc"), ("horror", "snes"), ("horror", "../x")):
+            try:
+                await d.genre(*bad)
+                raise AssertionError(bad)
+            except ValueError:
+                pass
+        # the tag ids used are the ones Steam publishes
+        assert D.GENRE_BY_KEY["horror"][1] == 1667 and D.GENRE_BY_KEY["indie"][1] == 492 and D.GENRE_BY_KEY["rpg"][1] == 122
+        # Steam's query fails: SteamSpy's genre list steps in for the broad genres, nothing for the others
+        spy = {str(100 + i): {"appid": 100 + i, "name": "Race %d" % i, "positive": 10 * i, "negative": i, "price": "0"} for i in range(30)}
+        d2 = D.Discover(FakeSession({"IStoreQueryService": (500, {}), "steamspy": (200, spy)}), None, None, lambda: "en")
+        d2._spy_last = -100
+        r = await d2.genre("racing")
+        assert [i["title"] for i in r["items"][:2]] == ["Race 29", "Race 28"] and len(r["items"]) == 24 and r["items"][0]["free"]
+        try:
+            await d2.genre("horror")
+            raise AssertionError("no fallback for horror")
+        except D.DiscoverError:
+            pass
+
+        # IGDB: genres/themes/modes per platform, paged
+        class Meta:
+            igdb = True
+
+            def __init__(self):
+                self.asked = []
+
+            async def _igdb(self, body, endpoint="games"):
+                self.asked.append(body)
+                return [{"id": 40 + i, "name": "G%d" % i, "total_rating": 80, "total_rating_count": 50, "cover": {"image_id": "c%d" % i}}
+                        for i in range(25)]
+        m = Meta()
+        d3 = D.Discover(FakeSession({}), m, None, lambda: "it")
+        assert d3.genre_list()["igdb"] and any(p["key"] == "switch" for p in d3.genre_list()["platforms"])
+        r = await d3.genre("horror", "switch", 1)
+        assert r["source"] == "igdb" and len(r["items"]) == 24 and r["more"] is True and r["items"][0]["platform"] == "switch"
+        q = m.asked[0]
+        assert "platforms = (130)" in q and "themes = (19)" in q and "offset 24" in q
+        await d3.genre("coop", "snes")
+        assert "game_modes = (3)" in m.asked[-1]
+        try:
+            await d3.genre("roguelike", "snes")
+            raise AssertionError("no igdb filter")
+        except D.DiscoverError:
+            pass
     asyncio.run(go())
 
 

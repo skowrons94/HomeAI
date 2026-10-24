@@ -5,7 +5,8 @@ Standard library only (SteamOS ships Python 3, no pip needed). It
 
   * listens on a port (default 8765) for the hub, which must send the shared token;
   * downloads a game's files from the hub over signed, expiring links (resumable);
-  * puts PC games in ~/Games/<Title>, ROMs in ~/Emulation/roms/<system>;
+  * puts PC games in ~/Games/<Title> (or in the folder / SD card the hub picks, see /locations), ROMs in
+    ~/Emulation/roms/<system>;
   * queues a non-Steam shortcut (and a Steam ROM Manager run for ROMs) and applies it when asked,
     because Steam only reads shortcuts.vdf while it is not running.
 
@@ -35,7 +36,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-VERSION = "1.1"
+VERSION = "1.2"
+MEDIA_ROOT = Path("/run/media")      # SD cards are mounted here: /run/media/deck/<label> or /run/media/<label>
 SYSTEM_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 MAX_BODY = 8 * 1024 * 1024
 MAX_ART = 3 * 1024 * 1024                 # per image, after decoding
@@ -214,6 +216,37 @@ def safe_rel(p) -> str | None:
     return None if any(seg in ("", ".", "..") for seg in p.split("/")) else p
 
 
+def is_mount(p: Path) -> bool:
+    try:
+        return os.path.ismount(p)
+    except OSError:
+        return False
+
+
+def validate_location(raw, home: Path, media_roots: list[Path], mount_check=is_mount) -> Path:
+    """A folder the hub may install PC games into: absolute, no ``..``, and either under the user's home
+    (no hidden folders) or on a mounted SD card under /run/media. Symlinks are resolved before the check,
+    so a link can't lead out. Raises ValueError("bad location"/…); returns the resolved path."""
+    if not isinstance(raw, str) or not raw.startswith("/") or len(raw) > 400 or "\x00" in raw or "\\" in raw:
+        raise ValueError("bad location")
+    if any(seg in (".", "..") for seg in raw.split("/")):
+        raise ValueError("bad location")
+    real = Path(os.path.normpath(raw)).resolve()
+    home_r = home.resolve()
+    if real != home_r and home_r in real.parents:
+        if any(part.startswith(".") for part in real.relative_to(home_r).parts):
+            raise ValueError("bad location")
+        return real
+    for root in media_roots:
+        root_r = root.resolve()
+        if root_r in real.parents:
+            card = root_r / real.relative_to(root_r).parts[0]
+            if mount_check(card):
+                return real
+            raise ValueError("the SD card is not mounted")
+    raise ValueError("bad location: only %s or an SD card under %s" % (home, MEDIA_ROOT))
+
+
 def safe_name(s) -> str | None:
     if not isinstance(s, str):
         return None
@@ -223,9 +256,12 @@ def safe_name(s) -> str | None:
 
 class Agent:
     def __init__(self, token: str, games_dir: Path, roms_dir: Path, steam_dir: Path, data_dir: Path,
-                 srm: str = ""):
+                 srm: str = "", home: Path | None = None, media_roots: list[Path] | None = None, mount_check=None):
         self.token, self.games_dir, self.roms_dir = token, games_dir, roms_dir
         self.steam_dir, self.data_dir, self.srm = steam_dir, data_dir, srm
+        self.home = home or Path.home()
+        self.media_roots = media_roots if media_roots is not None else [MEDIA_ROOT / self.home.name, MEDIA_ROOT]
+        self.mount_check = mount_check or is_mount
         self.lock = threading.RLock()
         self.jobs: dict[str, dict] = {}
         self.q: queue.Queue = queue.Queue()
@@ -254,11 +290,51 @@ class Agent:
 
     def status(self) -> dict:
         with self.lock:
-            reg = {k: {x: v.get(x) for x in ("version", "kind", "note", "installed_at")} for k, v in self.registry().items()}
+            reg = {k: {x: v.get(x) for x in ("version", "kind", "note", "installed_at", "dest")} for k, v in self.registry().items()}
             jobs = {k: {x: j.get(x) for x in ("state", "done", "message")} for k, j in self.jobs.items()}
             p = self.pending()
         return {"agent": VERSION, "installed": reg, "jobs": jobs, "pending": len(p["shortcuts"]) + (1 if p["srm"] else 0),
                 "steam_running": steam_running()}
+
+    # -- where games can go
+    def location(self, raw) -> Path:
+        return validate_location(raw, self.home, self.media_roots, self.mount_check)
+
+    def _space(self, p: Path) -> dict:
+        try:
+            u = shutil.disk_usage(p)
+            return {"free": u.free, "total": u.total, "writable": os.access(p, os.W_OK)}
+        except OSError:
+            return {"free": 0, "total": 0, "writable": False}
+
+    def locations(self) -> dict:
+        """Where PC games can be installed: internal storage and every mounted SD card, with free space.
+        ``path`` is the folder the game folders go into (ROMs always use the Emulation folder)."""
+        probe = self.games_dir
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        out = [{"id": "internal", "kind": "internal", "label": "Internal storage", "path": str(self.games_dir),
+                **self._space(probe)}]
+        seen = {str(probe.resolve())}
+        for root in self.media_roots:
+            try:
+                kids = sorted(c for c in root.iterdir() if c.is_dir())
+            except OSError:
+                continue
+            for card in kids:
+                if not self.mount_check(card) or str(card.resolve()) in seen:
+                    continue
+                seen.add(str(card.resolve()))
+                out.append({"id": "sd:" + card.name, "kind": "sd", "label": card.name, "path": str(card / "Games"),
+                            **self._space(card)})
+        return {"agent": VERSION, "locations": out, "default": str(self.games_dir), "home": str(self.home)}
+
+    def check_location(self, raw) -> dict:
+        p = self.location(raw)
+        probe = p
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        return {"ok": True, "path": str(p), **self._space(probe)}
 
     # -- install
     def submit(self, job: dict) -> None:
@@ -284,13 +360,20 @@ class Agent:
             raise ValueError("no executable")
         if not str(job.get("base", "")).startswith(("http://", "https://")):
             raise ValueError("bad base url")
+        loc = job.pop("location", None)
+        base = None
+        if loc not in (None, "") and kind != "rom":
+            base = str(self.location(loc))
+        work = job.get("workdir")
+        if work not in (None, "") and not safe_rel(work):
+            raise ValueError("bad working directory")
         raw_art = job.pop("art", None)
         art = decode_art(raw_art) if kind in ("portable", "native") else {}
         with self.lock:
             cur = self.jobs.get(gid)
             if cur and cur["state"] in ("queued", "downloading", "finalizing"):
                 raise ValueError("already installing")
-            job = {**job, "state": "queued", "done": 0.0, "message": "queued", "_art": art}
+            job = {**job, "state": "queued", "done": 0.0, "message": "queued", "_art": art, "_base": base}
             self.jobs[gid] = job
         self.q.put(gid)
 
@@ -299,7 +382,7 @@ class Agent:
         if kind == "rom":
             root = self.roms_dir / job["system"]
             return root / safe_name(job["folder"]) if job.get("folder") else root
-        root = self.games_dir / ("_installers" if kind == "installer" else "")
+        root = (Path(job["_base"]) if job.get("_base") else self.games_dir) / ("_installers" if kind == "installer" else "")
         return root / safe_name(job["folder"])
 
     def _worker(self) -> None:
@@ -375,7 +458,8 @@ class Agent:
         files = [str(dest / f["p"]) for f in job["files"]]
         note, state = "", "done"
         entry = {"id": job["id"], "version": job.get("version", ""), "kind": job["kind"], "dest": str(dest),
-                 "files": files, "installed_at": int(time.time()), "exe": ""}
+                 "files": files, "installed_at": int(time.time()), "exe": "",
+                 "root": job.get("_base") or ""}
         if job["kind"] in ("portable", "native"):
             exe = dest / job["exe"]
             if job["kind"] == "native":
@@ -385,7 +469,7 @@ class Agent:
             with self.lock:
                 p = self.pending()
                 p["shortcuts"] = [s for s in p["shortcuts"] if s["exe"] != str(exe)] + [
-                    {"name": job["title"], "exe": str(exe), "startdir": str(exe.parent),
+                    {"name": job["title"], "exe": str(exe), "startdir": self._startdir(dest, exe, job.get("workdir")),
                      **({"art": staged} if staged else {})}]
                 self._save(self.pend_file, p)
             note = "Apply to Steam to add the shortcut." + (
@@ -406,6 +490,15 @@ class Agent:
                 reg[job["id"]] = entry
                 self._save(self.reg_file, reg)
         self._set(job, state=state, done=1.0, message=note or "installed")
+
+    @staticmethod
+    def _startdir(dest: Path, exe: Path, workdir) -> str:
+        """Steam's "Start in" folder: the game's own working directory (GOG says where) or the exe's folder."""
+        if workdir and safe_rel(workdir):
+            wd = dest / workdir
+            if wd.is_dir():
+                return str(wd)
+        return str(exe.parent)
 
     def _stage_art(self, job: dict) -> dict:
         """Keep the cover art until Steam is stopped and the shortcut is applied."""
@@ -497,6 +590,11 @@ class Agent:
             if not e:
                 raise KeyError("not installed")
             roots = [self.games_dir.resolve(), self.roms_dir.resolve()]
+            if e.get("root"):
+                try:       # an install made into a custom folder or SD card: only if it is still a valid place
+                    roots.append(self.location(e["root"]))
+                except ValueError:
+                    pass
 
             def inside(p: Path) -> bool:
                 return any(p != r and p.is_relative_to(r) for r in roots)
@@ -570,6 +668,8 @@ def make_handler(agent: Agent):
                 return
             if self.path.split("?")[0] == "/status":
                 return self._send(200, agent.status())
+            if self.path.split("?")[0] == "/locations":
+                return self._send(200, agent.locations())
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
@@ -581,6 +681,8 @@ def make_handler(agent: Agent):
                 if path == "/install":
                     agent.submit(body)
                     return self._send(200, {"ok": True})
+                if path == "/location/check":
+                    return self._send(200, agent.check_location(body.get("path")))
                 if path == "/uninstall":
                     return self._send(200, agent.uninstall(str(body.get("id", ""))))
                 if path == "/apply":

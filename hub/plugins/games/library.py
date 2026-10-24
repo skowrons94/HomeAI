@@ -5,6 +5,7 @@
     <library>/emu/<system>/<rom or folder>  a ROM (folders for cue/bin and multi-disc)
     optional  game.json  {"title", "version", "kind", "exe", "system"}  next to the files
     optional  cover.jpg|png|webp            shown in the app
+    GOG       goggame-*.info (JSON) next to the extracted game: title and the primary exe + working dir
 
 kind: ``portable`` (an .exe that runs as is), ``installer`` (setup.exe), ``native`` (Linux
 AppImage / .sh), ``rom``. Anything else is reported in ``problems`` instead of guessed.
@@ -72,6 +73,63 @@ def _walk(d: Path) -> tuple[list[dict], int]:
             if len(out) >= MAX_FILES:
                 return out, total
     return out, total
+
+
+def _gog_exe(files: list[dict], prefix: str, task: dict) -> str:
+    """Path (relative to the game folder) of a GOG playTask's executable, matched case-insensitively."""
+    raw = str(task.get("path") or "").replace("\\", "/").strip().lstrip("./").lstrip("/")
+    if not raw or ".." in raw.split("/"):
+        return ""
+    want = (prefix + raw).lower()
+    for f in files:
+        if f["p"].lower() == want:
+            return f["p"]
+    return ""
+
+
+def gog_info(d: Path, files: list[dict]) -> dict:
+    """Read ``goggame-*.info`` files next to an extracted GOG game → {title, exe, workdir, id} (or {}).
+
+    innoextract puts the game in ``app/`` (or the root), so the info file is searched at depth 0 and 1.
+    The primary FileTask of the main game (``rootGameId == gameId``) gives the executable and its
+    working directory; DLC infos only fill in what is missing."""
+    infos = sorted((f["p"] for f in files if f["p"].count("/") <= 1 and re.fullmatch(r"goggame-\d+\.info", Path(f["p"]).name, re.I)),
+                   key=lambda p: (p.count("/"), p))
+    best: dict = {}
+    for rel in infos[:8]:
+        try:
+            raw = (d / rel).read_bytes()
+            if len(raw) > 1 << 20:
+                continue
+            data = json.loads(raw.decode("utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        prefix = rel.rsplit("/", 1)[0] + "/" if "/" in rel else ""
+        main = str(data.get("rootGameId") or data.get("gameId") or "") == str(data.get("gameId") or "")
+        tasks = [t for t in data.get("playTasks") or [] if isinstance(t, dict) and t.get("type", "FileTask") == "FileTask"
+                 and str(t.get("category", "game")) == "game"]
+        tasks.sort(key=lambda t: not t.get("isPrimary"))
+        exe, work = "", ""
+        for t in tasks:
+            exe = _gog_exe(files, prefix, t)
+            if exe:
+                wd = str(t.get("workingDir") or "").replace("\\", "/").strip().strip("/")
+                if wd and ".." not in wd.split("/"):
+                    low = (prefix + wd).lower() + "/"
+                    hit = next((f["p"] for f in files if f["p"].lower().startswith(low)), None)
+                    if hit:
+                        work = hit[:len(low) - 1]
+                break
+        cand = {"title": " ".join(str(data.get("name") or "").split())[:150], "exe": exe, "workdir": work,
+                "id": str(data.get("gameId") or ""), "_main": main}
+        if not best or (cand["_main"] and not best["_main"]):
+            best = cand
+        elif not best["exe"] and cand["exe"]:
+            best = {**best, "exe": cand["exe"], "workdir": cand["workdir"]}
+    best.pop("_main", None)
+    return best
 
 
 def _cover(d: Path) -> str | None:
@@ -150,17 +208,20 @@ def scan(root: str) -> tuple[list[dict], list[dict]]:
             man = {**_manifest(entry), **_manifest(gdir)}
             title, name_version = split_name(entry.name)
             files, size = _walk(gdir)
-            kind, exe = _pick_exe(files, str(man.get("exe") or ""))
+            gog = gog_info(gdir, files)
+            kind, exe = _pick_exe(files, str(man.get("exe") or gog.get("exe") or ""))
             if man.get("kind") in ("portable", "installer", "native"):
                 kind = man["kind"]
+            workdir = str(man.get("workdir") or (gog.get("workdir") if exe == gog.get("exe") else "") or "")
+            title = gog.get("title") or title
             if not kind or (kind != "installer" and not exe):
                 problems.append({"path": entry.name, "reason": "no .exe, AppImage or .sh found: add a game.json with \"exe\""})
                 continue
             add({"id": "pc-" + slug(str(man.get("title") or title)), "title": str(man.get("title") or title),
                  "version": str(man.get("version") or dir_version or name_version), "kind": kind, "system": "",
-                 "size": size, "files": len(files), "exe": exe, "folder": "",
-                 "cover": bool(_cover(gdir) or _cover(entry)), "added": _mtime(entry, gdir),
-                 "_dir": str(gdir), "_cover": _cover(gdir) or _cover(entry), "_list": files,
+                 "size": size, "files": len(files), "exe": exe, "folder": "", "workdir": workdir,
+                 "gog": bool(gog), "cover": bool(_cover(gdir) or _cover(entry)), "added": _mtime(entry, gdir),
+                 "_dir": str(gdir), "_entry": str(entry), "entry": str(entry.relative_to(base)), "_cover": _cover(gdir) or _cover(entry), "_list": files,
                  "path": str(gdir.relative_to(base))})
         except OSError as err:
             problems.append({"path": entry.name, "reason": str(err)})
@@ -195,7 +256,8 @@ def scan(root: str) -> tuple[list[dict], list[dict]]:
                         break
                 add({"id": f"{system}-" + slug(title), "title": title, "version": version, "kind": "rom",
                      "system": system, "size": size, "files": len(files), "exe": "", "folder": folder,
-                     "cover": bool(cov), "added": _mtime(entry), "_dir": str(gdir), "_cover": cov, "_list": files,
+                     "workdir": "", "gog": False, "cover": bool(cov), "added": _mtime(entry), "_dir": str(gdir),
+                     "_entry": str(entry), "entry": str(entry.relative_to(base)), "_cover": cov, "_list": files,
                      "path": str(entry.relative_to(base))})
             except OSError as err:
                 problems.append({"path": f"{sysdir.name}/{entry.name}", "reason": str(err)})

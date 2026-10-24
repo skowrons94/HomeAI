@@ -3,9 +3,11 @@
 // Three tabs: Library (browse, detail sheet, install), Discover (rails of popular / new / on-sale games,
 // no API key needed; hub/plugins/games/discover.py) and Find (torrent search that downloads into the
 // games folder, plus the downloads in progress). The gear opens the settings sheet.
+// Sheets that change things (edit details/pictures, delete files, choose the Deck location, remove a download)
+// live in games_edit.js and load on demand.
 // Polling: 2 s while something installs, 3 s while a download is active on the Find tab, else 30 s.
 // A failed poll never toasts: it leaves a small inline note that goes away by itself.
-import { api, h, icon, toast, ensureCss, act, fmt, t, sheet } from "../app.js";
+import { api, h, icon, toast, ensureCss, act, fmt, t, sheet, errorCard } from "../app.js";
 
 const P = (path, opts) => api(`p/games/${path}`, opts);
 const KEY = "casa.games.view";
@@ -16,7 +18,7 @@ let data = { games: [], problems: [], deck: {}, systems: [] };
 let loaded = false;
 let libError = "";      // last library refresh failure (inline note), "" when fine
 // filter: "all" | "installed" | "update" | "p:<platform>"
-let view = { tab: "library", filter: "all", sort: "az", fplat: "pc" };
+let view = { tab: "library", filter: "all", sort: "az", fplat: "pc", genre: "", loc: {} };
 let query = "";
 let root = null;
 let timer = null;
@@ -25,7 +27,8 @@ let detail = null;      // {el, close, sig}
 const els = {};
 // discover: rails come from two independent requests (steam: no key, igdb: only with keys)
 const dx = { rails: { steam: [], igdb: [] }, errors: { steam: [], igdb: [] }, done: { steam: false, igdb: false },
-  igdb: false, at: 0, seq: 0 };
+  igdb: false, at: 0, seq: 0,
+  genre: null };      // {key, platform, items, page, more, loading, error} while a genre is open
 const fx = { platforms: [], q: "", results: [], providers: [], page: 1, more: false, error: "", off: false,
   loading: false, searched: false, downloads: [], dlError: "", seen: new Map() };
 
@@ -99,7 +102,7 @@ function cover(g, cls = "") {
   const ph = () => h(`div.gm-cover.none${cls}`, { style: `--gh:${hue(g.platform || g.system || g.kind)}` },
     h("span.gm-init", initials(gtitle(g))), h("span.gm-sys", platName(g.platform || "pc")));
   if (!g.cover) return ph();
-  const img = h(`img.gm-cover${cls}`, { src: `/api/p/games/cover/${encodeURIComponent(g.id)}`, loading: "lazy", alt: "" });
+  const img = h(`img.gm-cover${cls}`, { src: `/api/p/games/cover/${encodeURIComponent(g.id)}?v=${g.meta?.rev || 0}`, loading: "lazy", alt: "" });
   img.addEventListener("error", () => img.replaceWith(ph()), { once: true });   // no broken-image icon
   return img;
 }
@@ -117,6 +120,9 @@ function cornerBadge(g) {
   if (g.state === "installed") return h("span.gm-corner.ok", icon("check"));
   if (g.state === "update") return h("span.gm-corner.upd", icon("download"), t("Update"));
   if (g.state === "failed") return h("span.gm-corner.bad", icon("x"));
+  if (g.auto?.state === "failed") return h("span.gm-corner.bad", { title: g.auto.message || "" }, icon("x"));
+  if (g.auto?.state === "pending" || g.auto?.state === "sent")
+    return h("span.gm-corner.wait", { title: t("Waiting to install on the Steam Deck") }, icon("wifi"), t("Deck"));
   return null;
 }
 
@@ -131,8 +137,22 @@ function stateChip(g) {
 // ---- actions ------------------------------------------------------------------------------
 
 const install = (g, e) => act(async () => {
-  await P("install", { body: { id: g.id } }); toast(t("Sent to the Steam Deck")); await refresh();
+  await P("install", { body: { id: g.id, location: view.loc?.[g.id] || "" } }); toast(t("Sent to the Steam Deck")); await refresh();
 }, e.currentTarget);
+
+// ---- sheets that live in games_edit.js (loaded on first use) ---------------------------------------------
+
+let editMod = null;
+const ctx = {
+  P, refresh: () => refresh(), data: () => data, gtitle: (g) => gtitle(g), cover: (g, c) => cover(g, c),
+  fixMatch: (g) => fixMatch(g),
+  reopenEdit: (id) => { const g = data.games.find((x) => x.id === id); if (g) edit("editGame", g); },
+};
+async function edit(fn, ...args) {
+  try { editMod ??= await import(`./games_edit.js?v=${window.CASA_V}`); }
+  catch (e) { toast(e.message || t("Something went wrong"), true); return null; }
+  return editMod[fn](ctx, ...args);
+}
 
 const remove = (g, e) => confirm(t("Remove {title} from the Steam Deck?", { title: gtitle(g) })) && act(async () => {
   const r = await P("uninstall", { body: { id: g.id } });
@@ -224,9 +244,11 @@ function detailBody(g) {
     g.message && g.state !== "installing" ? h("div.gm-banner" + (g.state === "failed" ? ".bad" : ""), g.message) : null,
     g.state === "needs_manual" ? h("div.gm-banner", t("This is an installer: it was downloaded to the Deck but you must run it there (Desktop Mode, with Proton).")) : null,
     g.note && g.note !== g.message ? h("div.gm-note", g.note) : null,
+    autoBanner(g),
     m?.summary ? summary(m.summary) : null,
     shots.length ? shotStrip(shots.map((u) => ({ thumb: u, full: u }))) : null,
     actions(g),
+    whereRow(g),
     h("div.gm-kvs",
       row(t("Version"), g.version ? `v${g.version}` : ""),
       row(t("Installed on the Deck"), g.installed_version ? `v${g.installed_version}` : (g.state === "installed" || g.state === "update" ? t("Yes") : "")),
@@ -234,12 +256,59 @@ function detailBody(g) {
       row(t("Files"), g.files != null ? fmt.num(g.files) : ""),
       row(t("Added"), g.added ? fmt.date(g.added, { weekday: false }) : ""),
       row(t("Folder on the NAS"), g.path)),
-    h("button.ghost.gm-fix", { onclick: () => fixMatch(g) }, icon("edit"), t("Wrong game? Fix match")),
+    h("div.gm-manage",
+      h("button", { onclick: () => edit("editGame", g) }, icon("edit"), t("Edit details")),
+      h("button", { onclick: () => fixMatch(g) }, icon("search"), t("Fix match")),
+      h("button.danger", { onclick: () => edit("deleteGame", g, () => detail?.close()) }, icon("trash"), t("Delete files…"))),
   ].filter(Boolean);
 }
 
+function autoBanner(g) {
+  const a = g.auto;
+  if (!a || g.state === "installing" || g.state === "installed") return null;
+  if (a.state === "failed") return h("div.gm-banner.bad", h("span", t("Automatic install on the Deck failed: {error}", { error: a.message || t("Something went wrong") })));
+  return h("div.gm-banner.info", icon("wifi"), h("span", data.deck?.online
+    ? t("Sending it to the Steam Deck…") : t("It will be installed on the Steam Deck as soon as it is awake and online.")));
+}
+
+/** "Install to: SD card · 120 GB free" (agent 1.2+); a hint to update older agents. Hidden when it can't matter. */
+function whereRow(g) {
+  const d = data.deck || {};
+  if (!d.online || g.kind === "rom" || g.state === "installing") return null;
+  if (d.locations === false)
+    return h("div.gm-note", t("Update the Deck agent to choose where games are installed."));
+  if (!d.locations) return null;
+  const cur = view.loc?.[g.id] ?? "";
+  const btn = h("button.gm-where", { onclick: async () => {
+    await edit("chooseLocation", { title: t("Install {title} to", { title: gtitle(g) }), current: cur || d.location || "", need: g.size,
+      withDefault: false, onPick: (p) => { view.loc = { ...(view.loc || {}), [g.id]: p }; saveView(); redrawWhere(g, btn); } });
+  } }, icon("storage"), h("span.gm-where-t", h("span.gm-meta", t("Install to")), h("b", cur || d.location || t("Internal storage"))), icon("right"));
+  loadWhere(g, btn);
+  return btn;
+}
+
+async function loadWhere(g, btn) {
+  try { editMod ??= await import(`./games_edit.js?v=${window.CASA_V}`); } catch { return; }
+  try {
+    const l = await editMod.loadLocations(ctx);
+    if (btn.isConnected) fillWhere(g, btn, l);
+  } catch { /* the label stays as the path */ }
+}
+function fillWhere(g, btn, l) {
+  const path = view.loc?.[g.id] || data.deck?.location || "";
+  const here = (l.locations || []).find((x) => x.path === (path || l.default)) || (l.locations || [])[0];
+  const b = btn.querySelector("b");
+  if (!b || !here) return;
+  b.textContent = `${editMod.locLabel(l, path)} · ${t("{free} free", { free: fmt.bytes(here.free) })}`;
+  b.classList.toggle("gm-bad", !!g.size && here.free < g.size * 1.02 + (50 << 20));
+}
+async function redrawWhere(g, btn) {
+  const l = await editMod.loadLocations(ctx).catch(() => null);
+  if (l) fillWhere(g, btn, l);
+}
+
 const sig = (g) => JSON.stringify([g.state, g.progress != null ? pct(g) : null, g.message, g.installed_version, g.meta?.igdb_id,
-  g.cover, data.deck?.online, data.deck?.pending]);
+  g.cover, data.deck?.online, data.deck?.pending, g.auto?.state, g.meta?.rev, data.deck?.locations, g.meta?.title]);
 
 function openDetail(id) {
   const g = data.games.find((x) => x.id === id);
@@ -355,8 +424,79 @@ function railErr(title, msg, retry) {
       retry ? h("button.ghost", { onclick: retry }, t("Retry")) : null));
 }
 
+// ---- discover: genres (Steam store tags without a key; IGDB genres/themes with keys, also per console) ----------
+
+const GENRES = ["action", "adventure", "rpg", "strategy", "horror", "indie", "simulation", "racing", "sports", "puzzle",
+  "platformer", "roguelike", "survival", "coop", "shooter", "fighting", "open_world", "stealth", "metroidvania"];
+const NO_IGDB = new Set(["roguelike", "metroidvania"]);        // Steam tags only
+const GENRE_LABEL = () => ({
+  action: t("Action"), adventure: t("Adventure"), rpg: t("RPG"), strategy: t("Strategy"), horror: t("Horror"),
+  indie: t("Indie"), simulation: t("Simulation"), racing: t("Racing"), sports: t("Sports"), puzzle: t("Puzzle"),
+  platformer: t("Platformer"), roguelike: t("Roguelike"), survival: t("Survival"), coop: t("Co-op"),
+  shooter: t("Shooter"), fighting: t("Fighting"), open_world: t("Open world"), stealth: t("Stealth"),
+  metroidvania: t("Metroidvania"),
+});
+let genreSeq = 0;
+
+function openGenre(key) {
+  genreSeq++;
+  if (!key) { dx.genre = null; drawDiscover(); return; }
+  const plat = dx.genre?.platform && !(dx.genre.platform !== "pc" && NO_IGDB.has(key)) ? dx.genre.platform : "pc";
+  dx.genre = { key, platform: plat, items: [], page: 0, more: false, loading: true, error: "" };
+  loadGenre();
+}
+
+async function loadGenre(more = false) {
+  const gx = dx.genre;
+  if (!gx) return;
+  const my = ++genreSeq;
+  if (!more) { gx.items = []; gx.page = 0; } else gx.page += 1;
+  gx.loading = true; gx.error = "";
+  drawDiscover();
+  try {
+    const d = await P(`discover/genre/${encodeURIComponent(gx.key)}?platform=${encodeURIComponent(gx.platform)}&page=${gx.page}`);
+    if (my !== genreSeq || dx.genre !== gx) return;
+    gx.items = gx.items.concat(d.items || []); gx.more = !!d.more;
+  } catch (e) {
+    if (my !== genreSeq || dx.genre !== gx) return;
+    gx.error = e.message || t("Couldn't load this list.");
+    if (more) gx.page -= 1;
+  }
+  gx.loading = false;
+  drawDiscover();
+}
+
+function genreRow() {
+  const gx = dx.genre, L = GENRE_LABEL();
+  const keys = GENRES.filter((k) => !(gx && gx.platform !== "pc" && NO_IGDB.has(k)));
+  return h("div.gm-chipwrap.gm-genrerow", h("div.gm-chips",
+    chip(t("All"), null, !gx, () => openGenre(null)),
+    ...keys.map((k) => chip(L[k], null, gx?.key === k, () => openGenre(gx?.key === k ? null : k)))));
+}
+
+function genreView() {
+  const gx = dx.genre, L = GENRE_LABEL();
+  const out = [];
+  const igdb = data.metadata?.igdb || dx.igdb;
+  if (igdb) {
+    const plats = fx.platforms.length ? fx.platforms : [{ key: "pc", label: t("PC") }];
+    out.push(h("div.gm-chipwrap", h("div.gm-chips", plats.map((p) => chip(p.key === "pc" ? t("PC") : p.label, null, gx.platform === p.key, () => {
+      gx.platform = p.key; loadGenre();
+    })))));
+  }
+  out.push(h("h2.gm-rh", gx.platform === "pc" ? L[gx.key] : `${L[gx.key]} · ${fx.platforms.find((p) => p.key === gx.platform)?.label || gx.platform}`));
+  if (gx.items.length) out.push(h("div.gm-grid", gx.items.map(dcard)));
+  if (gx.loading) out.push(gx.items.length ? h("div.empty", h("span.spin")) : h("div.gm-grid", skelCards(6)));
+  else if (gx.error) out.push(h("div.gm-rerr", icon("wifi"), h("span", gx.error),
+    h("button.ghost", { onclick: () => loadGenre(gx.items.length > 0) }, t("Retry"))));
+  else if (!gx.items.length) out.push(h("div.empty", t("Nothing found for this genre.")));
+  else if (gx.more) out.push(h("div.gm-moreRow", h("button", { onclick: () => loadGenre(true) }, t("Load more"))));
+  return out;
+}
+
 function drawDiscover() {
   if (!els.dis) return;
+  if (dx.genre) { els.disBody.replaceChildren(genreRow(), ...genreView()); return; }
   const all = [...dx.rails.steam, ...dx.rails.igdb].sort((a, b) => railRank(a) - railRank(b));
   const out = [];
   for (const r of all) {
@@ -381,7 +521,7 @@ function drawDiscover() {
   if (dx.done.igdb && !dx.igdb && data.metadata && !data.metadata.igdb)
     out.push(h("button.gm-slim", { onclick: openSettings }, icon("settings"),
       h("span", t("Add the free IGDB keys to see more lists: popular, top rated and the best games per console.")), icon("right")));
-  els.disBody.replaceChildren(...out);
+  els.disBody.replaceChildren(genreRow(), ...out);
 }
 
 let discoverSeq = 0;
@@ -629,6 +769,17 @@ function dlState(d) {
   return bits.join(" · ") || t("Starting…");
 }
 
+function deckLine(d) {
+  const k = d.deck;
+  if (!k) return null;
+  const m = {
+    pending: [k.online ? t("Sending to the Steam Deck…") : t("Waiting for the Steam Deck to be online"), "wait"],
+    installing: [t("Installing on the Steam Deck…"), "wait"], installed: [t("On the Steam Deck"), "ok"],
+    failed: [t("Steam Deck install failed: {error}", { error: k.message || t("Something went wrong") }), "err"],
+  }[k.state];
+  return m ? h(`div.gm-note.gm-deckline.${m[1]}`, icon(m[1] === "ok" ? "check" : m[1] === "err" ? "x" : "wifi"), m[0]) : null;
+}
+
 function dlRow(d) {
   const active = d.state === "downloading" || d.state === "extracting";
   const p = Math.round((d.progress || 0) * 100);
@@ -637,15 +788,16 @@ function dlRow(d) {
     h("div.gm-dl-main",
       h("div.gm-res-title", d.title),
       active || d.state === "done" ? h("div.progress" + (d.state === "extracting" ? ".ind" : ""), h("div", { style: { width: d.state === "extracting" ? "100%" : `${p}%` } })) : null,
-      h("div.gm-note" + (bad ? ".err" : ""), active && d.state === "downloading" ? `${p}% · ${dlState(d)}` : dlState(d))),
+      h("div.gm-note" + (bad ? ".err" : ""), active && d.state === "downloading" ? `${p}% · ${dlState(d)}` : dlState(d)),
+      d.path && !active ? h("div.gm-meta.gm-mono", icon("folder"), d.path) : null,
+      deckLine(d)),
     (bad || d.state === "needs_extraction") && h("button.icon.ghost", { "aria-label": t("Try again"), title: t("Try again"),
       onclick: (e) => act(async () => {
         await P(`find/downloads/${encodeURIComponent(d.hash)}/retry`, { body: {} }); await loadDownloads(); schedule();
       }, e.currentTarget) }, icon("refresh")),
-    h("button.icon.ghost", { "aria-label": active ? t("Cancel") : t("Remove"), onclick: (e) => act(async () => {
-      await P(`find/downloads/${encodeURIComponent(d.hash)}`, { method: "DELETE" });
-      await loadDownloads(); schedule();
-    }, e.currentTarget) }, icon(active ? "x" : "trash")));
+    h("button.icon.ghost", { "aria-label": active ? t("Cancel") : t("Remove"),
+      onclick: () => edit("removeDownload", d, async () => { await loadDownloads(); await loadLibrary("library", undefined, true); schedule(); }) },
+    icon(active ? "x" : "trash")));
 }
 
 function drawDownloads() {
@@ -668,9 +820,11 @@ async function openSettings() {
   if (!p) return;
   const schema = p.schema || [], values = p.values || {};
   const meta = (f) => /^(igdb|steamgriddb)\b/.test(f.key);
-  const deck = (f) => f.key.startsWith("deck");
+  const isLoc = (f) => f.key === "deck.location";        // chosen from the list of places on the Deck instead
+  const deck = (f) => f.key.startsWith("deck") && !isLoc(f);
+  let deckLoc = String(values["deck.location"] || "");
   const forms = [
-    renderForm(schema.filter((f) => !deck(f) && !meta(f)), values),
+    renderForm(schema.filter((f) => !deck(f) && !meta(f) && !isLoc(f)), values),
     renderForm(schema.filter(deck), values),
     renderForm(schema.filter(meta), values),
   ];
@@ -685,6 +839,15 @@ async function openSettings() {
       !d.online && (d.error || !d.configured) ? h("div.gm-note", d.error || t("Set the Steam Deck address and token in Settings → Games.")) : null].filter(Boolean));
   };
   paint();
+  const locName = h("b", deckLoc || t("Internal storage"));
+  const locRow = () => {
+    const d = data.deck || {};
+    if (d.online && d.locations === false)
+      return h("div.gm-banner", icon("download"), h("span", t("Update the Deck agent to choose where games are installed.")));
+    return h("button.gm-where", { type: "button", onclick: () => edit("chooseLocation", { title: t("Install location on the Deck"),
+      current: deckLoc, withDefault: true, onPick: (p) => { deckLoc = p; locName.textContent = p || t("Internal storage"); } }) },
+    icon("storage"), h("span.gm-where-t", h("span.gm-meta", t("Install location on the Deck")), locName), icon("right"));
+  };
   const md = data.metadata || {};
   const skipped = (data.problems || []).length ? h("details.gm-problems",
     h("summary", t("{n} items skipped", { n: data.problems.length })),
@@ -696,7 +859,7 @@ async function openSettings() {
     sec(t("Library"), forms[0].el,
       h("div.gm-btns",
         btn("refresh", t("Rescan library"), async () => { await refresh("rescan", { method: "POST", body: {} }); toast(t("Library rescanned")); }))),
-    sec(t("Steam Deck"), status, forms[1].el,
+    sec(t("Steam Deck"), status, forms[1].el, locRow(),
       h("div.gm-btns",
         btn("wifi", t("Test connection"), async () => {
           const r = await P("test", { body: {} });
@@ -712,7 +875,7 @@ async function openSettings() {
           await P("meta/refresh", { body: {} }); toast(t("Metadata refresh started")); await refresh();
         }))),
     h("button.primary.lg", { onclick: (e) => act(async () => {
-      const values = Object.assign({}, ...forms.map((f) => f.values()));
+      const values = Object.assign({}, ...forms.map((f) => f.values()), { "deck.location": deckLoc });
       for (const f of schema) if (f.type === "password" && !values[f.key]) delete values[f.key];   // empty = keep
       const r = await api("settings/plugins/games", { method: "PUT", body: { values } });
       if (r.error) { toast(r.error, true); return; }
@@ -745,6 +908,7 @@ function banner() {
 function matches(g) {
   const q = query.trim().toLowerCase();
   if (q && !(g.title.toLowerCase().includes(q) || gtitle(g).toLowerCase().includes(q))) return false;
+  if (view.genre && !(g.meta?.genres || []).some((x) => x.toLowerCase() === view.genre.toLowerCase())) return false;
   const f = view.filter;
   if (f === "installed") return g.state === "installed" || g.state === "update";
   if (f === "update") return g.state === "update";
@@ -772,12 +936,33 @@ function drawChips() {
   // a saved platform filter that no longer exists would show an empty page
   if (view.filter.startsWith("p:") && !sys.some((s) => `p:${s.key}` === view.filter)) view.filter = "all";
   if (view.filter === "update" && !upd) view.filter = "all";
-  els.chips.replaceChildren(
+  const gcount = genreCounts();
+  if (view.genre && !gcount.some(([n]) => n.toLowerCase() === view.genre.toLowerCase())) view.genre = "";
+  els.chips.replaceChildren(...[
     chip(t("All"), gs.length, view.filter === "all", set("all")),
     chip(t("Installed"), inst, view.filter === "installed", set("installed")),
     upd ? chip(t("Updates"), upd, view.filter === "update", set("update")) : null,
-    ...(sys.length > 1 ? sys.map((s) => chip(platName(s.key), s.count, view.filter === `p:${s.key}`, set(`p:${s.key}`))) : []));
+    gcount.length ? h("button.chip.gm-fchip.gm-genrechip" + (view.genre ? ".on" : ""), { onclick: openGenres, "aria-haspopup": "dialog" },
+      view.genre || t("Genre"), icon(view.genre ? "x" : "right")) : null,
+    ...(sys.length > 1 ? sys.map((s) => chip(platName(s.key), s.count, view.filter === `p:${s.key}`, set(`p:${s.key}`))) : [])].filter(Boolean));
   els.chips.parentElement.hidden = !gs.length;
+}
+
+/** [[genre, games], …] from the metadata already cached (edited genres included), most common first. */
+function genreCounts() {
+  const c = new Map();
+  for (const g of data.games) for (const x of g.meta?.genres || []) {
+    const k = x.toLowerCase();
+    c.set(k, [c.get(k)?.[0] || x, (c.get(k)?.[1] || 0) + 1]);
+  }
+  return [...c.values()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+function openGenres() {
+  if (view.genre) { view.genre = ""; saveView(); drawLibrary(); return; }    // the chip doubles as "clear"
+  const s = sheet(t("Genre"), [h("div.gm-list", genreCounts().map(([name, n]) =>
+    h("button.gm-opt", { onclick: () => { view.genre = name; saveView(); s.close(); drawLibrary(); } },
+      h("span", name), h("span.gm-count", fmt.num(n)))))]);
 }
 
 function openSort() {
@@ -808,7 +993,7 @@ function emptyState() {
       how, hint);
   }
   return h("div.empty", t("No matches."), " ",
-    h("button.ghost", { onclick: () => { query = ""; els.q.value = ""; view.filter = "all"; saveView(); drawLibrary(); } }, t("Clear filters")));
+    h("button.ghost", { onclick: () => { query = ""; els.q.value = ""; view.filter = "all"; view.genre = ""; saveView(); drawLibrary(); } }, t("Clear filters")));
 }
 
 function drawLibrary() {

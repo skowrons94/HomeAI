@@ -67,6 +67,12 @@ class GamesPlugin(Plugin):
          "required": True, "help": "Name or IP of the Deck. It must be awake and on Wi-Fi."},
         {"key": "deck.token", "label": "Deck token", "type": "password", "required": True,
          "help": "Printed by deploy/deck/install-deck.sh on the Deck."},
+        {"key": "deck.auto_install", "label": "Install new games on the Steam Deck automatically", "type": "bool",
+         "default": True, "help": "When a download finishes and the game shows up in the library, send it to the Deck "
+         "(retried until the Deck is awake and online)."},
+        {"key": "deck.location", "label": "Install location on the Deck", "type": "text", "advanced": True,
+         "placeholder": "/home/deck/Games", "help": "Folder on the Deck where PC games are installed. Empty = internal "
+         "storage (~/Games). Choose it from the list in Games settings; needs agent 1.2 or newer."},
         {"key": "deck.port", "label": "Agent port", "type": "number", "default": 8765, "min": 1024,
          "max": 65535, "advanced": True},
         {"key": "base_url", "label": "Address of this hub, as the Deck sees it", "type": "text",
@@ -106,16 +112,20 @@ class GamesPlugin(Plugin):
         self.discover = Discover(self.session, self.meta, self._library_index,
                                  lambda: str(self.hub.config.get("language") or "it"))
         self.finder = Finder(self)
+        self._auto_lock = asyncio.Lock()
+        self._loc_cache: tuple[float, dict] = (0, {})
         self._meta_queue: dict[str, bool] = {}      # game id → force
         self._meta_task: asyncio.Task | None = None
         self._meta_busy = False
         self.hub.every(RESCAN, self._scan, name="games-rescan", initial_delay=0)   # first scan off start()
         self.hub.every(5, self.finder.poll, name="games-downloads")
+        self.hub.every(60, self._auto_tick, name="games-auto-install", initial_delay=45)
         self.hub.spawn(self.finder.resume(), name="games-resume")
 
     async def stop(self):
         if self._meta_task and not self._meta_task.done():
             self._meta_task.cancel()
+        await self.meta.close()
         await self.session.close()
 
     # -- library ---------------------------------------------------------------------------
@@ -188,11 +198,19 @@ class GamesPlugin(Plugin):
             d = await self.deck.call("GET", "/status")
             st = {"online": True, "error": None, "installed": d.get("installed") or {},
                   "jobs": d.get("jobs") or {}, "pending": int(d.get("pending") or 0),
-                  "steam_running": bool(d.get("steam_running"))}
+                  "steam_running": bool(d.get("steam_running")), "agent": str(d.get("agent") or "1.0")}
         except DeckError as err:
             st = {"online": False, "error": str(err), "installed": {}, "jobs": {}, "pending": 0}
         self._deck_cache = (time.monotonic(), st)
         return st
+
+    @staticmethod
+    def agent_has_locations(agent) -> bool:
+        """Deck agents from 1.2 can install somewhere other than ~/Games."""
+        try:
+            return tuple(int(x) for x in str(agent).split(".")[:2]) >= (1, 2)
+        except ValueError:
+            return False
 
     @staticmethod
     def _state(g: dict, st: dict) -> dict:
@@ -225,6 +243,16 @@ class GamesPlugin(Plugin):
             web.post("/meta/refresh", self.r_meta_refresh),
             web.get("/meta/search", self.r_meta_search),
             web.post("/meta/match", self.r_meta_match),
+            web.post("/meta/override", self.r_meta_override),
+            web.post("/meta/reset", self.r_meta_reset),
+            web.get("/meta/art", self.r_meta_art),
+            web.post("/meta/image", self.r_meta_image),
+            web.post("/delete", self.r_delete),
+            web.get("/deck/locations", self.r_deck_locations),
+            web.post("/deck/location/check", self.r_deck_location_check),
+            web.get("/discover/genres", self.r_discover_genres),
+            web.get("/discover/genre/{key}", self.r_discover_genre),
+            web.get("/find/downloads/{hash}/files", self.r_find_files),
             web.get("/discover", self.r_discover),
             web.get("/discover/item/{source}/{id}", self.r_discover_item),
             web.get("/find", self.r_find),
@@ -262,9 +290,169 @@ class GamesPlugin(Plugin):
     def _item(self, g: dict, st: dict) -> dict:
         item = {**library.public(g), **self._state(g, st), "meta": self.meta.public(g["id"])}
         item["cover"] = bool(g.get("_cover") or self.meta.file(g["id"], "cover"))
+        item["auto"] = self.auto_for_game(g["id"])
         return item
 
+    def _remember_origin(self, request) -> None:
+        """Background installs have no request: remember the address the app is reached at (not localhost)."""
+        origin = str(request.url.origin())
+        host = (request.url.host or "").lower()
+        if host in ("localhost", "127.0.0.1", "::1") or origin == self.hub.store.get("games.last_origin"):
+            return
+        self.hub.store.set("games.last_origin", origin)
+
+    # -- auto-install: a finished download goes to the Deck, retried until the Deck answers ----------
+
+    def _auto_enabled(self) -> bool:
+        return bool(get_path(self.config, "deck.auto_install", True))
+
+    def _auto_all(self) -> dict:
+        v = self.hub.store.get("games.auto", {})
+        return v if isinstance(v, dict) else {}
+
+    def _auto_save(self, auto: dict) -> None:
+        if auto:
+            self.hub.store.set("games.auto", auto)
+        else:
+            self.hub.store.delete("games.auto")
+
+    def _auto_clear(self, gid: str) -> None:
+        auto = self._auto_all()
+        if auto.pop(gid, None) is not None:
+            self._auto_save(auto)
+
+    def auto_forget(self, h: str) -> None:
+        auto = {k: v for k, v in self._auto_all().items() if v.get("hash") != h}
+        self._auto_save(auto)
+
+    def auto_for_game(self, gid: str) -> dict | None:
+        a = self._auto_all().get(gid)
+        if not isinstance(a, dict):
+            return None
+        return {"state": a.get("state", "pending"), "message": a.get("message") or None}
+
+    def games_in(self, owned: list[Path]) -> list[str]:
+        """Library games that live inside the paths a download created."""
+        roots = []
+        for p in owned:
+            try:
+                roots.append(p.resolve())
+            except OSError:
+                continue
+        out = []
+        for g in self.games.values():
+            for key in ("_entry", "_dir"):
+                try:
+                    here = Path(g.get(key) or "").resolve()
+                except OSError:
+                    continue
+                if any(here == r or r in here.parents for r in roots):
+                    out.append(g["id"])
+                    break
+        return out
+
+    def auto_queue(self, h: str) -> None:
+        """A download is done and the library rescanned: mark its games for the Deck (and say which they are)."""
+        e = next((x for x in self.finder.entries() if x["hash"] == h), None)
+        if not e:
+            return
+        ids = self.games_in(self.finder.owned(e))
+        if not ids:
+            return
+        self.finder._update(h, games=ids)
+        if not (self._auto_enabled() and self.deck.configured):
+            return
+        auto = self._auto_all()
+        for gid in ids:
+            if self.games[gid]["kind"] == "installer":
+                continue              # an installer would only be copied to the Deck, to run by hand
+            auto[gid] = {"state": "pending", "hash": h, "since": time.time(), "tries": 0, "message": None}
+        self._auto_save(auto)
+        self.hub.spawn(self._auto_tick(), name="games-auto-install-now")
+
+    def auto_status(self, e: dict) -> dict | None:
+        """For a download row: what happened on the Deck with the games it brought."""
+        ids = [i for i in e.get("games") or [] if isinstance(i, str)]
+        if not ids or e.get("state") != "done":
+            return None
+        st = self._deck_cache[1] or {}
+        auto = self._auto_all()
+        states, msg = [], None
+        for gid in ids:
+            a = auto.get(gid)
+            if a:
+                states.append("failed" if a.get("state") == "failed" else "installing" if a.get("state") == "sent" else "pending")
+                msg = msg or a.get("message")
+            elif gid in (st.get("installed") or {}):
+                states.append("installed")
+        if not states:
+            return None
+        order = ("failed", "pending", "installing", "installed")
+        state = next(x for x in order if x in states)
+        return {"state": state, "message": msg, "online": bool(st.get("online"))}
+
+    def _auto_base(self) -> str:
+        return (str(self.config.get("base_url") or "").rstrip("/")) or str(self.hub.store.get("games.last_origin") or "")
+
+    async def _auto_tick(self) -> None:
+        if not self._auto_enabled() or not self.deck.configured:
+            return
+        async with self._auto_lock:
+            auto = self._auto_all()
+            if not auto:
+                return
+            st = await self._deck_state(fresh=True)
+            if not st["online"]:
+                return                    # asleep or off Wi-Fi: the next tick tries again
+            changed = False
+            for gid, a in list(auto.items()):
+                g = self.games.get(gid)
+                if g is None:
+                    if time.time() - a.get("since", 0) > 900:     # the library never showed it
+                        del auto[gid]
+                        changed = True
+                    continue
+                inst, job = st["installed"].get(gid), st["jobs"].get(gid)
+                jstate = (job or {}).get("state")
+                if jstate in ("queued", "downloading", "finalizing"):
+                    if a.get("state") != "sent":
+                        a["state"], changed = "sent", True
+                    continue
+                if a.get("state") == "sent":
+                    if jstate == "failed":
+                        a.update(state="failed", message=(job or {}).get("message"))
+                        changed = True
+                        continue
+                    if inst or jstate == "needs_manual":
+                        del auto[gid]
+                        changed = True
+                        continue
+                elif a.get("state") == "failed":
+                    continue
+                if inst and (not g["version"] or inst.get("version") == g["version"]):
+                    del auto[gid]
+                    changed = True
+                    continue
+                base = self._auto_base()
+                if not base:
+                    a["message"], changed = _("Open the Games page once from the Deck's network, or set the hub address in Settings → Games."), True
+                    continue
+                try:
+                    await self._send_install(g, base, "", explicit=False)
+                    a.update(state="sent", message=None)
+                except (KeyError, ValueError) as err:
+                    a["tries"] = a.get("tries", 0) + 1
+                    a["message"] = str(err)
+                    if "already installing" in str(err):
+                        a["state"] = "sent"
+                    elif a["tries"] >= 5:
+                        a["state"] = "failed"
+                changed = True
+            if changed:
+                self._auto_save(auto)
+
     async def r_library(self, request):
+        self._remember_origin(request)
         st = await self._deck_state()
         items = [self._item(g, st) for g in self.games.values()]
         pending = len(self._meta_queue) + (1 if self._meta_busy else 0)
@@ -273,8 +461,11 @@ class GamesPlugin(Plugin):
                                    "error": self.meta.error or None},
                       "games": items, "problems": self.problems, "root": self.root, "scanned": self.scanned,
                       "exists": os.path.isdir(os.path.expanduser(self.root)), "systems": self._systems(),
-                      "deck": {**{k: st.get(k) for k in ("online", "error", "pending", "steam_running")},
-                               "configured": self.deck.configured, "host": self.deck.host}})
+                      "deck": {**{k: st.get(k) for k in ("online", "error", "pending", "steam_running", "agent")},
+                               "configured": self.deck.configured, "host": self.deck.host,
+                               "locations": self.agent_has_locations(st.get("agent")) if st.get("online") else None,
+                               "location": str(get_path(self.config, "deck.location", "") or ""),
+                               "auto_install": self._auto_enabled()}})
 
     async def r_test(self, request):
         """Ask the Deck agent right now (no cache) and say what is wrong, if anything."""
@@ -297,8 +488,9 @@ class GamesPlugin(Plugin):
         local = Path(g["_cover"]) if g.get("_cover") else None
         for role in ("grid", "wide", "logo", "hero"):
             f = self.meta.file(g["id"], role)
-            if role == "grid" and local and local.suffix.lower() in (".jpg", ".jpeg", ".png"):
-                f = local                       # a cover.jpg in the game folder wins
+            if role == "grid" and local and local.suffix.lower() in (".jpg", ".jpeg", ".png") \
+                    and not self.meta.has_override_image(g["id"], "cover"):
+                f = local                       # a cover.jpg in the game folder wins (unless the user picked one)
             try:
                 if not f or f.suffix.lower() not in (".jpg", ".jpeg", ".png"):
                     continue
@@ -314,21 +506,76 @@ class GamesPlugin(Plugin):
                 continue
         return out
 
-    async def r_install(self, request):
-        g = self._game((await self._body(request)).get("id"))
+    async def _send_install(self, g: dict, base: str, location: str = "", explicit: bool = True) -> None:
+        """Tell the Deck agent to install a game. ``location`` is a folder on the Deck (agent 1.2+); empty means
+        the default from Settings. ``explicit`` = the user asked for this location (an old agent is an error)."""
         exp = int(time.time()) + TTL
         art = await asyncio.get_running_loop().run_in_executor(None, self._art, g)   # up to 4 MB from disk
-        job = {"id": g["id"], "title": g["title"], "version": g["version"], "kind": g["kind"],
-               "system": g["system"], "exe": g["exe"], "folder": g["folder"] or g["title"] if g["kind"] != "rom" else g["folder"],
-               "files": g["_list"], "base": self._base(request), "exp": exp, "sig": self._sig(g["id"], exp)}
+        job = {"id": g["id"], "title": self.meta.display_title(g["id"], g["title"]), "version": g["version"],
+               "kind": g["kind"], "system": g["system"], "exe": g["exe"],
+               "folder": g["folder"] or g["title"] if g["kind"] != "rom" else g["folder"],
+               "files": g["_list"], "base": base, "exp": exp, "sig": self._sig(g["id"], exp)}
+        if g.get("workdir"):
+            job["workdir"] = g["workdir"]
         if art:
             job["art"] = art
+        loc = (location or "").strip()
+        if g["kind"] != "rom" and (loc or get_path(self.config, "deck.location", "")):
+            st = await self._deck_state()
+            supported = self.agent_has_locations(st.get("agent"))
+            if loc and not supported:
+                raise ValueError(_("Update the Deck agent to choose where games are installed"))
+            if supported:
+                job["location"] = loc or str(get_path(self.config, "deck.location", "") or "")
         try:
             await self.deck.call("POST", "/install", job, timeout=15)
         except DeckError as err:
             raise _fail(err)
         self._deck_cache = (0, {})
+        if explicit:
+            self._auto_clear(g["id"])
+
+    async def r_install(self, request):
+        b = await self._body(request)
+        g = self._game(b.get("id"))
+        self._remember_origin(request)
+        loc = b.get("location") or ""
+        if not isinstance(loc, str) or len(loc) > 400:
+            raise ValueError(_("Invalid install location"))
+        await self._send_install(g, self._base(request), loc)
         return _json({"ok": True})
+
+    async def r_deck_locations(self, request):
+        """Where the Deck can install games (internal storage, SD cards) with free space; old agents say so."""
+        st = await self._deck_state()
+        if not st["online"]:
+            return _json({"online": False, "supported": False, "error": st.get("error"), "locations": []})
+        if not self.agent_has_locations(st.get("agent")):
+            return _json({"online": True, "supported": False, "agent": st.get("agent"), "locations": [],
+                          "error": _("Update the Deck agent to choose where games are installed")})
+        if time.monotonic() - self._loc_cache[0] > 15 or request.query.get("fresh") == "1":
+            try:
+                d = await self.deck.call("GET", "/locations")
+            except DeckError as err:
+                raise _fail(err)
+            self._loc_cache = (time.monotonic(), d if isinstance(d, dict) else {})
+        d = self._loc_cache[1]
+        return _json({"online": True, "supported": True, "agent": st.get("agent"), "locations": d.get("locations") or [],
+                      "default": d.get("default"), "home": d.get("home"),
+                      "current": str(get_path(self.config, "deck.location", "") or "")})
+
+    async def r_deck_location_check(self, request):
+        b = await self._body(request)
+        path = b.get("path")
+        if not isinstance(path, str) or not path.startswith("/") or len(path) > 400:
+            raise ValueError(_("Invalid install location"))
+        st = await self._deck_state()
+        if not self.agent_has_locations(st.get("agent")):
+            raise ValueError(_("Update the Deck agent to choose where games are installed"))
+        try:
+            return _json(await self.deck.call("POST", "/location/check", {"path": path}, timeout=10))
+        except DeckError as err:
+            raise _fail(err)
 
     async def r_uninstall(self, request):
         gid = str((await self._body(request)).get("id") or "")
@@ -350,6 +597,9 @@ class GamesPlugin(Plugin):
 
     async def r_cover(self, request):
         g = self._game(request.match_info["id"])
+        chosen = self.meta.file(g["id"], "cover") if self.meta.has_override_image(g["id"], "cover") else None
+        if chosen:
+            return web.FileResponse(chosen, headers={"Cache-Control": "max-age=3600"})
         if g.get("_cover") and Path(g["_cover"]).is_file():
             return web.FileResponse(g["_cover"], headers={"Cache-Control": "max-age=3600"})
         f = self.meta.file(g["id"], "cover")
@@ -432,6 +682,89 @@ class GamesPlugin(Plugin):
             raise ValueError(_("IGDB has no such game"))
         return _json({"ok": True, "game": self._item(g, await self._deck_state())})
 
+    async def _item_now(self, g: dict) -> dict:
+        return self._item(g, await self._deck_state())
+
+    async def r_meta_override(self, request):
+        """Edit title, year, genres or description of a game; each field can be put back to automatic with ""."""
+        b = await self._body(request)
+        g = self._game(b.get("id"))
+        fields = {k: b[k] for k in ("title", "year", "genres", "summary") if k in b}
+        try:
+            self.meta.set_fields(g["id"], fields)
+        except MetaError as err:
+            raise ValueError(str(err))
+        return _json({"ok": True, "game": await self._item_now(g)})
+
+    async def r_meta_reset(self, request):
+        """Back to automatic: edits and chosen pictures go, the match is forgotten and looked up again."""
+        g = self._game((await self._body(request)).get("id"))
+        self.meta.reset(g["id"], forget_match=True)
+        if self.meta.configured:
+            self._meta_queue[g["id"]] = True
+            self._kick_meta(delay=0.5)
+        return _json({"ok": True, "game": await self._item_now(g)})
+
+    async def r_meta_art(self, request):
+        """Alternatives for the cover or the banner (SteamGridDB, plus the game's screenshots for the banner)."""
+        g = self._game(request.query.get("id"))
+        kind = request.query.get("kind", "")
+        m = self.meta.public(g["id"]) or {}
+        title = m.get("title") or g["title"]
+        from .metadata import clean_title
+        if kind == "cover" and not self.meta.steamgriddb:
+            raise ValueError(_("Set the SteamGridDB key in Settings → Games to see more covers, or paste an image address."))
+        try:
+            opts = await self.meta.art_options(g["id"], kind, clean_title(title, g["kind"]), g.get("platform", ""))
+        except MetaError as err:
+            raise ValueError(str(err))
+        return _json({"options": opts, "steamgriddb": self.meta.steamgriddb})
+
+    async def r_meta_image(self, request):
+        """Use a picture as cover/banner: ``url`` (https, downloaded and cached here), ``cached`` (a screenshot
+        already in the cache) or ``clear`` to go back to the automatic one."""
+        b = await self._body(request)
+        g = self._game(b.get("id"))
+        kind = str(b.get("kind") or "")
+        try:
+            if b.get("clear"):
+                self.meta.clear_image(g["id"], kind)
+            else:
+                await self.meta.set_image(g["id"], kind, url=str(b.get("url") or ""), cached=str(b.get("cached") or ""))
+        except MetaError as err:
+            raise ValueError(str(err))
+        return _json({"ok": True, "game": await self._item_now(g)})
+
+    # -- delete a game's files from the library
+    async def r_delete(self, request):
+        """Delete a game's files on the NAS (the folder / ROM only, checked to be inside the library)."""
+        g = self._game((await self._body(request)).get("id"))
+        root = Path(os.path.expanduser(self.root))
+        entry = Path(g.get("_entry") or "")
+        targets = [find.deletable(root, entry)]
+        if g["kind"] == "rom" and entry.is_file():           # cover pictures that sit next to a ROM
+            for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                side = entry.with_suffix(ext)
+                if side.is_file():
+                    try:
+                        targets.append(find.deletable(root, side))
+                    except ValueError:
+                        pass
+        for e in self.finder.entries():           # not while a download or unpacking is writing there
+            if e.get("state") in find.ACTIVE:
+                busy = self.finder.owned(e)
+                for p in busy:
+                    for t in targets:
+                        if p.resolve() == t or t in p.resolve().parents or p.resolve() in t.parents:
+                            raise ValueError(_("This game is still being downloaded or unpacked"))
+        loop = asyncio.get_running_loop()
+        for t in targets:
+            await loop.run_in_executor(None, find.delete_tree, t)
+        self.meta.reset(g["id"], forget_match=True)
+        self._auto_clear(g["id"])
+        await self._scan()
+        return _json({"ok": True})
+
     # -- discover
     def _library_index(self) -> dict[str, set[str]]:
         """{normalised title: {platform keys}} of the scanned library, for the "in library" badge."""
@@ -454,6 +787,22 @@ class GamesPlugin(Plugin):
         if which not in ("all", "steam", "igdb"):
             raise ValueError(_("Unknown set"))
         return _json(await self.discover.rails(which, refresh=request.query.get("refresh") == "1"))
+
+    async def r_discover_genres(self, request):
+        return _json(self.discover.genre_list())
+
+    async def r_discover_genre(self, request):
+        from .discover import DiscoverError
+        q = request.query
+        try:
+            page = int(q.get("page") or 0)
+        except ValueError:
+            page = 0
+        try:
+            return _json(await self.discover.genre(request.match_info["key"], q.get("platform", "pc")[:20], page,
+                                                   refresh=q.get("refresh") == "1"))
+        except (DiscoverError, MetaError) as err:
+            raise ValueError(str(err))
 
     async def r_discover_item(self, request):
         from .discover import DiscoverError
@@ -488,8 +837,11 @@ class GamesPlugin(Plugin):
         return _json({"ok": True})
 
     async def r_find_cancel(self, request):
-        await self.finder.cancel(request.match_info["hash"].lower())
-        return _json({"ok": True})
+        n = await self.finder.cancel(request.match_info["hash"].lower(), delete_files=request.query.get("files") == "1")
+        return _json({"ok": True, "deleted": n})
+
+    async def r_find_files(self, request):
+        return _json(await self.finder.files_info(request.match_info["hash"].lower()))
 
     async def r_download(self, request):
         """Called by the Deck agent, not the browser: authenticated by the signed link."""

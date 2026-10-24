@@ -6,6 +6,8 @@ Sources (all public, JSON):
     SteamSpy ``top100in2weeks`` as a fallback for the names)
   * Steam ``appdetails``                → one game in detail
   * IGDB (only when the keys are set)   → popular now, top rated, best per emulated platform, coming soon
+  * Genres: Steam ``IStoreQueryService`` by store tag (top sellers of Horror, Indie, RPG…; no key), SteamSpy
+    ``request=genre`` as a fallback for the broad genres, IGDB genres/themes/modes per platform (keys)
 
 Everything is cached in memory (bounded, with TTLs) and one failing source never breaks the answer:
 the rails that worked come back together with a list of per-rail errors.
@@ -26,7 +28,7 @@ import aiohttp
 
 from ...i18n import _
 from . import find
-from .metadata import IMG_URL, MetaError, _norm, clean_title, igdb_platforms
+from .metadata import IMG_URL, MetaError, _norm, clean_title, igdb_platforms, read_capped
 
 log = logging.getLogger("hub.games")
 
@@ -41,6 +43,7 @@ APPDETAILS_URL = "https://store.steampowered.com/api/appdetails"
 CHARTS_URL = "https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/"
 ITEMS_URL = "https://api.steampowered.com/IStoreBrowseService/GetItems/v1"
 SPY_URL = "https://steamspy.com/api.php"
+QUERY_URL = "https://api.steampowered.com/IStoreQueryService/Query/v1/"
 ART_URL = "https://shared.steamstatic.com/store_item_assets/steam/apps/%s/%s"
 STORE_URL = "https://store.steampowered.com/app/%s"
 
@@ -61,6 +64,30 @@ IGDB_ITEM_FIELDS = ("name,slug,cover.image_id,first_release_date,total_rating,to
 IGDB_DETAIL_FIELDS = ("name,slug,summary,storyline,cover.image_id,first_release_date,total_rating,total_rating_count,"
                       "genres.name,platforms.abbreviation,platforms.name,screenshots.image_id,artworks.image_id,"
                       "involved_companies.developer,involved_companies.company.name,videos.video_id,videos.name")
+
+GENRE_TTL = 6 * 3600
+GENRE_PAGE = 24
+GENRE_MAX_PAGES = 5
+SPY_GAP = 1.2                  # SteamSpy asks for about one request a second
+SPY_MAX = 14 * 1024 * 1024     # a broad genre is several MB of JSON: refuse anything absurd
+STEAM_SORT_TOP_SELLERS = 10    # IStoreQueryService sort: the store's "top sellers" order
+IGDB_PC = 6
+
+# key, Steam store tag id (verified with IStoreService/GetTagList), IGDB filter (field, id) or None,
+# SteamSpy genre for the fallback or ""
+GENRES = [
+    ("action", 19, ("themes", 1), "Action"), ("adventure", 21, ("genres", 31), "Adventure"),
+    ("rpg", 122, ("genres", 12), "RPG"), ("strategy", 9, ("genres", 15), "Strategy"),
+    ("horror", 1667, ("themes", 19), ""), ("indie", 492, ("genres", 32), "Indie"),
+    ("simulation", 599, ("genres", 13), "Simulation"), ("racing", 699, ("genres", 10), "Racing"),
+    ("sports", 701, ("genres", 14), "Sports"), ("puzzle", 1664, ("genres", 9), ""),
+    ("platformer", 1625, ("genres", 8), ""), ("roguelike", 1716, None, ""),
+    ("survival", 1662, ("themes", 21), ""), ("coop", 1685, ("game_modes", 3), ""),
+    ("shooter", 1774, ("genres", 5), ""), ("fighting", 1743, ("genres", 4), ""),
+    ("open_world", 1695, ("themes", 38), ""), ("stealth", 1687, ("themes", 23), ""),
+    ("metroidvania", 1628, None, ""),
+]
+GENRE_BY_KEY = {g[0]: g for g in GENRES}
 
 IMAGE_HOSTS = ("steamstatic.com", "steampowered.com", "akamaihd.net", "igdb.com", "youtube.com", "ytimg.com")
 
@@ -207,7 +234,11 @@ class Discover:
         self.session, self.meta = session, meta
         self._library, self._language = library or (lambda: {}), language or (lambda: "it")
         self.rails_cache, self.detail_cache, self.info_cache = Cache(60, clock), Cache(120, clock), Cache(800, clock)
+        self.genre_cache = Cache(120, clock)
         self._locks: dict[str, asyncio.Lock] = {}
+        self._spy_lock = asyncio.Lock()
+        self._spy_last = 0.0
+        self._clock = clock
 
     # -- plumbing --
     @property
@@ -448,8 +479,9 @@ class Discover:
             "platforms": [p for p in plats if p][:4], "url": f"https://www.igdb.com/games/{slug}" if slug else None,
         }
 
-    async def _igdb_games(self, where: str, sort: str, platform: str = "", limit: int = RAIL_LEN) -> list[dict]:
-        rows = await self.meta._igdb(f"fields {IGDB_ITEM_FIELDS}; where {where}; sort {sort}; limit {limit};")
+    async def _igdb_games(self, where: str, sort: str, platform: str = "", limit: int = RAIL_LEN, offset: int = 0) -> list[dict]:
+        rows = await self.meta._igdb(f"fields {IGDB_ITEM_FIELDS}; where {where}; sort {sort}; limit {limit};"
+                                     + (f" offset {int(offset)};" if offset else ""))
         return [x for x in (self._igdb_item(r, platform) for r in rows) if x]
 
     async def _igdb_popular(self) -> list[dict]:
@@ -521,6 +553,122 @@ class Discover:
             rails += res[0]
             errors += res[1]
         return {"rails": rails, "errors": errors, "igdb": self.igdb}
+
+    # -- genres --
+    def genre_list(self) -> dict:
+        plats = [{"key": "pc", "label": "PC"}] + ([{"key": k, "label": dict(find.PLATFORMS).get(k, k.upper())}
+                                                   for k in IGDB_PLATFORM_IDS] if self.igdb else [])
+        return {"genres": [{"key": k, "igdb": f is not None} for k, _t, f, _s in GENRES], "igdb": self.igdb,
+                "platforms": plats}
+
+    def _plain_item(self, appid: str, name: str) -> dict:
+        return {"id": appid, "source": "steam", "title": name, "cover": steam_cover(appid), "image": steam_header(appid),
+                "platform": "pc", "discount": None, "price": None, "was": None, "free": False, "rating": None,
+                "rating_kind": None, "year": None, "url": STORE_URL % appid}
+
+    async def _steam_genre(self, tag: int, page: int) -> tuple[list[dict], bool]:
+        """The store's top sellers with a tag: ids from IStoreQueryService, names/reviews from GetItems."""
+        import json
+        lang, cc = self._loc()
+        body = {"query": {"start": page * GENRE_PAGE, "count": GENRE_PAGE, "sort": STEAM_SORT_TOP_SELLERS,
+                          "filters": {"type_filters": {"include_games": True}, "tagids_must_match": [{"tagids": [tag]}]}},
+                "context": {"language": lang, "country_code": cc.upper()}, "data_request": {}}
+        d = await self._json(QUERY_URL, {"input_json": json.dumps(body, separators=(",", ":"))})
+        resp = d.get("response") if isinstance(d, dict) else None
+        ids = [str(x["appid"]) for x in (resp or {}).get("ids") or [] if isinstance(x, dict) and str(x.get("appid", "")).isdigit()]
+        if not isinstance(resp, dict) or (not ids and page == 0):
+            raise DiscoverError(_("Steam sent an unexpected answer"))
+        total = ((resp.get("metadata") or {}).get("total_matching_records") or 0)
+        try:
+            await self._ensure_info(ids)
+        except DiscoverError as err:
+            log.debug("games discover: genre names unavailable: %s", err)
+        items = []
+        for i in ids:
+            info = self.info_cache.get(i) or {}
+            if info.get("name") and info.get("type") in (0, None):
+                items.append(self._plain_item(i, info["name"]))
+        more = isinstance(total, int) and (page + 1) * GENRE_PAGE < total and page + 1 < GENRE_MAX_PAGES
+        return items, more
+
+    async def _spy_genre(self, genre: str) -> list[dict]:
+        """SteamSpy ``request=genre`` (broad genres only: its tag lists are unreliable). One request at a time,
+        spaced out, size-capped; only the 24 best-reviewed games are kept."""
+        import json
+        async with self._spy_lock:
+            wait = self._spy_last + SPY_GAP - self._clock()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                async with self.session.get(SPY_URL, params={"request": "genre", "genre": genre}, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                    if r.status >= 400:
+                        raise DiscoverError(_("Steam answered HTTP {code}", code=r.status))
+                    raw = await read_capped(r, SPY_MAX)
+            except DiscoverError:
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                raise DiscoverError(_("Steam is unreachable: {err}", err=str(err) or type(err).__name__)) from err
+            finally:
+                self._spy_last = self._clock()
+        if len(raw) > SPY_MAX:
+            raise DiscoverError(_("Steam sent an unexpected answer"))
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            raise DiscoverError(_("Steam sent an unexpected answer"))
+        del raw
+        rows = [v for k, v in d.items() if str(k).isdigit() and isinstance(v, dict) and v.get("name")] if isinstance(d, dict) else []
+        rows.sort(key=lambda v: -((v.get("positive") or 0) + (v.get("negative") or 0)))
+        out = []
+        for v in rows[:GENRE_PAGE]:
+            it = self._plain_item(str(v["appid"]), str(v["name"]))
+            it["free"] = str(v.get("price", "")) == "0"
+            out.append(it)
+        if not out:
+            raise DiscoverError(_("Steam sent an unexpected answer"))
+        return out
+
+    async def _igdb_genre(self, key: str, platform: str, page: int) -> tuple[list[dict], bool]:
+        flt = GENRE_BY_KEY[key][2]
+        if flt is None:
+            raise DiscoverError(_("This genre is not available for that platform"))
+        pid = IGDB_PC if platform == "pc" else IGDB_PLATFORM_IDS[platform]
+        where = f"platforms = ({pid}) & {flt[0]} = ({flt[1]}) & total_rating_count > 5 & cover != null & version_parent = null"
+        rows = await self._igdb_games(where, "total_rating_count desc", "" if platform == "pc" else platform,
+                                      GENRE_PAGE + 1, page * GENRE_PAGE)
+        return rows[:GENRE_PAGE], len(rows) > GENRE_PAGE and page + 1 < GENRE_MAX_PAGES
+
+    async def genre(self, key: str, platform: str = "pc", page: int = 0, refresh: bool = False) -> dict:
+        if key not in GENRE_BY_KEY:
+            raise ValueError(_("Unknown genre"))
+        if platform != "pc" and not (self.igdb and platform in IGDB_PLATFORM_IDS):
+            raise ValueError(_("Unknown platform"))
+        page = min(max(int(page), 0), GENRE_MAX_PAGES - 1)
+        _k, tag, flt, spy = GENRE_BY_KEY[key]
+        lang = self._loc()[0]
+
+        async def fetch():
+            if platform == "pc":
+                try:
+                    items, more = await self._steam_genre(tag, page)
+                    return {"items": items, "more": more, "source": "steam"}
+                except DiscoverError as err:
+                    if spy and page == 0:
+                        try:
+                            return {"items": await self._spy_genre(spy), "more": False, "source": "steam"}
+                        except DiscoverError:
+                            pass
+                    if self.igdb and flt is not None:
+                        items, more = await self._igdb_genre(key, "pc", page)
+                        return {"items": items, "more": more, "source": "igdb"}
+                    raise err
+            items, more = await self._igdb_genre(key, platform, page)
+            return {"items": items, "more": more, "source": "igdb"}
+
+        res = await self._cached(self.genre_cache, (key, platform, page, lang), GENRE_TTL, fetch, refresh)
+        items = self._enrich(res["items"]) if res["source"] == "steam" else res["items"]
+        return {"genre": key, "platform": platform, "page": page, "more": res["more"], "source": res["source"],
+                "items": self._flag(items)}
 
     # -- details --
     async def detail(self, source: str, ident: str, platform: str = "", refresh: bool = False) -> dict:

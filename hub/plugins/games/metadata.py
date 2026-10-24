@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import ipaddress
 import logging
 import os
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 
 import aiohttp
 
@@ -35,6 +36,9 @@ FIELDS = ("name,summary,genres.name,first_release_date,total_rating,involved_com
           "involved_companies.developer,cover.image_id,screenshots.image_id,artworks.image_id,"
           "platforms.abbreviation,platforms.name")
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,150}$")
+OVERRIDE_PREFIX = "ov-"              # cached images chosen by the user: never evicted, never purged by a refetch
+OVERRIDE_KINDS = ("cover", "hero")
+ART_CHOICES = 24
 
 
 class MetaError(Exception):
@@ -154,6 +158,71 @@ def sniff(data: bytes) -> str | None:
     return None
 
 
+# -- user-supplied images (SSRF-safe) -----------------------------------------------------------
+
+async def read_capped(resp, cap: int) -> bytes:
+    """The whole body, but at most ``cap``+1 bytes (``StreamReader.read(n)`` may return only the first chunk)."""
+    buf = bytearray()
+    async for chunk in resp.content.iter_chunked(64 * 1024):
+        buf += chunk
+        if len(buf) > cap:
+            break
+    return bytes(buf)
+
+
+def check_image_url(url) -> str:
+    """Validate a pasted image URL: https only, no credentials, standard port, no private/loopback addresses.
+    Returns the URL; raises MetaError. DNS names are filtered again at connect time by :class:`SafeResolver`."""
+    if not isinstance(url, str) or not url.strip() or len(url) > 600:
+        raise MetaError(_("Paste a valid image address (https://…)"))
+    url = url.strip()
+    try:
+        u = urlparse(url)
+        port = u.port
+    except ValueError:
+        raise MetaError(_("Paste a valid image address (https://…)"))
+    host = (u.hostname or "").lower()
+    if u.scheme != "https" or not host or u.username or u.password or port not in (None, 443):
+        raise MetaError(_("Only https image addresses are accepted"))
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        if "." not in host or host.endswith((".local", ".internal", ".lan", ".localhost", ".home.arpa")):
+            raise MetaError(_("That address is not a public website"))
+    else:
+        if not ip.is_global:
+            raise MetaError(_("That address is not a public website"))
+    return url
+
+
+def global_addrs(infos: list[dict]) -> list[dict]:
+    """Resolver results that point at the public internet (aiohttp resolver dicts with a ``host`` key)."""
+    out = []
+    for i in infos:
+        try:
+            if ipaddress.ip_address(str(i.get("host")).split("%")[0]).is_global:
+                out.append(i)
+        except ValueError:
+            continue
+    return out
+
+
+class SafeResolver(aiohttp.abc.AbstractResolver):
+    """DNS resolver that never hands out loopback/LAN/link-local addresses (the hub lives on a home network)."""
+
+    def __init__(self):
+        self._inner = aiohttp.DefaultResolver()
+
+    async def resolve(self, host, port=0, family=0):
+        infos = global_addrs(await self._inner.resolve(host, port, family))
+        if not infos:
+            raise OSError("address not allowed")
+        return infos
+
+    async def close(self):
+        await self._inner.close()
+
+
 # -- image cache --------------------------------------------------------------------------------
 
 class ImageCache:
@@ -190,7 +259,8 @@ class ImageCache:
     def evict(self) -> int:
         """Delete the oldest files until the cache fits; returns files removed."""
         try:
-            files = [(f.stat().st_mtime, f.stat().st_size, f) for f in self.dir.iterdir() if f.is_file()]
+            files = [(f.stat().st_mtime, f.stat().st_size, f) for f in self.dir.iterdir()
+                     if f.is_file() and not f.name.startswith(OVERRIDE_PREFIX)]
         except OSError:
             return 0
         total, n = sum(s for _p, s, _t in files), 0
@@ -219,6 +289,12 @@ class Metadata:
         self._last = 0.0
         self.error = ""
         self._mem: dict[str, dict | None] = {}
+        self._ov: dict[str, dict] = {}
+        self._user_session: aiohttp.ClientSession | None = None
+
+    async def close(self) -> None:
+        if self._user_session and not self._user_session.closed:
+            await self._user_session.close()
 
     @property
     def igdb(self) -> bool:
@@ -243,21 +319,187 @@ class Metadata:
         self._mem[gid] = meta
         self.store.set("games.meta." + gid, meta)
 
+    # -- the user's own edits, applied on top of what was fetched
+    def override(self, gid: str) -> dict:
+        if gid not in self._ov:
+            v = self.store.get("games.override." + gid)
+            self._ov[gid] = v if isinstance(v, dict) else {}
+        return self._ov[gid]
+
+    def _save_override(self, gid: str, ov: dict) -> None:
+        if ov:
+            ov["rev"] = int(time.time())
+            self._ov[gid] = ov
+            self.store.set("games.override." + gid, ov)
+        else:
+            self._ov[gid] = {}
+            self.store.delete("games.override." + gid)
+
+    def display_title(self, gid: str, fallback: str = "") -> str:
+        return self.override(gid).get("title") or fallback
+
     def public(self, gid: str) -> dict | None:
-        m = self.get(gid)
-        if not m or not m.get("igdb_id"):
+        m = self.get(gid) or {}
+        ov = self.override(gid)
+        if not m.get("igdb_id") and not ov:
             return None
         files = m.get("files") or {}
-        return {"title": m.get("title") or "", "summary": m.get("summary") or "", "genres": m.get("genres") or [],
-                "released": m.get("released"), "rating": m.get("rating"), "developer": m.get("developer"),
+        hero = self.file(gid, "hero")
+        edited = [k for k in ("title", "year", "genres", "summary") if ov.get(k)] + \
+                 [k for k in OVERRIDE_KINDS if ov.get(k + "_file") and self.cache.path(ov[k + "_file"])]
+        return {"title": ov.get("title") or m.get("title") or "", "summary": ov.get("summary") or m.get("summary") or "",
+                "genres": ov.get("genres") or m.get("genres") or [],
+                "released": ov.get("year") or m.get("released"), "rating": m.get("rating"), "developer": m.get("developer"),
                 "igdb_id": m.get("igdb_id"), "matched_by": m.get("matched_by", "auto"),
                 "screenshots": ["/api/p/games/img/" + n for n in files.get("shots") or [] if self.cache.path(n)],
-                "has_hero": bool(files.get("hero") and self.cache.path(files["hero"]))}
+                "has_hero": bool(hero), "edited": edited, "rev": int(ov.get("rev") or m.get("fetched") or 0)}
 
     def file(self, gid: str, role: str) -> Path | None:
+        ov = self.override(gid)
+        kind = {"cover": "cover", "grid": "cover", "hero": "hero"}.get(role)
+        if kind and ov.get(kind + "_file"):
+            f = self.cache.path(ov[kind + "_file"])
+            if f:
+                return f
         m = self.get(gid) or {}
         name = (m.get("files") or {}).get(role)
         return self.cache.path(name) if name else None
+
+    def has_override_image(self, gid: str, kind: str) -> bool:
+        name = self.override(gid).get(kind + "_file")
+        return bool(name and self.cache.path(name))
+
+    def set_fields(self, gid: str, fields: dict) -> None:
+        """Title, year, genres and description; ``""`` / ``[]`` puts a field back to automatic."""
+        ov = dict(self.override(gid))
+        if "title" in fields:
+            v = " ".join(str(fields["title"] or "").split())
+            if len(v) > 150:
+                raise MetaError(_("The title is too long (max {n} characters)", n=150))
+            ov["title"] = v
+        if "year" in fields:
+            raw = str(fields["year"] or "").strip()
+            if raw and not (raw.isdigit() and 1950 <= int(raw) <= 2100):
+                raise MetaError(_("The year must be between 1950 and 2100"))
+            ov["year"] = raw
+        if "genres" in fields:
+            g = fields["genres"]
+            if isinstance(g, str):
+                g = re.split(r"[,;\n]", g)
+            if not isinstance(g, list):
+                raise MetaError(_("Genres must be a list"))
+            clean, seen = [], set()
+            for x in g:
+                x = " ".join(str(x).split())[:40]
+                if x and x.lower() not in seen:
+                    seen.add(x.lower())
+                    clean.append(x)
+            ov["genres"] = clean[:10]
+        if "summary" in fields:
+            v = str(fields["summary"] or "").replace("\r", "").strip()
+            if len(v) > 4000:
+                raise MetaError(_("The description is too long (max {n} characters)", n=4000))
+            ov["summary"] = v
+        for k in ("title", "year", "genres", "summary"):
+            if not ov.get(k):
+                ov.pop(k, None)
+        self._save_override(gid, ov)
+
+    def reset(self, gid: str, forget_match: bool = True) -> None:
+        """Back to automatic: edits and chosen images go; with ``forget_match`` the fetched record too
+        (the caller queues a fresh automatic lookup)."""
+        self.cache.purge(OVERRIDE_PREFIX + gid)
+        self._save_override(gid, {})
+        if forget_match:
+            self.forget(gid)
+
+    # -- choosing pictures
+    async def _get_bytes(self, url: str) -> bytes:
+        """Download a public https image (no redirects to private hosts, size-capped)."""
+        if self._user_session is None or self._user_session.closed:
+            self._user_session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(resolver=SafeResolver(), limit=4))
+        for _hop in range(4):
+            check_image_url(url)
+            try:
+                async with self._user_session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=30),
+                                                  headers={"Accept": "image/*"}) as r:
+                    if r.status in (301, 302, 303, 307, 308) and r.headers.get("Location"):
+                        url = urljoin(url, r.headers["Location"])
+                        continue
+                    if r.status != 200:
+                        raise MetaError(_("The image could not be downloaded (HTTP {code})", code=r.status))
+                    if (r.content_length or 0) > MAX_IMAGE:
+                        raise MetaError(_("The image is too big (max {n} MB)", n=MAX_IMAGE // (1 << 20)))
+                    data = await read_capped(r, MAX_IMAGE)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+                raise MetaError(_("The image could not be downloaded: {err}", err=str(err) or type(err).__name__))
+            if len(data) > MAX_IMAGE:
+                raise MetaError(_("The image is too big (max {n} MB)", n=MAX_IMAGE // (1 << 20)))
+            return data
+        raise MetaError(_("Too many redirects"))
+
+    async def set_image(self, gid: str, kind: str, url: str = "", cached: str = "") -> None:
+        """Use a picture for the cover or the banner: from a public https URL (downloaded and cached here)
+        or from a file already in the cache (a screenshot)."""
+        if kind not in OVERRIDE_KINDS:
+            raise MetaError(_("Unknown picture"))
+        if cached:
+            src = self.cache.path(cached)
+            if not src:
+                raise MetaError(_("Pick a picture from the list"))
+            data = await asyncio.get_running_loop().run_in_executor(None, src.read_bytes)
+        else:
+            data = await self._get_bytes(check_image_url(url))
+        ext = sniff(data)
+        if not ext:
+            raise MetaError(_("That is not a PNG, JPEG or WebP image"))
+        name = f"{OVERRIDE_PREFIX}{gid}.{kind}{ext}"
+        if not SAFE_NAME.match(name):
+            raise MetaError(_("Unknown picture"))
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.cache.purge, f"{OVERRIDE_PREFIX}{gid}.{kind}")
+        await loop.run_in_executor(None, self.cache.put, name, data)
+        ov = dict(self.override(gid))
+        ov[kind + "_file"] = name
+        self._save_override(gid, ov)
+
+    def clear_image(self, gid: str, kind: str) -> None:
+        if kind not in OVERRIDE_KINDS:
+            raise MetaError(_("Unknown picture"))
+        self.cache.purge(f"{OVERRIDE_PREFIX}{gid}.{kind}")
+        ov = dict(self.override(gid))
+        ov.pop(kind + "_file", None)
+        self._save_override(gid, ov)
+
+    async def art_options(self, gid: str, kind: str, title: str, platform: str = "") -> list[dict]:
+        """Alternatives for the cover/banner: SteamGridDB pictures (needs its key) and the cached screenshots."""
+        if kind not in OVERRIDE_KINDS:
+            raise MetaError(_("Unknown picture"))
+        out: list[dict] = []
+        if kind == "hero":
+            for n in ((self.get(gid) or {}).get("files") or {}).get("shots") or []:
+                if self.cache.path(n):
+                    out.append({"id": "cache:" + n, "thumb": "/api/p/games/img/" + n, "cached": n, "source": "igdb"})
+        if self.steamgriddb:
+            found = await self._sgdb("/search/autocomplete/" + quote(title, safe=""))
+            hit = pick_best(title, [{"name": f.get("name"), "id": f.get("id")} for f in found if isinstance(f, dict)])
+            if hit:
+                route, dims = ("grids", "600x900,342x482,660x930") if kind == "cover" else ("heroes", "")
+                q = "?types=static&limit=%d&mimes=%s" % (ART_CHOICES, quote("image/png,image/jpeg", safe=",/"))
+                if dims:
+                    q += "&dimensions=" + dims
+                for item in await self._sgdb("/%s/game/%d%s" % (route, hit["id"], q)):
+                    if not isinstance(item, dict):
+                        continue
+                    url, thumb = item.get("url"), item.get("thumb") or item.get("url")
+                    if not (isinstance(url, str) and url.startswith("https://") and isinstance(thumb, str)
+                            and thumb.startswith("https://")):
+                        continue
+                    out.append({"id": "sgdb:%s" % item.get("id"), "url": url, "thumb": thumb, "source": "steamgriddb",
+                                "w": item.get("width"), "h": item.get("height"), "style": item.get("style")})
+                    if len(out) >= ART_CHOICES + 6:
+                        break
+        return out
 
     # -- IGDB
     async def _auth(self) -> str:
@@ -323,7 +565,7 @@ class Metadata:
             async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status != 200 or (r.content_length or 0) > MAX_IMAGE:
                     return None
-                data = await r.content.read(MAX_IMAGE + 1)
+                data = await read_capped(r, MAX_IMAGE)
         except (aiohttp.ClientError, asyncio.TimeoutError):
             return None
         ext = sniff(data) if len(data) <= MAX_IMAGE else None
@@ -421,6 +663,7 @@ class Metadata:
             return None
 
     def forget(self, gid: str) -> None:
+        """Drop the fetched record and its images (the user's edits stay: see :meth:`reset`)."""
         self._mem.pop(gid, None)
         self.store.delete("games.meta." + gid)
         self.cache.purge(gid)

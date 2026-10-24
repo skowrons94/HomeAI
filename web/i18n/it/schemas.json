@@ -194,5 +194,9 @@
   "Timeout": "Timeout",
   "Results per provider and page": "Risultati per sito e pagina",
   "Notes": "Note",
-  "Shared notes and small checklists for the household": "Note condivise e piccole liste per la casa"
+  "Shared notes and small checklists for the household": "Note condivise e piccole liste per la casa",
+  "Install new games on the Steam Deck automatically": "Installa automaticamente i nuovi giochi sullo Steam Deck",
+  "When a download finishes and the game shows up in the library, send it to the Deck (retried until the Deck is awake and online).": "Quando un download finisce e il gioco compare in libreria, invialo al Deck (si riprova finché il Deck è acceso e online).",
+  "Install location on the Deck": "Dove installare sul Deck",
+  "Folder on the Deck where PC games are installed. Empty = internal storage (~/Games). Choose it from the list in Games settings; needs agent 1.2 or newer.": "Cartella sul Deck dove installare i giochi PC. Vuoto = memoria interna (~/Games). Sceglila dall'elenco nelle impostazioni Giochi; serve l'agent 1.2 o più recente."
 }
