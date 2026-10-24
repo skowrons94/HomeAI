@@ -715,6 +715,239 @@ def test_agent_writes_art_into_steam_grid():
         assert {v["appid"] for v in vdf["shortcuts"].values()} >= {appid}
 
 
+# -- discover (fake HTTP, no network) ------------------------------------------------------------
+
+class FakeResp:
+    def __init__(self, status, data):
+        self.status, self.data = status, data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def json(self, content_type=None):
+        return self.data
+
+
+class FakeSession:
+    """session.get(url, params=…) answered from {url fragment: (status, json) | Exception}."""
+    def __init__(self, routes):
+        self.routes, self.calls = routes, []
+
+    def get(self, url, params=None, **kw):
+        self.calls.append(url)
+        for frag, ans in self.routes.items():
+            if frag in url:
+                if isinstance(ans, Exception):
+                    raise ans
+                return FakeResp(*ans)
+        raise AssertionError("unexpected url " + url)
+
+
+def _fi(i, name, **kw):
+    return {"id": i, "type": 0, "name": name, "discount_percent": 0, "original_price": None, "final_price": 1999,
+            "currency": "EUR", "header_image": "https://shared.akamai.steamstatic.com/x/%d.jpg" % i, **kw}
+
+
+FEATURED = {"top_sellers": {"items": [_fi(1, "Celeste®"), {"id": 2, "type": 4, "name": "Tool"},
+                                      _fi(3, "Hades", discount_percent=50, original_price=2999, final_price=1500)]},
+            "new_releases": {"items": [_fi(4, "New One")]}, "specials": {"items": []},
+            "coming_soon": {"items": [_fi(5, "Later", header_image="http://evil.example/x.jpg")]}, "status": 1}
+RANKS = {"response": {"ranks": [{"rank": 1, "appid": 730}, {"rank": 2, "appid": 3}, {"rank": 3, "appid": 999}]}}
+ITEMS = {"response": {"store_items": [
+    {"appid": 730, "name": "Counter-Strike 2", "type": 0, "is_free": True,
+     "reviews": {"summary_filtered": {"percent_positive": 85, "review_count": 900}}, "release": {"steam_release_date": 1346000000}},
+    {"appid": 3, "name": "Hades", "type": 0, "reviews": {"summary_filtered": {"percent_positive": 97, "review_count": 5}}},
+    {"appid": 1, "name": "Celeste", "type": 0, "reviews": {"summary_filtered": {"percent_positive": 90, "review_count": 50}}},
+]}}
+DETAIL = {"1": {"success": True, "data": {
+    "name": "Celeste", "short_description": "Climb <b>the</b> mountain &amp; more<br>line2<script>alert(1)</script>",
+    "genres": [{"description": "Platformer"}], "developers": ["Maddy"], "publishers": ["Maddy"],
+    "metacritic": {"score": 92}, "release_date": {"coming_soon": False, "date": "25 gen 2018"},
+    "price_overview": {"final": 1999, "initial": 1999, "discount_percent": 0, "currency": "EUR"},
+    "header_image": "https://shared.akamai.steamstatic.com/h.jpg", "background_raw": "javascript:alert(1)",
+    "screenshots": [{"path_thumbnail": "https://shared.akamai.steamstatic.com/t.jpg", "path_full": "https://evil.example/f.jpg"}],
+    "movies": [{"thumbnail": "https://shared.akamai.steamstatic.com/m.jpg", "mp4": {"480": "https://video.akamai.steamstatic.com/a.mp4"}}]}}}
+
+
+def _routes(**over):
+    r = {"featuredcategories": (200, FEATURED), "GetMostPlayedGames": (200, RANKS), "GetItems": (200, ITEMS),
+         "appdetails": (200, DETAIL), "steamspy": (200, {})}
+    r.update(over)
+    return r
+
+
+def _disc(routes, lib=None, clock=None):
+    from hub.plugins.games.discover import Discover
+    kw = {"clock": clock} if clock else {}
+    return Discover(FakeSession(routes), None, lambda: lib or {}, lambda: "it", **kw)
+
+
+def test_discover_rails_parse_flag_and_cache():
+    async def go():
+        d = _disc(_routes(), {"celeste": {"pc"}, "hades": {"snes"}})
+        r = await d.rails("steam")
+        assert r["errors"] == [] and r["igdb"] is False
+        rails = {x["key"]: x["items"] for x in r["rails"]}
+        assert [x["key"] for x in r["rails"]] == ["top_sellers", "most_played", "new_releases", "coming_soon"]  # empty specials dropped
+        top = rails["top_sellers"]
+        assert [i["title"] for i in top] == ["Celeste®", "Hades"]            # type 4 (software) filtered out
+        assert top[0]["in_library"] is True and top[1]["in_library"] is False   # Hades is only on SNES in the library
+        assert top[0]["price"] == "19,99€" and top[1]["discount"] == 50 and top[1]["was"] == "29,99€"
+        assert top[0]["rating"] == 90 and top[1]["rating"] is None             # < 10 reviews: no score
+        assert top[0]["cover"].endswith("/1/library_600x900.jpg")
+        assert rails["coming_soon"][0]["image"].endswith("/5/header.jpg")      # untrusted host replaced
+        mp = rails["most_played"]
+        assert [i["title"] for i in mp] == ["Counter-Strike 2", "Hades"] and mp[0]["free"] and mp[0]["year"] == "2012"
+        n = len(d.session.calls)
+        await d.rails("steam")
+        assert len(d.session.calls) == n                                        # served from cache
+        await d.rails("steam", refresh=True)
+        assert len(d.session.calls) > n
+        assert (await d.rails("igdb")) == {"rails": [], "errors": [], "igdb": False}
+    asyncio.run(go())
+
+
+def test_discover_partial_failures_and_fallbacks():
+    import aiohttp
+
+    async def go():
+        # charts down: the other rails still arrive, one error for most_played
+        d = _disc(_routes(GetMostPlayedGames=(500, {})))
+        r = await d.rails("steam")
+        assert [x["key"] for x in r["rails"]] == ["top_sellers", "new_releases", "coming_soon"]
+        assert [e["rail"] for e in r["errors"]] == ["most_played"] and "500" in r["errors"][0]["error"]
+        # featured down + network error: four errors, most_played still works
+        d = _disc(_routes(featuredcategories=aiohttp.ClientError("boom")))
+        r = await d.rails("steam")
+        assert [x["key"] for x in r["rails"]] == ["most_played"]
+        assert sorted(e["rail"] for e in r["errors"]) == ["coming_soon", "new_releases", "specials", "top_sellers"]
+        # GetItems down: names come from SteamSpy
+        spy = {"730": {"name": "Counter-Strike 2", "price": "0"}, "570": {"name": "Dota 2", "price": "0"}}
+        d = _disc(_routes(GetItems=(503, {}), steamspy=(200, spy)))
+        r = await d.rails("steam")
+        mp = next(x for x in r["rails"] if x["key"] == "most_played")["items"]
+        assert [i["title"] for i in mp][0] == "Counter-Strike 2" and len(mp) == 2
+        # everything down: no exception, errors only
+        d = _disc({"store.steampowered": (500, {}), "api.steampowered": (429, {}), "steamspy": (500, {})})
+        r = await d.rails("all")
+        assert r["rails"] == [] and len(r["errors"]) == 5
+    asyncio.run(go())
+
+
+def test_discover_stale_cache_survives_an_outage_and_expires():
+    async def go():
+        now = [0.0]
+        routes = _routes()
+        d = _disc(routes, clock=lambda: now[0])
+        assert (await d.rails("steam"))["errors"] == []
+        calls = len(d.session.calls)
+        now[0] += 3600
+        await d.rails("steam")
+        assert len(d.session.calls) == calls                                    # still fresh after 1 h
+        now[0] += 4 * 3600
+        routes["featuredcategories"] = (500, {})                                # expired, and Steam is down
+        r = await d.rails("steam")
+        assert len(d.session.calls) > calls and r["errors"] == [] and len(r["rails"]) == 4   # stale data beats an error
+    asyncio.run(go())
+
+
+def test_discover_cache_is_bounded():
+    from hub.plugins.games.discover import Cache
+    now = [0]
+    c = Cache(3, lambda: now[0])
+    for i in range(6):
+        now[0] += 1
+        c.put(i, i, 100)
+    assert len(c.data) == 3 and c.get(5) == 5 and c.get(0) is None
+    now[0] += 1000
+    assert c.get(5) is None and c.get(5, stale=True) == 5
+
+
+def test_discover_detail_validation_and_sanitising():
+    from hub.plugins.games import discover as D
+
+    async def go():
+        d = _disc(_routes(), {"celeste": {"pc"}})
+        x = await d.detail("steam", "1")
+        assert x["title"] == "Celeste" and x["in_library"] is True and x["metacritic"] == 92 and x["year"] == "2018"
+        assert x["summary"] == "Climb the mountain & more\nline2"              # tags stripped, entities decoded, script dropped
+        assert x["hero"] is None                                                # javascript: URL rejected
+        assert x["screenshots"] == [{"thumb": "https://shared.akamai.steamstatic.com/t.jpg",
+                                     "full": "https://shared.akamai.steamstatic.com/t.jpg"}]
+        assert x["trailer"]["mp4"].endswith("a.mp4") and x["genres"] == ["Platformer"] and x["price"] == "19,99€"
+        before = len(d.session.calls)
+        await d.detail("steam", "1")
+        assert len(d.session.calls) == before                                    # cached
+        for bad in ("", "abc", "1;2", "-1", "1 2", "12345678901", "١٢", "../x"):
+            try:
+                await d.detail("steam", bad)
+                raise AssertionError("accepted %r" % bad)
+            except ValueError:
+                pass
+        for src in ("gog", "", "STEAM"):
+            try:
+                await d.detail(src, "1")
+                raise AssertionError("accepted source %r" % src)
+            except ValueError:
+                pass
+        try:
+            await d.detail("igdb", "5")                                          # no IGDB keys
+            raise AssertionError("igdb without keys")
+        except ValueError:
+            pass
+        d2 = _disc(_routes(appdetails=(200, {"7": {"success": False}})))
+        try:
+            await d2.detail("steam", "7")
+            raise AssertionError("missing game")
+        except KeyError:
+            pass
+    asyncio.run(go())
+    assert D.valid_id("730") and not D.valid_id(730) and not D.valid_id("7.3")
+    assert D.strip_html("<p>a</p><p>b &lt;i&gt;</p>") == "a\n\nb <i>"
+    assert D.safe_url("https://cdn.akamai.steamstatic.com/a.jpg") and not D.safe_url("http://store.steampowered.com/a.jpg") \
+        and not D.safe_url("https://steampowered.com.evil.io/a.jpg") and not D.safe_url(5)
+    assert D.norm_title("Celeste™ v1.4 [Repack]") == D.norm_title("CELESTE")
+
+
+def test_discover_igdb_rails_degrade_silently():
+    from hub.plugins.games import discover as D
+
+    class Meta:
+        igdb = True
+
+        def __init__(self):
+            self.asked = []
+
+        async def _igdb(self, body, endpoint="games"):
+            self.asked.append((endpoint, body))
+            if endpoint == "popularity_primitives":
+                raise D.MetaError("IGDB answered HTTP 403")
+            if "total_rating_count > 200" in body:
+                return [{"id": 9, "name": "Celeste", "slug": "celeste", "total_rating": 87.6, "total_rating_count": 900,
+                         "cover": {"image_id": "co1"}, "first_release_date": 1516924800}]
+            if "hypes" in body:
+                return []
+            if "platforms = (130)" in body:
+                return [{"id": 10, "name": "Hades", "total_rating": 93, "total_rating_count": 100, "cover": {"image_id": "co2"}}]
+            raise D.MetaError("IGDB unreachable: x")
+
+    async def go():
+        m = Meta()
+        d = D.Discover(FakeSession({}), m, lambda: {"celeste": {"pc"}, "mario": {"gba"}}, lambda: "it")
+        r = await d.rails("igdb")
+        keys = {x["key"]: x for x in r["rails"]}
+        assert set(keys) == {"top_rated", "platform:switch"}                       # popular failed, coming_soon empty, others errored
+        assert keys["top_rated"]["items"][0]["in_library"] is True and keys["top_rated"]["items"][0]["rating"] == 88
+        assert keys["top_rated"]["items"][0]["cover"].endswith("t_cover_big/co1.jpg")
+        assert keys["platform:switch"]["label"] == "Nintendo Switch" and keys["platform:switch"]["items"][0]["platform"] == "switch"
+        assert {e["rail"] for e in r["errors"]} == {"popular", "platform:ps2", "platform:gba", "platform:snes"}
+        assert d.platform_rails() == ["switch", "ps2", "gba", "snes"]
+    asyncio.run(go())
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -7,7 +7,7 @@
 
 /* tabs */
 .gm-seg { display: flex; width: 100%; margin-bottom: 14px; }
-.gm-seg button { flex: 1; min-height: 44px; position: relative; font-size: 15px; gap: 8px; }
+.gm-seg button { flex: 1; min-width: 0; min-height: 44px; position: relative; font-size: 15px; gap: 8px; padding-left: 8px; padding-right: 8px; }
 .gm-nbadge { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px; background: var(--accent);
   color: var(--accent-text); font-size: 12px; display: inline-grid; place-items: center; }
 
@@ -182,3 +182,78 @@
 .gm-shot img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .gm-shot button { position: absolute; top: calc(12px + env(safe-area-inset-top)); right: 12px; background: rgb(255 255 255 / .18); color: #fff; }
 .gm [hidden] { display: none !important; }
+
+/* ---- discover ---------------------------------------------------------------------------------- */
+.gm-railsec { margin-bottom: 6px; min-width: 0; }
+.gm-rh { margin: 16px 0 8px; font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+.gm-rail { display: grid; grid-auto-flow: column; grid-auto-columns: 132px; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain;
+  padding: 2px 2px 10px; scroll-snap-type: x proximity; scrollbar-width: thin; max-width: 100%; }
+.gm-rail > * { scroll-snap-align: start; }
+@media (max-width: 760px) { .gm-rail { grid-auto-columns: 112px; gap: 10px; scrollbar-width: none; } .gm-rail::-webkit-scrollbar { display: none; } }
+@media (min-width: 1000px) { .gm-rail { grid-auto-columns: 150px; gap: 14px; } }
+.gm-dtile .gm-title { min-height: 2.5em; }
+.gm-dtile .gm-art { transition: transform .15s, box-shadow .15s; }
+@media (hover: hover) { .gm-dtile:hover .gm-art { transform: translateY(-2px); } }
+
+/* art box: gradient + initials underneath, the image fades in on top */
+.gm-cv { position: absolute; inset: 0; overflow: hidden; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(160deg, hsl(var(--gh) 55% 44%), hsl(calc(var(--gh) + 45) 55% 26%)); color: #fff; }
+.gm-cv .gm-init { font-size: 34px; }
+.gm-cv > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .25s; }
+.gm-cv > img.in { opacity: 1; }
+.gm-cv > img.bg { filter: blur(14px) saturate(1.2); transform: scale(1.5); opacity: .9; }
+.gm-cv.land > img:not(.bg) { object-fit: contain; height: auto; top: 50%; inset: auto 0; transform: translateY(-50%); }
+.gm-cv.land .gm-init { display: none; }
+.gm-cv.big { position: relative; inset: auto; width: 36%; max-width: 150px; aspect-ratio: 2 / 3; border-radius: 12px; flex: none;
+  box-shadow: 0 10px 30px rgb(0 0 0 / .35); }
+
+.gm-badges { position: absolute; top: 6px; left: 6px; right: 6px; display: flex; gap: 4px; justify-content: space-between; align-items: flex-start; pointer-events: none; }
+.gm-b { min-height: 22px; border-radius: 99px; display: inline-flex; align-items: center; justify-content: center; color: #fff;
+  font-size: 11px; font-weight: 800; padding: 0 7px; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.gm-b.lib { width: 24px; height: 24px; padding: 0; background: rgb(48 184 90 / .92); }
+.gm-b.lib svg.i { width: 14px; height: 14px; stroke-width: 3; }
+.gm-b.disc { background: rgb(229 72 77 / .94); margin-left: auto; }
+.gm-score { position: absolute; bottom: 6px; left: 6px; display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 700;
+  color: #fff; background: rgb(0 0 0 / .65); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); padding: 2px 6px; border-radius: 6px; }
+.gm-score svg.i { width: 10px; height: 10px; fill: #f5b301; stroke: #f5b301; }
+.gm-price { color: var(--text); font-weight: 700; }
+.gm-meta s { opacity: .7; margin-left: 6px; }
+
+/* skeletons */
+.gm-skel { pointer-events: none; }
+.gm-skel .gm-art, .gm-sl { background: var(--surface-2); animation: gm-pulse 1.4s ease-in-out infinite; }
+.gm-sl { height: 13px; border-radius: 6px; margin-top: 8px; width: 85%; }
+.gm-sl.s { height: 11px; width: 45%; margin-top: 4px; }
+.gm-sl.h { display: block; width: 140px; height: 20px; margin: 0; }
+.gm-rh.gm-skel { margin: 16px 0 8px; }
+.gm-dsheet .gm-skel { display: flex; flex-direction: column; }
+@media (prefers-reduced-motion: reduce) { .gm-skel .gm-art, .gm-sl { animation: none; } }
+
+/* compact inline errors: one slim row, never a big card */
+.gm-rerr { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 6px 8px 6px 14px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bad) 9%, var(--surface)); color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.gm-rerr svg.i { flex: none; width: 16px; height: 16px; color: var(--bad); }
+.gm-rerr > span { flex: 1; min-width: 0; }
+.gm-rerr button { flex: none; min-height: 44px; }
+.gm-dsheet .gm-rerr { margin: 6px 0; }
+.gm-slim.err { color: var(--bad); background: color-mix(in srgb, var(--bad) 9%, var(--surface)); }
+.gm-slim.err svg.i { color: var(--bad); }
+.gm-ico.bad { color: var(--bad); }
+.gm-wrap { overflow-wrap: anywhere; }
+.gm-warn.sm { margin: 0 0 8px; }
+.gm-disc { min-height: 60vh; }
+.gm-disc > .gm-slim { margin: 14px 0 0; text-align: left; }
+
+/* discover detail sheet */
+.gm-pricebox { display: flex; align-items: center; gap: 10px; font-size: 18px; }
+.gm-pricebox s { color: var(--muted); font-size: 14px; }
+.gm-pricebox .gm-b { min-height: 26px; font-size: 13px; margin: 0; }
+.gm-trailer { border-radius: var(--radius-sm); overflow: hidden; background: #000; }
+.gm-video { display: block; width: 100%; max-height: 240px; background: #000; }
+.gm-trailer-link, .gm-ext { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 0 16px; white-space: normal; text-align: center; text-decoration: none; }
+.gm-trailer-link { align-self: flex-start; background: var(--surface-2); color: var(--text); border-radius: var(--radius-sm); }
+.gm-ext { flex: 1 1 140px; background: var(--surface-2); color: var(--text); border-radius: var(--radius-sm); }
+.gm-trailer-link svg.i, .gm-ext svg.i { width: 18px; height: 18px; flex: none; }
+.gm-chips-in .chip { max-width: 100%; }
+.gm-chips-in .chip svg.i { width: 12px; height: 12px; }

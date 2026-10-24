@@ -29,6 +29,7 @@ from ...i18n import _
 from ...settings import get_path
 from . import find as findmod
 from . import outputs as outmod
+from .discover import Discover
 from .find import Finder
 from .musicbrainz import MBID, MetaError, MusicBrainz, find_owned
 from .player import Player
@@ -81,6 +82,7 @@ class MusicPlugin(Plugin):
         self.tmp = data_dir / "music-tmp"
         shutil.rmtree(self.tmp, ignore_errors=True)
         self.tmp.mkdir(parents=True, exist_ok=True)
+        self.disc = Discover(lambda: self.session, self.owned)
         self.finder = Finder(self)
         self.players: dict[str, Player] = {}
         self.outs: dict[str, dict] = {}            # discovered devices by id
@@ -293,6 +295,10 @@ class MusicPlugin(Plugin):
                 g("/cover/{id}", self.r_cover), g("/stream/{id}", self.r_stream),
                 g("/mb/search", self.r_mb_search), g("/mb/discography/{mbid}", self.r_mb_disco),
                 g("/mb/tracks/{mbid}", self.r_mb_tracks), g("/mbcover/{mbid}", self.r_mb_cover),
+                g("/discover", self.r_discover), g("/discover/genres", self.r_disc_genres),
+                g("/discover/genre/{id}", self.r_disc_genre), g("/discover/album/{id}", self.r_disc_album),
+                g("/discover/artist/{id}", self.r_disc_artist), g("/discover/search", self.r_disc_search),
+                g("/discover/resolve", self.r_disc_resolve),
                 g("/find", self.r_find), p("/download", self.r_download), g("/downloads", self.r_downloads),
                 d("/downloads/{hash}", self.r_cancel),
                 g("/outputs", self.r_outputs), p("/outputs/scan", self.r_outputs_scan),
@@ -425,6 +431,30 @@ class MusicPlugin(Plugin):
         if f is None:
             raise KeyError(_("No cover"))
         return web.FileResponse(f, headers={"Cache-Control": "max-age=604800"})
+
+    # -- Discover (Deezer charts, Apple Music top Italia)
+    async def r_discover(self, request):
+        keys = [k for k in request.query.get("rails", "").split(",") if k]
+        return _json(await self.disc.rails(keys))
+
+    async def r_disc_genres(self, request):
+        return _json({"genres": await self.disc.genres()})
+
+    async def r_disc_genre(self, request):
+        return _json({"albums": await self.disc.genre_albums(request.match_info["id"])})
+
+    async def r_disc_album(self, request):
+        return _json(await self.disc.album(request.match_info["id"]))
+
+    async def r_disc_artist(self, request):
+        return _json(await self.disc.artist(request.match_info["id"]))
+
+    async def r_disc_search(self, request):
+        return _json(await self.disc.search(request.query.get("q", "")))
+
+    async def r_disc_resolve(self, request):
+        q = request.query
+        return _json({"id": await self.disc.resolve(q.get("artist", ""), q.get("title", ""))})
 
     # -- find + download
     async def r_find(self, request):

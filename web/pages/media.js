@@ -1,6 +1,6 @@
 // Media: discover, search, favourites, downloads, library (hub/plugins/media).
 // Routes: #/media[/discover|watchlist|downloads|library|search/<q>|movie/<id>|series/<id>]
-import { t, api, h, icon, toast, sheet, ensureCss, act, debounce, fmt, bus, go, hasPlugin } from "../app.js";
+import { t, api, h, icon, toast, sheet, ensureCss, act, debounce, fmt, bus, go, hasPlugin, errorCard, reload } from "../app.js";
 
 const P = (path, opts) => api(`p/media/${path}`, opts);
 const FLAG = { it: "🇮🇹", en: "🇬🇧", fr: "🇫🇷", es: "🇪🇸", de: "🇩🇪", ru: "🇷🇺", uk: "🇺🇦", ko: "🇰🇷",
@@ -36,9 +36,9 @@ export default {
     if (view === "movie" || view === "series") {
       try { await renderDetail(root, view, rest.join("/"), on); }
       catch (e) {
-        toast(t("Couldn't load details: {error}", { error: e.message }), true);
-        fill(root, h("button", { onclick: () => go("#/media") }, icon("left"), t("Back")),
-             h("div.empty", e.message));
+        fill(root, errorCard(e.message, { title: t("Couldn't load details"),
+          back: () => history.length > 1 ? history.back() : go("#/media"),
+          retry: reload }));
       }
       return cleanup;
     }
@@ -199,7 +199,8 @@ async function renderDiscover(el, kind, genre) {
     const lib = Promise.all(["movies", "series"].map((k) => P(`library?kind=${k}`).then((r) =>
       r.items.filter((x) => x.poster && x.meta_id).map((x) => ({ ...x, type: k === "movies" ? "movie" : "series", id: x.meta_id }))).catch(() => [])));
     let d;
-    try { d = await P("discover"); } catch (e) { toast(e.message, true); d = { sections: [] }; }
+    let err = null;
+    try { d = await P("discover"); } catch (e) { err = e; d = { sections: [] }; }
     const mineLib = (await lib).flat().sort((a, b) => (b.mtime || 0) - (a.mtime || 0)).slice(0, 20);
     if (mine !== token) return;
     const by = (...keys) => keys.map((k) => d.sections.find((s) => s.key === k)).find((s) => s && withImage(s.items).length);
@@ -213,12 +214,13 @@ async function renderDiscover(el, kind, genre) {
       h("div.section", h("h2", s.title)),
       h("div.m-row", withImage(s.items).map((it) => poster(it))),
     ]).flat());
-    if (!secs.length) fill(out, h("div.empty", t("Couldn't reach the movie database.")));
+    if (!secs.length) fill(out, errorCard(err?.message, { title: t("Couldn't reach the movie database."),
+                                                          retry: show }));
   }
   async function start() {
     genres = [];
     paintChips();
-    try { genres = (await P(`genres?type=${kind}`)).genres; } catch (e) { toast(t("Genres unavailable: {error}", { error: e.message }), true); }
+    try { genres = (await P(`genres?type=${kind}`)).genres; } catch { genres = []; }   // no chips; the rails say why
     if (genre && !genres.some((g) => g.id === genre)) genre = "";
     paintChips();
     await show();

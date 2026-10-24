@@ -1,8 +1,10 @@
 // Games: what is on the NAS, what is on the Steam Deck, one tap to install, and a way to find more
 // (hub/plugins/games/). Route: #/games.
-// Two tabs: Library (browse, detail sheet, install) and Find (torrent search that downloads into the
+// Three tabs: Library (browse, detail sheet, install), Discover (rails of popular / new / on-sale games,
+// no API key needed; hub/plugins/games/discover.py) and Find (torrent search that downloads into the
 // games folder, plus the downloads in progress). The gear opens the settings sheet.
 // Polling: 2 s while something installs, 3 s while a download is active on the Find tab, else 30 s.
+// A failed poll never toasts: it leaves a small inline note that goes away by itself.
 import { api, h, icon, toast, ensureCss, act, fmt, t, sheet } from "../app.js";
 
 const P = (path, opts) => api(`p/games/${path}`, opts);
@@ -12,6 +14,7 @@ const SORTS = () => [["az", t("A–Z")], ["new", t("Recently added")], ["size", 
 
 let data = { games: [], problems: [], deck: {}, systems: [] };
 let loaded = false;
+let libError = "";      // last library refresh failure (inline note), "" when fine
 // filter: "all" | "installed" | "update" | "p:<platform>"
 let view = { tab: "library", filter: "all", sort: "az", fplat: "pc" };
 let query = "";
@@ -20,8 +23,11 @@ let timer = null;
 let openId = null;      // game whose detail sheet is open
 let detail = null;      // {el, close, sig}
 const els = {};
+// discover: rails come from two independent requests (steam: no key, igdb: only with keys)
+const dx = { rails: { steam: [], igdb: [] }, errors: { steam: [], igdb: [] }, done: { steam: false, igdb: false },
+  igdb: false, at: 0, seq: 0 };
 const fx = { platforms: [], q: "", results: [], providers: [], page: 1, more: false, error: "", off: false,
-  loading: false, searched: false, downloads: [], seen: new Map() };
+  loading: false, searched: false, downloads: [], dlError: "", seen: new Map() };
 
 try { view = { ...view, ...JSON.parse(localStorage.getItem(KEY) || "{}") }; } catch { /* private mode */ }
 const saveView = () => { try { localStorage.setItem(KEY, JSON.stringify(view)); } catch { /* ignore */ } };
@@ -34,9 +40,14 @@ const year = (g) => (g.meta?.released || "").slice(0, 4);
 
 // ---- data ---------------------------------------------------------------------------------
 
-async function loadLibrary(path = "library", opts) {
-  try { data = await P(path, opts); loaded = true; }
-  catch (e) { if (root?.isConnected) toast(e.message, true); loaded = true; }
+async function loadLibrary(path = "library", opts, quiet = false) {
+  try { data = await P(path, opts); libError = ""; }
+  catch (e) {
+    libError = e.message || t("Something went wrong");
+    // polling never toasts (it would repeat every few seconds): the inline note is enough
+    if (!quiet && root?.isConnected && loaded) toast(libError, true);
+  }
+  loaded = true;
   drawLibrary();
 }
 
@@ -44,7 +55,8 @@ async function loadDownloads() {
   try {
     const list = await P("find/downloads");
     fx.downloads = Array.isArray(list) ? list : (list?.downloads || []);
-  } catch { fx.downloads = []; }
+    fx.dlError = "";
+  } catch (e) { fx.dlError = e.message || t("Something went wrong"); }   // keep the list we had: no flicker
   // a download that just finished adds a game to the library: rescan comes from the hub, we reload
   let finished = false;
   for (const d of fx.downloads) {
@@ -65,8 +77,8 @@ function schedule() {
 
 async function tick() {
   if (!root?.isConnected) return;
-  const [, finished] = await Promise.all([loadLibrary(), loadDownloads()]);
-  if (finished) await loadLibrary();
+  const [, finished] = await Promise.all([loadLibrary("library", undefined, true), loadDownloads()]);
+  if (finished) await loadLibrary("library", undefined, true);
   schedule();
 }
 
@@ -84,9 +96,12 @@ const initials = (title) => {
 };
 
 function cover(g, cls = "") {
-  if (g.cover) return h(`img.gm-cover${cls}`, { src: `/api/p/games/cover/${encodeURIComponent(g.id)}`, loading: "lazy", alt: "" });
-  return h(`div.gm-cover.none${cls}`, { style: `--gh:${hue(g.platform || g.system || g.kind)}` },
+  const ph = () => h(`div.gm-cover.none${cls}`, { style: `--gh:${hue(g.platform || g.system || g.kind)}` },
     h("span.gm-init", initials(gtitle(g))), h("span.gm-sys", platName(g.platform || "pc")));
+  if (!g.cover) return ph();
+  const img = h(`img.gm-cover${cls}`, { src: `/api/p/games/cover/${encodeURIComponent(g.id)}`, loading: "lazy", alt: "" });
+  img.addEventListener("error", () => img.replaceWith(ph()), { once: true });   // no broken-image icon
+  return img;
 }
 
 function ring(p) {
@@ -183,9 +198,10 @@ function summary(text) {
 
 function hero(g) {
   const m = g.meta;
+  const none = () => h("div.gm-hero-img.none", { style: `--gh:${hue(g.platform || g.system || g.kind)}` });
   const bg = m?.has_hero ? h("img.gm-hero-img", { src: `/api/p/games/hero/${encodeURIComponent(g.id)}`, alt: "" })
-    : g.cover ? h("img.gm-hero-img.blur", { src: `/api/p/games/cover/${encodeURIComponent(g.id)}`, alt: "" })
-      : h("div.gm-hero-img.none", { style: `--gh:${hue(g.platform || g.system || g.kind)}` });
+    : g.cover ? h("img.gm-hero-img.blur", { src: `/api/p/games/cover/${encodeURIComponent(g.id)}`, alt: "" }) : none();
+  if (bg.tagName === "IMG") bg.addEventListener("error", () => bg.replaceWith(none()), { once: true });
   return h("div.gm-hero", bg);
 }
 
@@ -209,8 +225,7 @@ function detailBody(g) {
     g.state === "needs_manual" ? h("div.gm-banner", t("This is an installer: it was downloaded to the Deck but you must run it there (Desktop Mode, with Proton).")) : null,
     g.note && g.note !== g.message ? h("div.gm-note", g.note) : null,
     m?.summary ? summary(m.summary) : null,
-    shots.length ? h("div.gm-shots", shots.map((u) => h("button.gm-shotbtn", { onclick: () => viewShot(u), "aria-label": t("Screenshot") },
-      h("img", { src: u, loading: "lazy", alt: "" })))) : null,
+    shots.length ? shotStrip(shots.map((u) => ({ thumb: u, full: u }))) : null,
     actions(g),
     h("div.gm-kvs",
       row(t("Version"), g.version ? `v${g.version}` : ""),
@@ -253,7 +268,7 @@ function fixMatch(g) {
     const q = input.value.trim();
     if (q.length < 2) return;
     list.replaceChildren(h("div.empty", h("span.spin")));
-    msg.textContent = "";
+    msg.textContent = ""; msg.className = "gm-note";
     try {
       const d = await P(`meta/search?q=${encodeURIComponent(q)}&platform=${encodeURIComponent(g.platform || "")}`);
       const rs = d.results || [];
@@ -264,7 +279,7 @@ function fixMatch(g) {
       }, e.currentTarget) },
       r.cover_url ? h("img", { src: r.cover_url, loading: "lazy", alt: "" }) : h("div.gm-pick-ph", initials(r.title)),
       h("span.gm-pick-t", h("b", r.title), h("span.gm-meta", [r.year, (r.platforms || []).slice(0, 3).join(", ")].filter(Boolean).join(" · "))))));
-    } catch (e) { list.replaceChildren(); msg.textContent = e.message; }
+    } catch (e) { list.replaceChildren(); msg.className = "gm-note err"; msg.textContent = e.message; }
   };
   const s = sheet(t("Fix match"), [
     h("div.gm-note", t("Search the game as it is called in the database, then pick the right one.")),
@@ -272,6 +287,246 @@ function fixMatch(g) {
       h("button.primary", { type: "submit" }, icon("search"), t("Search"))),
     msg, list]);
   search();
+}
+
+// ---- discover tab -------------------------------------------------------------------------
+
+const RAIL_ORDER = ["popular", "top_sellers", "most_played", "new_releases", "specials", "top_rated", "coming_soon"];
+const RAIL_TITLE = () => ({
+  popular: t("Popular right now"), top_sellers: t("Top sellers on Steam"), most_played: t("Most played now"),
+  new_releases: t("New releases"), specials: t("On sale"), top_rated: t("Top rated"), coming_soon: t("Coming soon"),
+});
+const railTitle = (r) => r.key.startsWith("platform:") ? t("Best on {platform}", { platform: r.label || r.platform })
+  : (RAIL_TITLE()[r.key] || r.key);
+const railRank = (r) => {
+  const i = RAIL_ORDER.indexOf(r.key.replace(/^platform:.*/, "~"));
+  return r.key.startsWith("platform:") ? 50 : (i < 0 ? 99 : i) + (r.source === "igdb" && r.key === "coming_soon" ? 0.5 : 0);
+};
+const errTitle = (key) => key.startsWith("platform:") ? t("Best on {platform}", { platform: key.slice(9).toUpperCase() })
+  : (RAIL_TITLE()[key] || key);
+
+/** Cover art that never shows a broken-image icon: gradient + initials underneath, the portrait fades in
+ *  over it, a failed portrait falls back to the landscape header (blurred backdrop), then to the gradient. */
+function artImg(it, cls = "") {
+  const box = h(`div.gm-cv${cls}`, { style: `--gh:${hue(it.title)}` }, h("span.gm-init", initials(it.title || "?")));
+  const stages = [it.cover, it.image].filter(Boolean);
+  const load = () => {
+    const src = stages.shift();
+    if (!src) return;
+    const wide = src === it.image && it.cover !== it.image;
+    const img = h("img", { src, alt: "", loading: "lazy", decoding: "async", referrerpolicy: "no-referrer" });
+    img.addEventListener("load", () => { img.classList.add("in"); if (wide) box.classList.add("land"); }, { once: true });
+    img.addEventListener("error", () => { img.remove(); load(); }, { once: true });
+    if (wide) box.append(h("img.bg", { src, alt: "", "aria-hidden": "true", referrerpolicy: "no-referrer" }));
+    box.append(img);
+  };
+  load();
+  return box;
+}
+
+const score10 = (it) => it.rating != null ? fmt.num(it.rating / 10, 1) : "";
+
+function metaLine(it) {
+  if (it.discount && it.price) return h("div.gm-meta", h("b.gm-price", it.price), it.was ? h("s", it.was) : null);
+  if (it.free) return h("div.gm-meta", h("b.gm-price", t("Free to play")), it.year ? ` · ${it.year}` : "");
+  if (it.price) return h("div.gm-meta", h("b.gm-price", it.price), it.year ? ` · ${it.year}` : "");
+  return h("div.gm-meta", it.year || (it.platforms || []).slice(0, 2).join(", ") || " ");
+}
+
+function dcard(it) {
+  return h("button.gm-tile.gm-dtile", { onclick: () => openDiscover(it), "aria-label": it.title },
+    h("div.gm-art", artImg(it),
+      h("div.gm-badges",
+        it.in_library ? h("span.gm-b.lib", { title: t("In library") }, icon("check")) : h("span"),
+        it.discount ? h("span.gm-b.disc", `−${it.discount}%`) : null),
+      it.rating != null ? h("span.gm-score", icon("star"), score10(it)) : null),
+    h("div.gm-title", it.title),
+    metaLine(it));
+}
+
+const skelCards = (n = 5) => Array.from({ length: n }, () =>
+  h("div.gm-tile.gm-skel", h("div.gm-art"), h("div.gm-sl"), h("div.gm-sl.s")));
+const skelRail = () => h("section.gm-railsec", h("h2.gm-rh.gm-skel", h("span.gm-sl.h")), h("div.gm-rail", skelCards()));
+
+function railErr(title, msg, retry) {
+  return h("section.gm-railsec",
+    h("h2.gm-rh", title),
+    h("div.gm-rerr", icon("wifi"), h("span", msg || t("Couldn't load this list.")),
+      retry ? h("button.ghost", { onclick: retry }, t("Retry")) : null));
+}
+
+function drawDiscover() {
+  if (!els.dis) return;
+  const all = [...dx.rails.steam, ...dx.rails.igdb].sort((a, b) => railRank(a) - railRank(b));
+  const out = [];
+  for (const r of all) {
+    out.push(h("section.gm-railsec", h("h2.gm-rh", railTitle(r)), h("div.gm-rail", r.items.map(dcard))));
+  }
+  // rails that failed: grouped when many (all of Steam down = one note, not five)
+  const steamErrs = dx.errors.steam, igdbErrs = dx.errors.igdb;
+  if (steamErrs.length > 1 && !dx.rails.steam.length) {
+    out.push(railErr(t("Steam"), steamErrs[0].error, () => loadDiscover(true, "steam")));
+  } else for (const e of steamErrs) out.push(railErr(errTitle(e.rail), e.error, () => loadDiscover(true, "steam")));
+  if (igdbErrs.length > 1 && !dx.rails.igdb.length) {
+    out.push(railErr(t("IGDB"), igdbErrs[0].error, () => loadDiscover(true, "igdb")));
+  } else for (const e of igdbErrs) out.push(railErr(errTitle(e.rail), e.error, () => loadDiscover(true, "igdb")));
+  // skeletons only where nothing is on screen yet (a refresh keeps the old rails: no jump)
+  if (!dx.done.steam && !dx.rails.steam.length) out.unshift(skelRail(), skelRail());
+  if (!dx.done.igdb && !dx.rails.igdb.length && (data.metadata?.igdb || dx.igdb)) out.push(skelRail());
+  if (dx.done.steam && dx.done.igdb && !all.length && !steamErrs.length && !igdbErrs.length) {
+    out.push(h("div.gm-card.gm-center", h("div.gm-ico", icon("search")), h("b", t("Nothing to show yet")),
+      h("p.muted", t("Couldn't load the game lists. Check the internet connection and try again.")),
+      h("button.primary", { onclick: () => loadDiscover(true) }, t("Retry"))));
+  }
+  if (dx.done.igdb && !dx.igdb && data.metadata && !data.metadata.igdb)
+    out.push(h("button.gm-slim", { onclick: openSettings }, icon("settings"),
+      h("span", t("Add the free IGDB keys to see more lists: popular, top rated and the best games per console.")), icon("right")));
+  els.disBody.replaceChildren(...out);
+}
+
+let discoverSeq = 0;
+async function loadDiscover(refresh = false, only = "") {
+  const my = ++discoverSeq;
+  const sets = only ? [only] : ["steam", "igdb"];
+  for (const k of sets) { dx.done[k] = false; dx.errors[k] = []; }
+  drawDiscover();
+  await Promise.all(sets.map(async (k) => {
+    try {
+      const d = await P(`discover?set=${k}${refresh ? "&refresh=1" : ""}`);
+      if (my !== discoverSeq) return;
+      dx.rails[k] = d.rails || []; dx.errors[k] = d.errors || [];
+      if (k === "igdb") dx.igdb = !!d.igdb;
+    } catch (e) {
+      if (my !== discoverSeq) return;
+      dx.errors[k] = [{ rail: k === "steam" ? "top_sellers" : "popular", error: e.message }];
+      dx.rails[k] = [];
+    }
+    dx.done[k] = true;
+    drawDiscover();
+  }));
+  if (my === discoverSeq) dx.at = Date.now();
+}
+
+const ensureDiscover = () => {
+  if (!dx.at || Date.now() - dx.at > 30 * 60 * 1000) loadDiscover();
+};
+
+// ---- discover: detail sheet --------------------------------------------------------------
+
+const clean = (s) => String(s || "").replace(/[™®©]/g, "").replace(/\s+/g, " ").trim();
+
+function trackerSearch(it, platform) {
+  fx.q = clean(it.title);
+  view.fplat = platform || "pc";
+  saveView();
+  if (els.fq) els.fq.value = fx.q;
+  setTab("find");
+  drawPlat();
+  search(true);
+}
+
+function shotStrip(shots) {
+  return h("div.gm-shots", shots.map((s) => h("button.gm-shotbtn", { onclick: () => viewShot(s.full || s.thumb), "aria-label": t("Screenshot") },
+    (() => {
+      const img = h("img", { src: s.thumb, loading: "lazy", alt: "" });
+      img.addEventListener("error", () => img.closest(".gm-shotbtn")?.remove(), { once: true });
+      return img;
+    })())));
+}
+
+function trailer(tr, link) {
+  if (!tr) return null;
+  const v = document.createElement("video");
+  if (tr.mp4 || tr.webm) {
+    v.controls = true; v.preload = "none"; v.playsInline = true; v.className = "gm-video";
+    if (tr.thumb) v.poster = tr.thumb;
+    for (const [u, type] of [[tr.mp4, "video/mp4"], [tr.webm, "video/webm"]]) if (u) v.append(h("source", { src: u, type }));
+    return h("div.gm-trailer", v);
+  }
+  if (tr.hls && v.canPlayType("application/vnd.apple.mpegurl")) {
+    v.controls = true; v.preload = "none"; v.playsInline = true; v.className = "gm-video"; v.src = tr.hls;
+    if (tr.thumb) v.poster = tr.thumb;
+    return h("div.gm-trailer", v);
+  }
+  const href = tr.youtube || link;
+  return href ? h("a.btn.gm-trailer-link", { href, target: "_blank", rel: "noopener noreferrer" }, icon("play"), t("Watch the trailer")) : null;
+}
+
+function discoverBody(it, d, ctx) {
+  const plats = (d.search_platforms || []).length ? d.search_platforms : ["pc"];
+  const hero = d.hero || d.image;
+  const heroEl = hero ? h("img.gm-hero-img", { src: hero, alt: "", referrerpolicy: "no-referrer" })
+    : h("div.gm-hero-img.none", { style: `--gh:${hue(d.title)}` });
+  if (heroEl.tagName === "IMG") heroEl.addEventListener("error", () => heroEl.replaceWith(h("div.gm-hero-img.none", { style: `--gh:${hue(d.title)}` })), { once: true });
+  const sub = [d.year, (d.developers || [])[0]].filter(Boolean).join(" · ");
+  const platLabel = (k) => platName(k === "pc" ? "pc" : (fx.platforms.find((p) => p.key === k)?.label || k));
+  const platBox = h("div.gm-genres");
+  const paintPlats = () => platBox.replaceChildren(...plats.map((k) => chip(platLabel(k), null, ctx.plat === k, () => { ctx.plat = k; paintPlats(); })));
+  if (plats.length > 1) paintPlats();
+  const price = d.free ? t("Free to play") : d.price;
+  const link = d.url ? h("a.btn.gm-ext", { href: d.url, target: "_blank", rel: "noopener noreferrer" }, icon("link"),
+    d.source === "steam" ? t("Open on Steam") : t("Open on IGDB")) : null;
+  return [
+    h("div.gm-hero", heroEl),
+    h("div.gm-dhead", artImg(d, ".big"),
+      h("div.gm-dinfo", h("div.gm-dtitle", d.title),
+        sub ? h("div.gm-sub", sub) : null,
+        h("div.gm-chips-in",
+          d.in_library ? h("span.chip.ok", icon("check"), t("In library")) : null,
+          d.coming_soon ? h("span.chip.accent", t("Coming soon")) : null,
+          d.metacritic != null ? h("span.chip.gm-rate", "Metacritic", ` ${d.metacritic}`) : null,
+          d.rating != null ? h("span.chip.gm-rate", icon("star"), `${score10(d)}/10`) : null))),
+    (d.genres || []).length ? h("div.gm-genres", d.genres.map((x) => h("span.chip", x))) : null,
+    price || d.discount ? h("div.gm-pricebox",
+      d.discount ? h("span.gm-b.disc", `−${d.discount}%`) : null,
+      price ? h("b", price) : null, d.was ? h("s", d.was) : null) : null,
+    d.summary ? summary(d.summary) : null,
+    trailer(d.trailer, d.url),
+    (d.screenshots || []).length ? shotStrip(d.screenshots) : null,
+    plats.length > 1 ? h("div.gm-note", t("Search the trackers for:")) : null,
+    plats.length > 1 ? platBox : null,
+    h("div.gm-actions",
+      h("button.primary", { onclick: () => { ctx.close(); trackerSearch(d, ctx.plat); } }, icon("search"), t("Search the trackers")),
+      link),
+    h("div.gm-kvs",
+      row(t("Released"), d.released),
+      row(t("Developer"), (d.developers || []).join(", ")),
+      row(t("Publisher"), (d.publishers || []).filter((p) => !(d.developers || []).includes(p)).join(", ")),
+      row(t("Platforms"), d.source === "igdb" ? (it.platforms || []).join(", ") : "")),
+  ].filter(Boolean);
+}
+
+function openDiscover(it) {
+  const ctx = { plat: it.platform || "pc", close: () => s.close() };
+  const body = h("div.stack");
+  const s = sheet("", [body], { onClose: () => { ctx.gone = true; } });
+  s.el.parentElement.classList.add("gm-dsheet");
+  const skeleton = () => body.replaceChildren(
+    h("div.gm-hero", h("div.gm-hero-img.none", { style: `--gh:${hue(it.title)}` })),
+    h("div.gm-dhead", artImg(it, ".big"), h("div.gm-dinfo", h("div.gm-dtitle", it.title))),
+    h("div.gm-skel", h("div.gm-sl"), h("div.gm-sl"), h("div.gm-sl.s")));
+  const go = async () => {
+    skeleton();
+    try {
+      const d = await P(`discover/item/${encodeURIComponent(it.source)}/${encodeURIComponent(it.id)}?platform=${encodeURIComponent(it.platform || "")}`);
+      if (ctx.gone) return;
+      ctx.plat = d.platform || ctx.plat;
+      body.replaceChildren(...discoverBody(it, d, ctx));
+    } catch (e) {
+      if (ctx.gone) return;
+      // still useful without the details: the tracker search only needs the title
+      body.replaceChildren(
+        h("div.gm-hero", h("div.gm-hero-img.none", { style: `--gh:${hue(it.title)}` })),
+        h("div.gm-dhead", artImg(it, ".big"), h("div.gm-dinfo", h("div.gm-dtitle", it.title))),
+        h("div.gm-rerr", icon("wifi"), h("span", e.message || t("Couldn't load this list.")),
+          h("button.ghost", { onclick: go }, t("Retry"))),
+        h("div.gm-actions", h("button.primary", { onclick: () => { s.close(); trackerSearch(it, it.platform); } },
+          icon("search"), t("Search the trackers")),
+        it.url ? h("a.btn.gm-ext", { href: it.url, target: "_blank", rel: "noopener noreferrer" }, icon("link"),
+          it.source === "steam" ? t("Open on Steam") : t("Open on IGDB")) : null));
+    }
+  };
+  go();
 }
 
 // ---- find tab -----------------------------------------------------------------------------
@@ -393,7 +648,9 @@ function drawDownloads() {
   if (!els.dl) return;
   els.dl.replaceChildren(...(fx.downloads.length ? [
     h("h3.gm-section", t("In progress"), h("span.gm-count", fmt.num(fx.downloads.length))),
-    h("div.gm-card.gm-dls", fx.downloads.map(dlRow))] : []));
+    fx.dlError ? h("div.gm-warn.sm", icon("wifi"), h("span", t("Couldn't refresh the downloads: {error}", { error: fx.dlError }))) : null,
+    h("div.gm-card.gm-dls", fx.downloads.map(dlRow))].filter(Boolean)
+    : fx.dlError ? [h("div.gm-warn.sm", icon("wifi"), h("span", t("Couldn't refresh the downloads: {error}", { error: fx.dlError })))] : []));
 }
 
 // ---- settings sheet -----------------------------------------------------------------------
@@ -401,7 +658,8 @@ function drawDownloads() {
 async function openSettings() {
   ensureCss(`/static/pages/settings.css?v=${window.CASA_V}`);
   const { renderForm } = await import(`./settings.js?v=${window.CASA_V}`);
-  const all = await api("settings");
+  let all;
+  try { all = await api("settings"); } catch (e) { toast(e.message, true); return; }
   const p = all.plugins.find((x) => x.name === "games");
   if (!p) return;
   const schema = p.schema || [], values = p.values || {};
@@ -466,6 +724,8 @@ async function openSettings() {
 function banner() {
   const d = data.deck || {};
   const out = [];
+  if (libError && data.games.length)
+    out.push(h("div.gm-slim.err", icon("wifi"), h("span", t("Couldn't refresh the library: {error}", { error: libError }))));
   if (loaded && !d.configured && !d.online)
     out.push(h("button.gm-slim", { onclick: openSettings }, icon("settings"), h("span", t("Set up your Steam Deck")), icon("right")));
   else if (loaded && !d.online)
@@ -524,6 +784,11 @@ function openSort() {
 
 function emptyState() {
   if (!loaded) return h("div.empty", h("span.spin"));
+  if (!data.games.length && libError) {
+    return h("div.gm-card.gm-center", h("div.gm-ico.bad", icon("wifi")), h("b", t("The library didn't load")),
+      h("p.muted.gm-wrap", libError),
+      h("button.primary", { onclick: () => refresh() }, icon("refresh"), t("Retry")));
+  }
   if (!data.games.length) {
     const hint = h("div.gm-how", { hidden: true },
       h("p.muted", t("In the games folder, one folder is one game. Add cover.jpg to show a cover.")),
@@ -572,15 +837,18 @@ function drawTabs() {
   const n = activeDl().length;
   els.seg.replaceChildren(
     h("button" + (view.tab === "library" ? ".active" : ""), { onclick: () => setTab("library") }, t("Library")),
+    h("button" + (view.tab === "discover" ? ".active" : ""), { onclick: () => setTab("discover") }, t("Discover")),
     h("button" + (view.tab === "find" ? ".active" : ""), { onclick: () => setTab("find") }, t("Find"),
       n ? h("span.gm-nbadge", fmt.num(n)) : null));
   els.libPane.hidden = view.tab !== "library";
+  els.dis.hidden = view.tab !== "discover";
   els.findPane.hidden = view.tab !== "find";
 }
 
 function setTab(tab) {
   view.tab = tab; saveView(); drawTabs(); schedule();
   if (tab === "find" && !fx.platforms.length) loadPlatforms();
+  if (tab === "discover") ensureDiscover();
 }
 
 export default {
@@ -612,16 +880,19 @@ export default {
       h("div.gm-chipwrap", els.fplat),
       els.dl, els.results);
 
+    els.disBody = h("div.gm-disc");
+    els.dis = h("div", els.disBody);
     els.seg = h("div.seg.gm-seg");
     root.append(
       h("div.gm-head", h("h1", t("Games")), h("div.spacer"),
         h("button.icon.ghost", { "aria-label": t("Games settings"), onclick: openSettings }, icon("settings"))),
-      els.seg, els.libPane, els.findPane);
+      els.seg, els.libPane, els.dis, els.findPane);
     el.replaceChildren(root);
-    drawTabs(); drawLibrary(); drawResults(); drawPlat();
+    drawTabs(); drawLibrary(); drawResults(); drawPlat(); drawDownloads();
     loadPlatforms();
+    if (view.tab === "discover") ensureDiscover(); else drawDiscover();
     await Promise.all([loadLibrary(), loadDownloads()]);
     schedule();
-    return () => { clearTimeout(timer); root = null; };
+    return () => { clearTimeout(timer); discoverSeq++; root = null; };
   },
 };

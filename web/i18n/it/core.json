@@ -68,5 +68,16 @@
   "What friends watched and cooked": "Cosa hanno visto e cucinato gli amici",
   "Test notification - it works 🎉": "Notifica di prova: funziona 🎉",
   "Delete all notifications?": "Eliminare tutte le notifiche?",
-  "Clear notifications": "Svuota"
+  "Clear notifications": "Svuota",
+  "Not found on {host}": "Non trovato su {host}",
+  "Not found": "Non trovato",
+  "{host} is busy: try again in a minute": "{host} è occupato: riprova tra un minuto",
+  "{host} answered with an error ({code})": "{host} ha risposto con un errore ({code})",
+  "The service did not answer in time": "Il servizio non ha risposto in tempo",
+  "{host} is not reachable": "{host} non è raggiungibile",
+  "The service is not reachable": "Il servizio non è raggiungibile",
+  "Something went wrong": "Qualcosa è andato storto",
+  "Try again": "Riprova",
+  "Couldn't load {page}": "Impossibile aprire {page}",
+  "The {name} integration is off: turn it on in Settings": "L'integrazione {name} è spenta: attivala in Impostazioni"
 }

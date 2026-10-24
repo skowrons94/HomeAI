@@ -33,6 +33,7 @@ from ...i18n import _
 from ...settings import get_path
 from ..storage import DEFAULT_MOUNT
 from . import find, library
+from .discover import Discover
 from .deck import Deck, DeckError
 from .find import Finder
 from .metadata import MetaError, Metadata
@@ -102,6 +103,8 @@ class GamesPlugin(Plugin):
                              str(get_path(self.config, "igdb.client_id", "") or ""),
                              str(get_path(self.config, "igdb.client_secret", "") or ""),
                              str(get_path(self.config, "steamgriddb.key", "") or ""))
+        self.discover = Discover(self.session, self.meta, self._library_index,
+                                 lambda: str(self.hub.config.get("language") or "it"))
         self.finder = Finder(self)
         self._meta_queue: dict[str, bool] = {}      # game id → force
         self._meta_task: asyncio.Task | None = None
@@ -222,6 +225,8 @@ class GamesPlugin(Plugin):
             web.post("/meta/refresh", self.r_meta_refresh),
             web.get("/meta/search", self.r_meta_search),
             web.post("/meta/match", self.r_meta_match),
+            web.get("/discover", self.r_discover),
+            web.get("/discover/item/{source}/{id}", self.r_discover_item),
             web.get("/find", self.r_find),
             web.get("/find/platforms", self.r_find_platforms),
             web.post("/find/download", self.r_find_download),
@@ -425,6 +430,37 @@ class GamesPlugin(Plugin):
         if not m or not m.get("igdb_id"):
             raise ValueError(_("IGDB has no such game"))
         return _json({"ok": True, "game": self._item(g, await self._deck_state())})
+
+    # -- discover
+    def _library_index(self) -> dict[str, set[str]]:
+        """{normalised title: {platform keys}} of the scanned library, for the "in library" badge."""
+        from .discover import norm_title
+        idx: dict[str, set[str]] = {}
+        for g in self.games.values():
+            plat = library.platform(g)
+            names = {g.get("title") or ""}
+            m = self.meta.get(g["id"]) or {}
+            if m.get("title"):
+                names.add(m["title"])
+            for n in names:
+                k = norm_title(n)
+                if k:
+                    idx.setdefault(k, set()).add(plat)
+        return idx
+
+    async def r_discover(self, request):
+        which = request.query.get("set", "all")
+        if which not in ("all", "steam", "igdb"):
+            raise ValueError(_("Unknown set"))
+        return _json(await self.discover.rails(which, refresh=request.query.get("refresh") == "1"))
+
+    async def r_discover_item(self, request):
+        from .discover import DiscoverError
+        try:
+            return _json(await self.discover.detail(request.match_info["source"], request.match_info["id"],
+                                                    request.query.get("platform", "")[:20]))
+        except (DiscoverError, MetaError) as err:
+            raise ValueError(str(err))
 
     # -- find + download
     async def r_find(self, request):

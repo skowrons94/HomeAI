@@ -1,8 +1,8 @@
 // Music: your Navidrome library, discovery on MusicBrainz, tracker downloads and playback on the house
 // speakers (hub/plugins/music/). Route: #/music.
-// Tabs: Library | Discover | Downloads. A mini-player bar sits above the app tab bar. Playback goes either to
+// Tabs: Library | Discover (charts, new releases, search) | Downloads. A mini-player bar sits above the app tab bar. Playback goes either to
 // this phone (<audio> on the proxied stream) or to an AirPlay output (the hub streams and keeps the queue).
-import { api, h, icon, toast, ensureCss, act, fmt, t, sheet, debounce } from "../app.js";
+import { api, h, icon, toast, ensureCss, act, fmt, t, sheet, debounce, locale } from "../app.js";
 
 const P = (path, opts) => api(`p/music/${path}`, opts);
 const KEY = "casa.music.view";
@@ -17,9 +17,9 @@ const saveView = () => { try { localStorage.setItem(KEY, JSON.stringify(view)); 
 let root = null;
 let timers = [];
 const els = {};
-let lib = { albums: [], artists: [], configured: true, error: "", loaded: false, search: null };
+let lib = { albums: [], artists: [], configured: true, error: "", loaded: false, search: null, searchError: "" };
 let query = "";
-const dx = { q: "", artists: [], albums: [], busy: false, searched: false, error: "" };
+const dx = { q: "", artists: [], albums: [], dzArtists: [], dzAlbums: [], busy: false, searched: false, error: "", fallback: false };
 let downloads = [];
 const seen = new Map();
 let outputs = { list: [], default: "", loaded: false };
@@ -44,7 +44,8 @@ const initials = (s) => {
 /** Square cover: a coloured placeholder with initials, the image fades in over it (and is dropped if it 404s). */
 function cover(src, title, cls = "") {
   const box = h(`div.mu-cov${cls}`, { style: `--mh:${hue(title)}` }, h("span", initials(title)));
-  if (src) box.append(h("img", { src, loading: "lazy", alt: "", onerror: (e) => e.target.remove() }));
+  if (src) box.append(h("img", { src, loading: "lazy", alt: "", decoding: "async",
+    onload: (e) => e.target.classList.add("in"), onerror: (e) => e.target.remove() }));
   return box;
 }
 const navCover = (id, title, size = 300, cls = "") => cover(id ? `/api/p/music/cover/${encodeURIComponent(id)}?size=${size}` : "", title, cls);
@@ -90,7 +91,11 @@ function phoneLoad(i) {
   if (!tr) { pl.state = "idle"; pl.index = -1; audio.removeAttribute("src"); emit(); return; }
   pl.index = i; pl.error = "";
   audio.src = streamUrl(tr);
-  audio.play().catch((e) => { pl.error = e.message; toast(e.message, true); });
+  audio.play().catch((e) => {
+    if (e.name === "AbortError") return;                       // a newer track replaced this one: not an error
+    pl.error = e.name === "NotAllowedError" ? t("Tap play to start the music") : t("This track cannot be played on the phone");
+    pl.state = "paused"; emit();
+  });
   if ("mediaSession" in navigator) {
     try {
       navigator.mediaSession.metadata = new MediaMetadata({ title: tr.title, artist: tr.artist, album: tr.album,
@@ -221,7 +226,10 @@ async function loadLibrary() {
       lib.albums = d.albums || []; lib.configured = d.configured !== false;
     }
     lib.error = "";
-  } catch (e) { lib.error = e.message; }
+  } catch (e) {
+    lib.error = e.message;
+    if (view.list === "artists") lib.artists = []; else lib.albums = [];     // never show a list of another view next to an error
+  }
   lib.loaded = true;
   drawLibrary();
 }
@@ -230,7 +238,8 @@ async function loadOutputs(scan = false) {
   try {
     const d = scan ? await P("outputs/scan", { body: {} }) : await P("outputs");
     outputs = { list: d.outputs || [], default: d.default || "", loaded: true };
-  } catch { outputs.loaded = true; }
+    outputs.error = "";
+  } catch (e) { outputs.loaded = true; outputs.error = e.message; }
   // first visit: the default output from Settings, when it exists
   if (!localStorage.getItem(KEY) && outputs.default) {
     const o = outputs.list.find((x) => x.id === outputs.default || x.name.toLowerCase() === outputs.default.toLowerCase());
@@ -242,14 +251,26 @@ async function loadOutputs(scan = false) {
   drawBar();
 }
 
+let dlSig = "";
+let dlError = false;
 async function loadDownloads() {
-  try { downloads = await P("downloads"); if (!Array.isArray(downloads)) downloads = []; } catch { downloads = []; }
+  if (document.hidden) return;
+  const before = dlError;
+  try {
+    const d = await P("downloads");
+    downloads = Array.isArray(d) ? d : [];
+    dlError = false;
+  } catch {
+    dlError = true;                  // keep what we had; a small note instead of an empty list or a toast every few seconds
+  }
   let finished = false;
   for (const d of downloads) {
     if (seen.get(d.hash) && seen.get(d.hash) !== "done" && d.state === "done") finished = true;
     seen.set(d.hash, d.state);
   }
-  drawDownloads(); drawTabs();
+  const sig = JSON.stringify([downloads.map((d) => [d.hash, d.state, Math.round((d.progress || 0) * 100), d.rate ? 1 : 0, d.error || "", d.eta || 0]), dlError]);
+  if (sig !== dlSig || before !== dlError) { dlSig = sig; drawDownloads(); }
+  drawTabs();
   if (finished) { toast(t("A download was added to your library")); loadLibrary(); }
 }
 const activeDl = () => downloads.filter((d) => d.state === "downloading" || d.state === "importing");
@@ -312,17 +333,21 @@ const doSearch = debounce(async () => {
   const q = query.trim();
   if (q.length < 2) { lib.search = null; drawLibrary(); return; }
   put(els.body, h("div.empty", h("span.spin")));
-  try { lib.search = await P(`search?q=${encodeURIComponent(q)}`); } catch (e) { lib.search = null; toast(e.message, true); }
+  lib.searchError = "";
+  try { lib.search = await P(`search?q=${encodeURIComponent(q)}`); } catch (e) { lib.search = null; lib.searchError = e.message; }
+  if (q !== query.trim()) return;                                  // the box changed meanwhile
+  if (lib.searchError) { put(els.body, inlineError(lib.searchError, doSearch)); return; }
   drawLibrary();
 }, 350);
 
 // ---- album + artist sheets ------------------------------------------------------------------
 
 async function openAlbum(id) {
-  const s = sheet("", [h("div.empty", h("span.spin"))]);
+  stopPreview();
+  const s = sheet("", [h("div.mu-empty-s", h("span.spin"))]);
   s.el.parentElement.classList.add("mu-sheet");
   let a;
-  try { a = await P(`album/${encodeURIComponent(id)}`); } catch (e) { s.close(); toast(e.message, true); return; }
+  try { a = await P(`album/${encodeURIComponent(id)}`); } catch (e) { sheetError(s, e.message, () => { s.close(); openAlbum(id); }); return; }
   const tracks = a.tracks;
   const multiDisc = new Set(tracks.map((x) => x.disc)).size > 1;
   let lastDisc = 0;
@@ -349,10 +374,11 @@ async function openAlbum(id) {
 }
 
 async function openArtist(id, name) {
-  const s = sheet(name, [h("div.empty", h("span.spin"))]);
+  stopPreview();
+  const s = sheet(name, [h("div.mu-empty-s", h("span.spin"))]);
   s.el.parentElement.classList.add("mu-sheet");
   let a;
-  try { a = await P(`artist/${encodeURIComponent(id)}`); } catch (e) { s.close(); toast(e.message, true); return; }
+  try { a = await P(`artist/${encodeURIComponent(id)}`); } catch (e) { sheetError(s, e.message, () => { s.close(); openArtist(id, name); }); return; }
   const missing = h("div.stack");
   put(s.el, 
     section(t("Your albums"), a.list.length),
@@ -426,34 +452,374 @@ async function openMbAlbum(g) {
   } catch (e) { put(tl, h("div.mu-note.err", e.message)); }
 }
 
+// ---- discover: charts and new releases (Deezer, Apple Music) + search ---------------------------------
+// Default view = rails. Searching shows Deezer results (MusicBrainz when Deezer is unreachable); the artist sheet
+// can open the full MusicBrainz discography (owned / missing) and the tracker search.
+
+const enc = encodeURIComponent;
+const RAILS = () => [
+  { key: "top_it", title: t("Top in Italy"), kind: "album" },
+  { key: "chart_albums", title: t("Albums of the moment"), kind: "album" },
+  { key: "chart_artists", title: t("Artists of the moment"), kind: "artist" },
+  { key: "new", title: t("New releases"), kind: "album" },
+  { key: "chart_tracks", title: t("Songs of the moment"), kind: "track" },
+];
+const RAIL_TTL = 5 * 60 * 1000;
+const dsc = { rails: {}, errors: {}, busy: {}, at: {}, genres: null, genre: "", genreItems: null, genreErr: "", genreBusy: false };
+els.rails = {};
+let searchToken = 0;
+
+const shortNum = (n) => {
+  try { return new Intl.NumberFormat(locale(), { notation: "compact", maximumFractionDigits: 1 }).format(n); } catch { return fmt.num(n); }
+};
+
+/** Compact inline error with a retry button: never a toast, never taller than a few lines. */
+function inlineError(message, retry) {
+  return h("div.mu-inerr", { role: "alert" }, icon("alert"), h("span", message || t("Something went wrong")),
+    retry ? h("button.mu-mini", { onclick: (e) => { e.currentTarget.disabled = true; retry(); } }, t("Try again")) : null);
+}
+
+// -- preview player: one 30 s clip at a time -----------------------------------------------------
+
+const pv = new Audio();
+pv.preload = "none";
+let pvCur = null;
+
+function pvPaint(btn, on) {
+  if (!btn) return;
+  btn.classList.toggle("on", on);
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+  btn.replaceChildren(icon(on ? "pause" : "play"));
+  const row = btn.closest(".mu-trk, .mu-prow");
+  if (row) { row.classList.toggle("playing", on); if (!on) row.style.removeProperty("--p"); }
+}
+function stopPreview() {
+  const cur = pvCur;
+  pvCur = null;
+  pvPaint(cur?.btn, false);
+  if (pv.getAttribute("src")) { pv.pause(); pv.removeAttribute("src"); pv.load(); }
+}
+function pvBad(btn) {
+  pvPaint(btn, false);
+  btn.classList.add("bad");
+  btn.disabled = true;
+  btn.title = t("Preview unavailable");
+}
+pv.addEventListener("ended", stopPreview);
+pv.addEventListener("timeupdate", () => {
+  const row = pvCur?.btn.closest(".mu-trk, .mu-prow");
+  if (row && pv.duration) row.style.setProperty("--p", `${Math.min(100, (pv.currentTime / pv.duration) * 100)}%`);
+});
+pv.addEventListener("error", () => { if (pvCur && pv.getAttribute("src")) { const b = pvCur.btn; pvCur = null; pvBad(b); } });
+
+function togglePreview(tr, btn) {
+  if (pvCur?.btn === btn) { stopPreview(); return; }
+  stopPreview();
+  if (isPhone() && pl.state === "playing") audio.pause();       // the library player and a clip never overlap
+  pvCur = { btn };
+  pv.src = tr.preview;
+  pvPaint(btn, true);
+  pv.play().catch((e) => { if (e.name !== "AbortError" && pvCur?.btn === btn) { pvCur = null; pvBad(btn); } });
+}
+
+function previewBtn(tr) {
+  if (!tr.preview) return h("span.mu-pv.off", { title: t("No preview"), "aria-hidden": "true" }, icon("play"));
+  const b = h("button.mu-pv", { "aria-label": t("Preview"), "aria-pressed": "false",
+    onclick: (e) => { e.stopPropagation(); togglePreview(tr, b); } }, icon("play"));
+  return b;
+}
+
+// -- tiles and rails -------------------------------------------------------------------------------
+
+function dTile(a, withYear = false, hideArtist = false) {
+  return h("button.mu-tile.mu-dt", { onclick: () => openDzAlbum(a), "aria-label": joinMeta(a.title, a.artist) },
+    h("div.mu-covwrap", cover(a.cover, a.title),
+      a.owned ? h("span.mu-badge", icon("check"), h("span", t("In your library"))) : null),
+    h("div.mu-title", a.title),
+    h("div.mu-meta", joinMeta(hideArtist ? "" : a.artist, withYear ? a.year : "")));
+}
+
+function aTile(a) {
+  return h("button.mu-tile.mu-at", { onclick: () => openDzArtist(a.id, a.name), "aria-label": a.name },
+    cover(a.picture, a.name, ".round"),
+    h("div.mu-title", a.name),
+    h("div.mu-meta", a.fans ? t("{n} fans", { n: shortNum(a.fans) }) : " "));
+}
+
+function trackRow(tr, rank) {
+  return h("div.mu-prow",
+    h("button.mu-prow-main", { onclick: () => tr.album_id && openDzAlbum({ id: tr.album_id, title: tr.album, artist: tr.artist }),
+      "aria-label": joinMeta(tr.title, tr.artist) },
+    rank ? h("span.mu-num", rank) : null,
+    cover(tr.cover, tr.album || tr.title, ".sm"),
+    h("span.mu-row-t", h("b", tr.title), h("span.mu-meta", tr.artist))),
+    h("span.mu-meta.mu-dur", mins(tr.duration)),
+    previewBtn(tr));
+}
+
+const railHead = (title, extra) => h("div.mu-rhead", h("h3", title), extra || null);
+const skelTiles = (kind, n = 5) => Array.from({ length: n }, () =>
+  h("div.mu-tile.mu-skel", h("div.mu-cov" + (kind === "artist" ? ".round" : "")), h("div.mu-sk-l"), h("div.mu-sk-s")));
+const skelRows = () => h("div.mu-card.mu-list", Array.from({ length: 4 }, () =>
+  h("div.mu-prow.mu-skel", h("div.mu-cov.sm"), h("div.mu-row-t", h("div.mu-sk-l"), h("div.mu-sk-s")))));
+
+function paintRail(key) {
+  const box = els.rails[key];
+  const def = RAILS().find((r) => r.key === key);
+  if (!box || !def) return;
+  const items = dsc.rails[key];
+  box.hidden = false;
+  if (items?.length) {
+    const shown = def.kind === "track" ? items.slice(0, 8) : items;
+    put(box, railHead(def.title),
+      def.kind === "track" ? h("div.mu-card.mu-list", shown.map((x, i) => trackRow(x, i + 1)))
+        : h("div.mu-rail" + (def.kind === "artist" ? ".round" : ""), shown.map((x) => (def.kind === "artist" ? aTile(x) : dTile(x)))));
+  } else if (dsc.busy[key]) {
+    put(box, railHead(def.title), def.kind === "track" ? skelRows() : h("div.mu-rail" + (def.kind === "artist" ? ".round" : ""), skelTiles(def.kind)));
+  } else if (dsc.errors[key]) {
+    put(box, railHead(def.title), inlineError(dsc.errors[key], () => loadRail(key, true)));
+  } else box.hidden = !!items;          // loaded and empty: nothing to show
+}
+
+async function loadRail(key, force = false) {
+  if (dsc.busy[key]) return;
+  if (!force && dsc.rails[key] && Date.now() - dsc.at[key] < RAIL_TTL) return;
+  dsc.busy[key] = true; dsc.errors[key] = "";
+  paintRail(key);
+  try {
+    const d = await P(`discover?rails=${key}`);
+    const r = (d.rails || []).find((x) => x.key === key);
+    if (r) { dsc.rails[key] = r.items || []; dsc.at[key] = Date.now(); }
+    dsc.errors[key] = r ? "" : (d.errors?.[key] || t("Something went wrong"));
+  } catch (e) { dsc.errors[key] = e.message; }
+  dsc.busy[key] = false;
+  paintRail(key);
+}
+
+async function loadGenres() {
+  if (dsc.genres) return;
+  try { dsc.genres = (await P("discover/genres")).genres || []; } catch { dsc.genres = []; }   // no chips; the rails still work
+  paintGenreChips();
+}
+
+function paintGenreChips() {
+  if (!els.gchips) return;
+  els.gchipwrap.hidden = !dsc.genres?.length;
+  put(els.gchips, chip(t("All"), null, !dsc.genre, () => pickGenre("")),
+    ...(dsc.genres || []).map((g) => chip(g.name, null, dsc.genre === g.id, () => pickGenre(dsc.genre === g.id ? "" : g.id))));
+  els.gchips.querySelector(".on")?.scrollIntoView({ block: "nearest", inline: "center" });
+}
+
+async function pickGenre(id) {
+  dsc.genre = id; dsc.genreItems = null; dsc.genreErr = "";
+  paintGenreChips();
+  els.railsWrap.hidden = !!id;
+  els.genreBox.hidden = !id;
+  if (!id) { RAILS().forEach((r) => loadRail(r.key)); return; }
+  const mine = id;
+  dsc.genreBusy = true; paintGenre();
+  try { dsc.genreItems = (await P(`discover/genre/${enc(id)}`)).albums || []; } catch (e) { dsc.genreErr = e.message; }
+  if (dsc.genre !== mine) return;
+  dsc.genreBusy = false; paintGenre();
+}
+
+function paintGenre() {
+  const g = dsc.genres?.find((x) => x.id === dsc.genre);
+  const head = railHead(g ? t("Top {genre}", { genre: g.name }) : t("Charts"));
+  if (dsc.genreBusy) put(els.genreBox, head, h("div.mu-grid", skelTiles("album", 6)));
+  else if (dsc.genreErr) put(els.genreBox, head, inlineError(dsc.genreErr, () => pickGenre(dsc.genre)));
+  else put(els.genreBox, head, dsc.genreItems?.length ? h("div.mu-grid", dsc.genreItems.map((a) => dTile(a, true)))
+    : h("div.mu-note", t("No results.")));
+}
+
+function ensureDiscover() {
+  loadGenres();
+  if (dsc.genre) return;
+  RAILS().forEach((r) => { paintRail(r.key); loadRail(r.key); });
+}
+
+// -- search ----------------------------------------------------------------------------------------
+
 async function discover() {
   const q = dx.q.trim();
-  if (q.length < 2) { dx.error = t("Type at least 2 characters"); drawDiscover(); return; }
-  dx.busy = true; dx.error = ""; dx.searched = true; drawDiscover();
+  if (q.length < 2) { dx.error = t("Type at least 2 characters"); dx.searched = true; drawDiscover(); return; }
+  const mine = ++searchToken;
+  dx.busy = true; dx.error = ""; dx.searched = true; dx.fallback = false; drawDiscover();
   try {
-    if (view.dtab === "artist") dx.artists = (await P(`mb/search?kind=artist&q=${encodeURIComponent(q)}`)).artists || [];
-    else dx.albums = (await P(`mb/search?kind=album&q=${encodeURIComponent(q)}`)).albums || [];
-  } catch (e) { dx.error = e.message; }
+    const d = await P(`discover/search?q=${enc(q)}`);
+    if (mine !== searchToken) return;
+    dx.dzArtists = d.artists || []; dx.dzAlbums = d.albums || [];
+  } catch {
+    // Deezer is unreachable: the MusicBrainz search still works
+    try {
+      if (view.dtab === "artist") dx.artists = (await P(`mb/search?kind=artist&q=${enc(q)}`)).artists || [];
+      else dx.albums = (await P(`mb/search?kind=album&q=${enc(q)}`)).albums || [];
+      dx.fallback = true; dx.dzArtists = []; dx.dzAlbums = [];
+    } catch (e2) { dx.error = e2.message; }
+  }
+  if (mine !== searchToken) return;
   dx.busy = false; drawDiscover();
+}
+
+function clearSearch() {
+  searchToken++;
+  Object.assign(dx, { q: "", searched: false, busy: false, error: "", fallback: false, dzArtists: [], dzAlbums: [] });
+  if (els.dq) els.dq.value = "";
+  drawDiscover();
 }
 
 function drawDiscover() {
   if (!els.dres) return;
-  put(els.dseg, chip(t("Artists"), null, view.dtab === "artist", () => { view.dtab = "artist"; saveView(); drawDiscover(); if (dx.q.trim().length >= 2) discover(); }),
-    chip(t("Albums"), null, view.dtab === "album", () => { view.dtab = "album"; saveView(); drawDiscover(); if (dx.q.trim().length >= 2) discover(); }));
+  const s = dx.searched;
+  els.home.hidden = s; els.dres.hidden = !s; els.dseg.parentElement.hidden = !s;
+  els.dclear.hidden = !dx.q;
+  if (!s) { ensureDiscover(); return; }
+  const tab = (k, label) => chip(label, null, view.dtab === k, () => {
+    view.dtab = k; saveView();
+    if (dx.fallback && dx.q.trim().length >= 2) discover(); else drawDiscover();
+  });
+  put(els.dseg, tab("artist", t("Artists")), tab("album", t("Albums")));
   const out = [];
-  if (dx.error) out.push(h("div.mu-note.err", dx.error));
-  if (dx.busy) out.push(h("div.empty", h("span.spin")));
-  else if (view.dtab === "artist" && dx.artists.length) {
-    out.push(h("div.mu-card.mu-list", dx.artists.map((a) => h("button.mu-row", { onclick: () => openMbArtist(a) },
-      h("span.mu-ico-sm", icon("users")),
-      h("span.mu-row-t", h("b", a.name), h("span.mu-meta", joinMeta(a.type, a.country, a.begin, a.disambiguation))), icon("right")))));
-  } else if (view.dtab === "album" && dx.albums.length) {
-    out.push(h("div.mu-card.mu-list", dx.albums.map((g) => mbRow(g))));
-  } else if (dx.searched && !dx.error) out.push(h("div.empty", t("No results.")));
-  else if (!dx.searched) out.push(h("div.mu-hint", icon("search"),
-    h("span", t("Search an artist or an album on MusicBrainz, see what you are missing and find it on your trackers."))));
+  if (dx.error) out.push(inlineError(dx.error, () => discover()));
+  if (dx.busy) out.push(h("div.mu-grid", skelTiles(view.dtab === "artist" ? "artist" : "album", 6)));
+  else if (dx.fallback) {
+    out.push(h("div.mu-warn", icon("wifi"), h("span", t("The charts service is not reachable: showing MusicBrainz results."))));
+    if (view.dtab === "artist" && dx.artists.length) {
+      out.push(h("div.mu-card.mu-list", dx.artists.map((a) => h("button.mu-row", { onclick: () => openMbArtist(a) },
+        h("span.mu-ico-sm", icon("users")),
+        h("span.mu-row-t", h("b", a.name), h("span.mu-meta", joinMeta(a.type, a.country, a.begin, a.disambiguation))), icon("right")))));
+    } else if (view.dtab === "album" && dx.albums.length) out.push(h("div.mu-card.mu-list", dx.albums.map((g) => mbRow(g))));
+    else if (!dx.error) out.push(h("div.empty", t("No results.")));
+  } else if (!dx.error) {
+    const list = view.dtab === "artist" ? dx.dzArtists : dx.dzAlbums;
+    if (!list.length) out.push(h("div.empty", t("No results.")));
+    else if (view.dtab === "artist") out.push(h("div.mu-grid.three.mu-agrid", list.map(aTile)));
+    else out.push(h("div.mu-grid", list.map((a) => dTile(a, true))));
+  }
   put(els.dres, ...out);
+}
+
+// -- album + artist sheets (Deezer data) --------------------------------------------------------------
+
+function sheetError(s, message, retry, extra) {
+  put(s.el, inlineError(message, retry), extra || null);
+}
+
+const heroBg = (src) => (src ? h("div.mu-dbg", { style: { backgroundImage: `url("${src}")` } }) : null);
+
+async function playOwned(id) {
+  const a = await P(`album/${enc(id)}`);
+  await playTracks(a.tracks, 0, { album: id });
+}
+
+function openDzAlbum(ref) {
+  stopPreview();
+  const s = sheet("", [h("div.mu-skel-sheet", h("div.mu-cov.big"), h("div.mu-sk-l"), h("div.mu-sk-s"))], { onClose: stopPreview });
+  s.el.parentElement.classList.add("mu-sheet");
+  const load = async () => {
+    put(s.el, h("div.mu-empty-s", h("span.spin")));
+    try {
+      const id = ref.id || (await P(`discover/resolve?artist=${enc(ref.artist || "")}&title=${enc(ref.title || "")}`)).id;
+      paintDzAlbum(s, await P(`discover/album/${enc(id)}`));
+    } catch (e) {
+      sheetError(s, e.message, load, ref.title ? h("div.mu-actions",
+        h("button.primary", { onclick: () => openFind({ artist: ref.artist || "", album: ref.title, year: ref.year }) },
+          icon("search"), t("Search trackers"))) : null);
+    }
+  };
+  load();
+}
+
+function paintDzAlbum(s, a) {
+  const tracks = a.tracks || [];
+  const rows = tracks.map((x, i) => {
+    const b = previewBtn(x);
+    const row = h("div.mu-trk" + (x.preview ? ".can" : ""), { onclick: () => x.preview && b.click() },
+      h("span.mu-num", i + 1),
+      h("span.mu-trk-t", h("b", x.title), x.artist && x.artist !== a.artist ? h("span.mu-meta", x.artist) : null),
+      h("span.mu-meta.mu-dur", mins(x.duration)), b);
+    return row;
+  });
+  const hasPrev = tracks.some((x) => x.preview);
+  put(s.el,
+    h("div.mu-dhero", heroBg(a.cover),
+      h("div.mu-ahead", cover(a.cover, a.title, ".big"),
+        h("div.mu-ainfo",
+          h("div.mu-dtitle", a.title),
+          a.artist_id ? h("button.mu-link", { onclick: () => { s.close(); openDzArtist(a.artist_id, a.artist); } }, a.artist)
+            : h("div.mu-sub", a.artist),
+          h("div.mu-meta", joinMeta(a.year, tracks.length ? t("{n} tracks", { n: tracks.length }) : "", mins(a.duration || total(tracks)))),
+          a.label ? h("div.mu-meta", a.label) : null))),
+    h("div.mu-chips-in",
+      a.owned ? h("span.chip.ok", icon("check"), t("In your library")) : null,
+      ...(a.genres || []).slice(0, 4).map((g) => h("span.chip", g))),
+    h("div.mu-actions",
+      a.owned ? h("button.primary", { onclick: (e) => act(() => playOwned(a.owned), e.currentTarget) }, icon("play"), t("Play")) : null,
+      h("button" + (a.owned ? "" : ".primary"), { onclick: () => openFind({ artist: a.artist, album: a.title, year: a.year }) },
+        icon("search"), t("Search trackers")),
+      a.owned ? h("button", { onclick: () => { s.close(); openAlbum(a.owned); } }, icon("music"), t("Open in library")) : null,
+      a.link ? h("a.btn.mu-ext", { href: a.link, target: "_blank", rel: "noopener" }, icon("link"), t("Open on Deezer")) : null),
+    hasPrev ? h("div.mu-note", t("Tap a track to hear a 30 second preview.")) : null,
+    h("div.mu-tracks", rows.length ? rows : h("div.mu-note", t("No track list available."))));
+}
+
+async function openDzArtist(id, name) {
+  stopPreview();
+  const s = sheet(name || "", [h("div.mu-empty-s", h("span.spin"))], { onClose: stopPreview });
+  s.el.parentElement.classList.add("mu-sheet");
+  const load = async () => {
+    put(s.el, h("div.mu-empty-s", h("span.spin")));
+    try { paintDzArtist(s, await P(`discover/artist/${enc(id)}`)); }
+    catch (e) { sheetError(s, e.message, load); }
+  };
+  load();
+}
+
+function paintDzArtist(s, a) {
+  const kinds = { album: [], small: [] };
+  for (const x of a.albums || []) (["album", "compile"].includes(x.type) ? kinds.album : kinds.small).push(x);
+  let tab = kinds.album.length || !kinds.small.length ? "album" : "small";
+  let allTop = false;
+  const top = h("div"), grid = h("div"), tabs = h("div.mu-row-tools");
+  const err = (k) => (a.errors?.[k] ? inlineError(a.errors[k]) : null);
+  const paintTop = () => {
+    const list = a.top || [];
+    put(top, section(t("Top songs")),
+      list.length ? h("div.mu-card.mu-list", (allTop ? list : list.slice(0, 5)).map((x, i) => trackRow(x, i + 1))) : (err("top") || h("div.mu-note", t("No results."))),
+      list.length > 5 ? h("button.mu-link", { onclick: () => { allTop = !allTop; stopPreview(); paintTop(); } }, allTop ? t("Show less") : t("Show more")) : null);
+  };
+  const paintAlbums = () => {
+    const list = kinds[tab];
+    put(tabs, chip(t("Albums"), kinds.album.length, tab === "album", () => { tab = "album"; paintAlbums(); }),
+      chip(t("Singles and EPs"), kinds.small.length, tab === "small", () => { tab = "small"; paintAlbums(); }));
+    put(grid, list.length ? h("div.mu-grid.three", list.map((x) => dTile({ ...x, artist: a.name }, true, true)))
+      : (err("albums") || h("div.mu-note", t("No results."))));
+  };
+  paintTop(); paintAlbums();
+  put(s.el,
+    h("div.mu-dhero", heroBg(a.picture),
+      h("div.mu-ahead", cover(a.picture, a.name, ".big.round"),
+        h("div.mu-ainfo", h("div.mu-dtitle", a.name),
+          a.fans ? h("div.mu-meta", t("{n} fans", { n: fmt.num(a.fans) })) : null,
+          a.albums_count ? h("div.mu-meta", t("{n} albums", { n: a.albums_count })) : null))),
+    h("div.mu-actions",
+      h("button.primary", { onclick: () => openFind({ artist: a.name, album: "", discography: true }) }, icon("search"), t("Find the discography")),
+      h("button", { onclick: (e) => act(() => openMbByName(a.name), e.currentTarget) }, ic("list"), t("What am I missing?")),
+      a.link ? h("a.btn.mu-ext", { href: a.link, target: "_blank", rel: "noopener" }, icon("link"), t("Open on Deezer")) : null),
+    top,
+    section(t("Discography")), tabs, grid,
+    a.related?.length ? [section(t("Similar artists")), h("div.mu-rail.round", a.related.map((x) => aTile(x)))]
+      : (a.errors?.related ? [section(t("Similar artists")), inlineError(a.errors.related)] : null));
+  // album taps open on top of this sheet, so closing the album comes back here
+  s.el.querySelectorAll(".mu-rail.round .mu-at").forEach((el) => { el.addEventListener("click", () => s.close(), true); });
+}
+
+/** MusicBrainz discography (owned / missing) of an artist known only by name. */
+async function openMbByName(name) {
+  const found = (await P(`mb/search?kind=artist&q=${enc(name)}`)).artists || [];
+  const pick = found.find((x) => x.name.toLowerCase() === name.toLowerCase()) || found[0];
+  if (!pick) { toast(t("MusicBrainz does not know this artist."), true); return; }
+  openMbArtist(pick);
 }
 
 // ---- trackers: search + download ------------------------------------------------------------
@@ -552,7 +918,8 @@ function dlRow(d) {
 
 function drawDownloads() {
   if (!els.dl) return;
-  put(els.dl, downloads.length ? h("div.mu-card.mu-list", downloads.map(dlRow))
+  put(els.dl, dlError ? h("div.mu-warn", icon("wifi"), h("span", t("Cannot refresh the downloads right now."))) : null,
+    downloads.length ? h("div.mu-card.mu-list", downloads.map(dlRow))
     : h("div.mu-card.mu-center", h("div.mu-ico", icon("download")), h("b", t("No downloads")),
       h("p.muted", t("Albums you download from the trackers show up here."))));
 }
@@ -570,7 +937,8 @@ function openOutputs(onDone) {
       opt(PHONE, t("This phone"), t("Plays in the app"), ic("phone")),
       ...outputs.list.map((o) => opt(o.id, o.name, joinMeta(o.model, o.address, o.needs_pairing ? t("Needs pairing") : ""), icon("speaker"),
         (o.needs_pairing || o.password) ? h("button.mu-setup", { onclick: () => outputSetup(o, paint) }, t("Set up")) : null)),
-      outputs.list.length ? null : h("div.mu-note", outputs.loaded ? t("No AirPlay devices found yet.") : t("Looking for devices…")));
+      outputs.list.length ? null : h("div.mu-note" + (outputs.error ? ".err" : ""),
+        outputs.error || (outputs.loaded ? t("No AirPlay devices found yet.") : t("Looking for devices…"))));
   };
   const s = sheet(t("Play on"), [list,
     h("button.wide", { onclick: (e) => act(async () => { await loadOutputs(true); paint(); }, e.currentTarget) }, icon("refresh"), t("Find devices"))],
@@ -639,16 +1007,19 @@ async function openSettings() {
 
 // ---- page ---------------------------------------------------------------------------------
 
+let tabSig = "";
 function drawTabs() {
   if (!els.seg) return;
   const n = activeDl().length;
+  for (const k of ["library", "discover", "downloads"]) els[k].hidden = view.tab !== k;
+  if (tabSig === `${view.tab}|${n}`) return;                      // polling must not rebuild the tab bar
+  tabSig = `${view.tab}|${n}`;
   const tab = (k, label, badge) => h("button" + (view.tab === k ? ".active" : ""), { onclick: () => setTab(k) }, label,
     badge ? h("span.mu-nbadge", fmt.num(badge)) : null);
   put(els.seg, tab("library", t("Library")), tab("discover", t("Discover")), tab("downloads", t("Downloads"), n));
-  for (const k of ["library", "discover", "downloads"]) els[k].hidden = view.tab !== k;
 }
 
-function setTab(k) { view.tab = k; saveView(); drawTabs(); }
+function setTab(k) { view.tab = k; saveView(); drawTabs(); if (k === "discover") drawDiscover(); }
 
 export default {
   async render(el) {
@@ -661,13 +1032,24 @@ export default {
     els.library = h("div", h("div.mu-tools", h("div.mu-search", icon("search"), els.q), h("div.mu-chipwrap", els.chips)), els.body);
 
     els.dq = h("input", { type: "search", placeholder: t("Artist or album…"), autocomplete: "off", enterkeyhint: "search",
-      "aria-label": t("Search"), value: dx.q, oninput: (e) => { dx.q = e.target.value; } });
-    els.dseg = h("div.mu-chips.wrap");
+      "aria-label": t("Search"), value: dx.q, oninput: (e) => {
+        dx.q = e.target.value;
+        els.dclear.hidden = !dx.q;
+        if (!dx.q.trim() && dx.searched) clearSearch();          // emptied: back to the charts
+      } });
+    els.dclear = h("button.mu-clear", { type: "button", hidden: !dx.q, "aria-label": t("Clear"), onclick: () => { clearSearch(); els.dq.focus(); } }, icon("x"));
+    els.dseg = h("div.mu-chips");
     els.dres = h("div");
+    els.gchips = h("div.mu-chips");
+    els.gchipwrap = h("div.mu-chipwrap.mu-gwrap", { hidden: true }, els.gchips);
+    els.genreBox = h("div", { hidden: true });
+    els.railsWrap = h("div");
+    for (const r of RAILS()) { els.rails[r.key] = h("section.mu-rbox"); els.railsWrap.append(els.rails[r.key]); }
+    els.home = h("div", els.gchipwrap, els.genreBox, els.railsWrap);
     els.discover = h("div",
       h("form.mu-find", { onsubmit: (e) => { e.preventDefault(); els.dq.blur(); discover(); } },
-        h("div.mu-search", icon("search"), els.dq), h("button.primary", { type: "submit" }, t("Search"))),
-      h("div.mu-chipwrap", els.dseg), els.dres);
+        h("div.mu-search", icon("search"), els.dq, els.dclear), h("button.primary", { type: "submit" }, t("Search"))),
+      h("div.mu-chipwrap", els.dseg), els.dres, els.home);
     els.dl = h("div");
     els.downloads = h("div", els.dl);
     els.seg = h("div.seg.mu-seg");
@@ -678,7 +1060,9 @@ export default {
         h("button.icon.ghost", { "aria-label": t("Music settings"), onclick: openSettings }, icon("settings"))),
       els.seg, els.library, els.discover, els.downloads, bar);
     put(el, root);
-    drawTabs(); drawLibrary(); drawDiscover(); drawDownloads(); drawBar();
+    drawTabs(); drawLibrary(); drawDownloads(); drawBar();
+    els.dclear.hidden = !dx.q;
+    if (view.tab === "discover") drawDiscover();
 
     const onChange = () => { if (barSig() !== lastBarSig) drawBar(); else tickBar(); };
     pl.listeners.add(onChange);
@@ -687,6 +1071,6 @@ export default {
     timers.push(setInterval(() => loadDownloads(), 4000));
     await Promise.all([loadLibrary(), loadDownloads(), loadOutputs()]);
     pollRemote();
-    return () => { timers.forEach(clearInterval); timers = []; pl.listeners.delete(onChange); root = null; bar = null; };
+    return () => { timers.forEach(clearInterval); timers = []; pl.listeners.delete(onChange); stopPreview(); root = null; bar = null; };
   },
 };

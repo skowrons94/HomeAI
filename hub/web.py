@@ -31,6 +31,7 @@ import secrets
 import time
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 from yarl import URL
 
@@ -47,6 +48,22 @@ def _json(data, status=200):
 # Plugin routes that carry their own credential (the Steam Deck agent has no login cookie: the
 # games plugin checks a signed, expiring link on every request to /dl/).
 PUBLIC_PREFIXES = ("/api/p/games/dl/",)
+
+
+def remote_error(err: Exception) -> str:
+    """A readable sentence for a failed request to an outside service."""
+    _ = i18n._
+    host = getattr(getattr(err, "request_info", None), "url", None)
+    host = getattr(host, "host", None) or getattr(err, "host", None) or ""
+    if isinstance(err, aiohttp.ClientResponseError):
+        if err.status == 404:
+            return _("Not found on {host}", host=host) if host else _("Not found")
+        if err.status == 429:
+            return _("{host} is busy: try again in a minute", host=host or "?")
+        return _("{host} answered with an error ({code})", host=host or "?", code=err.status)
+    if isinstance(err, asyncio.TimeoutError):
+        return _("The service did not answer in time")
+    return _("{host} is not reachable", host=host) if host else _("The service is not reachable")
 
 
 class WebServer:
@@ -135,7 +152,8 @@ class WebServer:
     async def plugin_route(self, request):
         plugin = self.hub.plugins.get(request.match_info["plugin"])
         if plugin is None:
-            raise KeyError(f"plugin {request.match_info['plugin']} is not running")
+            raise KeyError(i18n._("The {name} integration is off: turn it on in Settings",
+                                  name=request.match_info["plugin"]))
         tail = "/" + request.match_info["tail"]
         sub = request.clone(rel_url=URL.build(path=tail, query_string=request.query_string,
                                                encoded=False))
@@ -159,6 +177,10 @@ class WebServer:
             return _json({"error": str(err).strip("'\"")}, 404)
         except (ValueError, TypeError) as err:
             return _json({"error": str(err)}, 400)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            # an outside service failed: say so in words, not "404, message='Not Found', url=..."
+            log.warning("%s %s: %s", request.method, request.path, err)
+            return _json({"error": remote_error(err)}, 502)
         except Exception as err:
             log.exception("%s %s failed", request.method, request.path)
             return _json({"error": str(err) or type(err).__name__}, 500)

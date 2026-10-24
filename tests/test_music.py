@@ -14,7 +14,7 @@ from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 from hub.core import Hub  # noqa: E402
 from hub.plugins.games.find import UnpackError  # noqa: E402
-from hub.plugins.music import MusicPlugin, find as F, musicbrainz as MB, subsonic as S  # noqa: E402
+from hub.plugins.music import MusicPlugin, discover as D, find as F, musicbrainz as MB, subsonic as S  # noqa: E402
 from hub.plugins.music.outputs import AirPlayOutput  # noqa: E402
 from hub.plugins.music.player import Output, Player  # noqa: E402
 
@@ -525,6 +525,166 @@ def test_stop_cancels_streams():
             assert task and not task.done()
             await p.stop()
             assert task.done() and fo.closed >= 1
+        asyncio.run(go())
+
+
+# -- Discover (Deezer + Apple), fake HTTP -----------------------------------------------------------
+
+def dz_album(i, title, artist, **kw):
+    return {"id": i, "title": title, "artist": {"id": 7, "name": artist}, "record_type": kw.get("rt", "album"),
+            "cover_big": f"https://cdn-images.dzcdn.net/images/cover/{i}/500x500.jpg", "release_date": kw.get("date", "2020-01-02")}
+
+
+class FakeDiscover(D.Discover):
+    """Discover with the network replaced by canned answers; ``fail`` lists URL fragments that raise."""
+
+    def __init__(self, owned=None, fail=()):
+        super().__init__(lambda: None, owned)
+        self.calls, self.fail = [], list(fail)
+
+    async def _json(self, url, params=None, retry=False):
+        self.calls.append(url)
+        if any(f in url for f in self.fail):
+            raise D.DiscoverError("down")
+        if "marketingtools" in url:
+            return {"feed": {"results": [
+                {"id": "1", "name": "Fresh", "artistName": "Geolier", "releaseDate": "2999-01-01",
+                 "artworkUrl100": "https://is1-ssl.mzstatic.com/x/100x100bb.jpg"},
+                {"id": "2", "name": "Old", "artistName": "Someone", "releaseDate": "2001-01-01",
+                 "artworkUrl100": "https://is1-ssl.mzstatic.com/y/100x100bb.jpg"}]}}
+        if "/chart/0/albums" in url:
+            return {"data": [dz_album(10, "Kid A (Deluxe Edition)", "Radiohead"), dz_album(11, "Nope", "Nobody")]}
+        if "/chart/0/artists" in url:
+            return {"data": [{"id": 5, "name": "Sfera", "picture_big": "https://cdn-images.dzcdn.net/images/artist/z/500.jpg", "nb_fan": 3}]}
+        if "/album/10" in url:
+            return {"id": 10, "title": "Kid A", "artist": {"id": 3, "name": "Radiohead"}, "label": "XL", "release_date": "2000-10-02",
+                    "genres": {"data": [{"name": "Alt"}]}, "cover_xl": "https://cdn-images.dzcdn.net/images/cover/xl.jpg",
+                    "tracks": {"data": [{"id": 1, "title": "Everything", "duration": 251, "preview": "https://cdnt-preview.dzcdn.net/a.mp3"},
+                                        {"id": 2, "title": "Kid A", "duration": 1, "preview": "javascript:alert(1)"}]}}
+        if "/artist/9/top" in url:
+            return {"data": [{"id": 1, "title": "T", "preview": "", "artist": {"id": 9, "name": "A"}, "album": {"id": 1, "title": "X"}}]}
+        if "/artist/9/albums" in url:
+            return {"data": [dz_album(1, "Dup", "A", date="2019-01-01"), dz_album(2, "Dup (Deluxe)", "A", date="2020-01-01"),
+                             dz_album(3, "Single", "A", rt="single")]}
+        if "/artist/9/related" in url:
+            return {"data": [{"id": 8, "name": "B"}]}
+        if "/artist/9" in url:
+            return {"id": 9, "name": "A", "nb_fan": 10, "picture_xl": "https://cdn-images.dzcdn.net/images/artist/q/1000.jpg"}
+        return {"data": []}
+
+
+def test_discover_parsing_and_ids():
+    assert D.valid_id("123") and not D.valid_id("12a") and not D.valid_id("1/../2") and not D.valid_id("")
+    a = D.map_apple({"id": 5, "name": "N", "artistName": "A", "releaseDate": "2026-10-15",
+                     "artworkUrl100": "https://is1-ssl.mzstatic.com/i/100x100bb.jpg"})
+    assert a["cover"].endswith("/500x500bb.jpg") and a["year"] == 2026 and a["id"] == ""
+    assert D.map_apple({"name": "N", "artworkUrl100": "javascript:x"})["cover"] == ""
+    assert D.map_track({"id": 1, "preview": "javascript:1"})["preview"] == ""
+    assert D.map_album({"id": 1, "cover_big": "https://evil.example/x.jpg"})["cover"] == ""
+
+    async def go():
+        d = FakeDiscover()
+        for bad in ("abc", "1;2", "../x"):
+            for fn in (d.album, d.artist, d.genre_albums):
+                try:
+                    await fn(bad)
+                    raise AssertionError(bad)
+                except D.DiscoverError:
+                    pass
+        assert not d.calls                       # nothing reached the network
+        al = await d.album("10")
+        assert al["label"] == "XL" and al["genres"] == ["Alt"] and al["year"] == 2000 and al["cover"].endswith("xl.jpg")
+        assert al["tracks"][0]["preview"].startswith("https://") and al["tracks"][1]["preview"] == ""
+    asyncio.run(go())
+
+
+def test_discover_rails_cache_and_partial_failure():
+    async def go():
+        d = FakeDiscover()
+        r = await d.rails(["top_it", "new", "chart_albums", "chart_artists", "bogus"])
+        assert [x["key"] for x in r["rails"]] == ["top_it", "new", "chart_albums", "chart_artists"] and not r["errors"]
+        assert [i["title"] for i in next(x for x in r["rails"] if x["key"] == "new")["items"]] == ["Fresh"]
+        n = len(d.calls)
+        await d.rails(["top_it", "chart_albums"])
+        assert len(d.calls) == n                 # served from the cache
+        # one source down: the others still answer, the failure is reported per rail
+        d2 = FakeDiscover(fail=["marketingtools"])
+        r = await d2.rails(["top_it", "chart_albums"])
+        assert [x["key"] for x in r["rails"]] == ["chart_albums"] and list(r["errors"]) == ["top_it"]
+        # stale answer beats an error
+        d3 = FakeDiscover()
+        await d3.chart("albums", 0)
+        d3._cache["chart:0:albums"] = (0.0, 1, d3._cache["chart:0:albums"][2])
+        d3.fail = ["chart"]
+        assert len(await d3.chart("albums", 0)) == 2
+        # bounded
+        d4 = FakeDiscover()
+        for i in range(D.MAX_CACHE + 50):
+            d4._put(f"k{i}", 100, i)
+        assert len(d4._cache) <= D.MAX_CACHE
+    asyncio.run(go())
+
+
+def test_discover_library_matching():
+    async def go():
+        owned = [{"id": "al1", "name": "Kid A", "artist": "Radiohead"}]
+
+        async def lib():
+            return owned
+        d = FakeDiscover(lib)
+        items = (await d.rails(["chart_albums"]))["rails"][0]["items"]
+        by = {i["title"]: i["owned"] for i in items}
+        assert by["Kid A (Deluxe Edition)"] == "al1" and by["Nope"] is None     # edition tags ignored
+        al = await d.album("10")
+        assert al["owned"] == "al1"
+
+        async def dead():
+            raise S.SubsonicError("down")
+        d2 = FakeDiscover(dead)                  # Navidrome down: no marks, no failure, no retry storm
+        items = (await d2.rails(["chart_albums"]))["rails"][0]["items"]
+        assert all(i["owned"] is None for i in items)
+        assert d2._down_until > 0
+    asyncio.run(go())
+
+
+def test_discover_artist_partial_and_dedupe():
+    async def go():
+        d = FakeDiscover(fail=["/related"])
+        a = await d.artist("9")
+        assert a["name"] == "A" and a["picture"].endswith("1000.jpg")
+        assert list(a["errors"]) == ["related"] and a["related"] == []
+        assert len([x for x in a["albums"] if x["title"].startswith("Dup")]) == 1      # regional editions collapse
+        assert a["albums"][-1]["type"] == "single"                                       # albums and EPs first
+        assert len(a["top"]) == 1 and a["top"][0]["preview"] == ""
+        try:
+            await FakeDiscover(fail=["/artist/9"]).artist("9")
+            raise AssertionError
+        except D.DiscoverError:
+            pass
+    asyncio.run(go())
+
+
+def test_discover_routes():
+    with tempfile.TemporaryDirectory() as d:
+        async def go():
+            hub, p = new_plugin(d)
+            await p.start()
+            p.disc = FakeDiscover()
+            @web.middleware
+            async def errors(request, handler):          # the hub's own middleware turns ValueError into a 400
+                try:
+                    return await handler(request)
+                except ValueError as err:
+                    return web.json_response({"error": str(err)}, status=400)
+            app = web.Application(middlewares=[errors])
+            app.router.add_routes([web.RouteDef(r.method, "/api/p/music" + r.path, r.handler, r.kwargs) for r in p.routes()])
+            async with TestClient(TestServer(app)) as c:
+                j = await (await c.get("/api/p/music/discover?rails=chart_artists")).json()
+                assert j["rails"][0]["items"][0]["name"] == "Sfera"
+                r = await c.get("/api/p/music/discover/album/x1")
+                assert r.status == 400 and "error" in await r.json()
+                assert (await c.get("/api/p/music/discover/album/10")).status == 200
+            await p.stop()
         asyncio.run(go())
 
 

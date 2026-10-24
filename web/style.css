@@ -99,7 +99,7 @@ header.page { display: flex; align-items: center; gap: 12px; margin-bottom: 20px
               min-height: 48px; color: var(--muted); }
   nav a.tab span:not(.dot):not(.count-badge) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   input, select, textarea { font-size: 16px; }
-  nav a.tab.active { background: none; color: var(--accent); }
+  nav a.tab.active, nav a.tab.via-more { background: none; color: var(--accent); }
   nav a.tab .dot { left: 50%; margin-left: 6px; top: 4px; }
   main { padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) calc(var(--nav-h) + 30px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left)); }
   h1 { font-size: 26px; }
@@ -221,10 +221,11 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 @keyframes fade { from { opacity: 0; } }
 @keyframes up { from { transform: translateY(24px); opacity: 0; } }
 
-#toasts { position: fixed; z-index: 60; left: 50%; transform: translateX(-50%); bottom: 24px;
+#toasts { position: fixed; z-index: 60; left: 16px; right: 16px; bottom: 24px;
           display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
 @media (max-width: 760px) { #toasts { bottom: calc(var(--nav-h) + 20px + env(safe-area-inset-bottom)); } }
-.toast { background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 999px;
+.toast { background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 22px; max-width: 520px;
+         text-align: center; line-height: 1.35; overflow-wrap: anywhere; pointer-events: auto; cursor: default;
          font-weight: 600; font-size: 14px; animation: up .2s; box-shadow: 0 8px 30px rgb(0 0 0 / .2); }
 .toast.bad { background: var(--bad); color: #fff; }
 
@@ -306,3 +307,14 @@ button.icon.m-add { background: var(--ok); color: #fff; min-width: 32px; min-hei
   input, select, textarea { font-size: 16px !important; }
 }
 .page-root { display: contents; }
+
+/* ---------- inline error card (errorCard in app.js) ---------- */
+.err-card { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px;
+            margin: 24px auto; padding: 28px 20px; max-width: 520px; border-radius: 18px;
+            background: var(--surface); border: 1px solid color-mix(in srgb, var(--bad) 25%, transparent); }
+.err-icon { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center;
+            background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+.err-icon svg { width: 26px; height: 26px; }
+.err-title { font-weight: 700; font-size: 17px; }
+.err-msg { color: var(--muted); font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; max-width: 42ch; }
+.err-actions { justify-content: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }

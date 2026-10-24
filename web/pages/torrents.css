@@ -13,7 +13,17 @@
 .tr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .tr-warn, .tr-error { border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; margin-bottom: 8px;
   border: 1px solid var(--line); overflow-wrap: anywhere; }
-.tr-error { border-color: #d9534f; }
+.tr-error { display: flex; gap: 10px; align-items: flex-start; color: var(--text);
+  background: color-mix(in srgb, var(--bad) 10%, var(--surface)); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
+.tr-error svg { color: var(--bad); flex: none; width: 20px; height: 20px; margin-top: 1px; }
+.tr-head { margin-bottom: 14px; }
+.tr-cats { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; margin-bottom: 12px; padding-bottom: 2px; }
+.tr-cats::-webkit-scrollbar { display: none; }
+.tr-cats .chip { flex: none; white-space: nowrap; }
+.tr-cats .chip.on { background: var(--accent); color: #fff; }
+.tr-cats .chip svg { width: 16px; height: 16px; }
+.tr-filters[hidden] { display: none; }
+.tr-ftoggle { padding: 0 12px; }
 .tr-searched { gap: 6px; margin-bottom: 10px; font-size: 13px; }
 .tr-trk .row { align-items: flex-start; }
 .tr-trk-name { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }

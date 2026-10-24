@@ -119,6 +119,7 @@ const ICONS = {
   film: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 7.5h4M3 12h18M3 16.5h4M17 7.5h4M17 16.5h4"/>',
   network: '<rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="16" y="16" width="6" height="6" rx="1"/><path d="M5 16v-3h14v3M12 8v5"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/>',
   bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/>',
   thermo: '<path d="M14 14.8V4a2 2 0 1 0-4 0v10.8a4 4 0 1 0 4 0z"/>',
   drop: '<path d="M12 2.7 6.3 8.4a8 8 0 1 0 11.4 0z"/>',
@@ -181,9 +182,30 @@ export function icon(name, cls = "") {
 }
 
 export function toast(msg, bad = false) {
-  const el = h(`div.toast${bad ? ".bad" : ""}`, msg);
-  document.getElementById("toasts").append(el);
-  setTimeout(() => el.remove(), bad ? 5000 : 2600);
+  const box = document.getElementById("toasts");
+  msg = String(msg ?? "");
+  // the same message again (a retry, a poll) refreshes the one on screen instead of stacking
+  let el = [...box.children].find((x) => x.textContent === msg && x.classList.contains("bad") === bad);
+  if (!el) {
+    el = h(`div.toast${bad ? ".bad" : ""}`, { role: bad ? "alert" : "status", onclick: () => el.remove() }, msg);
+    box.append(el);
+    while (box.children.length > 3) box.firstChild.remove();
+  }
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.remove(), bad ? 5000 : 2600);
+}
+
+/** A calm inline error: icon, message, optional Try again / Back. Use instead of bare text or a toast
+ *  when a whole view could not load. */
+export function errorCard(message, { title, retry, back } = {}) {
+  const box = h("div.err-card", { role: "alert" },
+    h("div.err-icon", icon("alert")),
+    h("div.err-title", title || t("Something went wrong")),
+    message && h("div.err-msg", String(message)),
+    (retry || back) && h("div.row.err-actions",
+      back && h("button", { onclick: back }, icon("left"), t("Back")),
+      retry && h("button.primary", { onclick: (e) => { e.currentTarget.disabled = true; retry(); } }, t("Try again"))));
+  return box;
 }
 
 /** Modal sheet; returns {el, close}. */
@@ -458,8 +480,10 @@ async function render() {
   const page = PAGES.find((p) => p.id === id) || PAGES[0];
   const pinned = pinnedTabs();
   document.querySelectorAll("nav a.tab").forEach((a) => {
-    const on = a.dataset.id === page.id || (a.dataset.id === "more" && !pinned.includes(page.id) && page.id !== "home");
+    const on = a.dataset.id === page.id;
+    // phones show only pinned tabs + More: More stands for every other page (the sidebar lists them all)
     a.classList.toggle("active", on);
+    a.classList.toggle("via-more", a.dataset.id === "more" && !on && !pinned.includes(page.id) && page.id !== "home");
     on ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current");
   });
   const main = document.querySelector("main");
@@ -478,9 +502,13 @@ async function render() {
   } catch (e) {
     console.error(e);
     if (my === navSeq)
-      main.replaceChildren(h("div.empty", t("Couldn't load {page}: {error}", { page: t(page.title), error: e.message })));
+      main.replaceChildren(errorCard(e.message, { title: t("Couldn't load {page}", { page: t(page.title) }),
+                                                  retry: render }));
   }
 }
+
+/** Render the current page again (a Try again button after a failed load). */
+export const reload = () => render();
 
 /** Same page, different args, without a full re-render when the page supports it. */
 export const go = (hash) => { location.hash = hash; };

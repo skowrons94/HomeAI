@@ -167,7 +167,7 @@ function trackerMenu() {
 
 function draw({ loading = false, more = false, error = "" } = {}) {
   const body = [];
-  if (error) body.push(h("div.tr-error", error));
+  if (error) body.push(h("div.tr-error", { role: "alert" }, icon("alert"), h("span", error)));
   body.push(...state.results.map(card));
   if (loading) body.push(h("div.empty", t("Searching…")));
   else if (!state.results.length && state.q && !error) body.push(h("div.empty", t("No results.")));
@@ -321,15 +321,23 @@ export default {
     els = { go: h("button.primary", { type: "submit" }, icon("search"), t("Search")),
             status: h("div.tr-status"), downloads: h("div.tr-downloads"), searched: h("div.row.wrap.tr-searched"), list: h("div.tr-list") };
     const again = () => state.q && run();
+    const CATS = [["", t("All")], ["movie", t("Films")], ["series", t("Series")], ["music", t("Music")], ["games", t("Games")]];
+    const cats = h("div.tr-cats");
+    const paintCats = () => cats.replaceChildren(
+      ...CATS.map(([k, label]) => h(`button.chip${k === state.category ? ".on" : ""}`, { type: "button",
+        onclick: () => { state.category = k; paintCats(); again(); } }, label)),
+      h("div.spacer"),
+      h(`button.chip.tr-ftoggle${state.showFilters ? ".on" : ""}`, { type: "button", "aria-expanded": String(!!state.showFilters),
+        title: t("Filters"), "aria-label": t("Filters"),
+        onclick: () => { state.showFilters = !state.showFilters; root.querySelector(".tr-filters").hidden = !state.showFilters; paintCats(); } },
+        icon("settings")));
+    paintCats();
     root.replaceChildren(
-      h("div.row", h("h1", t("Torrents")), h("div.spacer"),
+      h("div.row.tr-head", h("h1", t("Torrents")), h("div.spacer"),
         h("button", { onclick: trackerMenu }, icon("settings"), t("Trackers"))),
       h("form.tr-form", { onsubmit: (e) => { e.preventDefault(); run(); } }, input, els.go),
-      h("div.tr-filters",
-        h("label", t("Category"), h("select", { onchange: (e) => { state.category = e.target.value; again(); } },
-          option("", t("All"), state.category), option("movie", t("Films"), state.category),
-          option("series", t("Series"), state.category), option("music", t("Music"), state.category),
-          option("games", t("Games"), state.category))),
+      cats,
+      h("div.tr-filters", { hidden: !state.showFilters },
         h("label", t("Sort"), h("select", { onchange: (e) => { state.sort = e.target.value; again(); } },
           option("relevance", t("Relevance"), state.sort), option("seeders", t("Seeders"), state.sort),
           option("size", t("Size"), state.sort))),

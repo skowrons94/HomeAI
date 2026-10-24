@@ -20,7 +20,16 @@ Everything is editable in the app (Music → gear). Page: **Library | Discover |
 audio from `GET /api/p/music/stream/{id}?suffix=` (the hub proxies Navidrome, Range supported; formats iOS cannot play
 are transcoded to mp3 320).
 
-## Discover (MusicBrainz + Cover Art Archive)
+## Discover (charts, new releases, Deezer, Apple Music)
+The default view of the Discover tab: rails "Top in Italia" and "Nuove uscite" (Apple Music RSS, Italy), "Album / Artisti /
+Brani del momento" (Deezer charts) and a genre chip row (Deezer `/chart/<genre>`). Album and artist sheets (Deezer, no API
+key) show the tracklist with **30 s previews**, label, genres, related artists, and mark what Navidrome already has
+(`hub/plugins/music/discover.py`; in-memory cache: charts 3 h, details 24 h, preview-bearing data 10 min because the signed
+preview URLs expire; a failing source is reported per rail and stale data is served when possible).
+`GET /api/p/music/discover?rails=a,b`, `discover/genres`, `discover/genre/{id}`, `discover/album/{id}`,
+`discover/artist/{id}`, `discover/search?q=`, `discover/resolve?artist=&title=`.
+
+## Discover search (MusicBrainz + Cover Art Archive)
 Artist/album search, discography (studio albums first), tracklist of a release, covers from coverartarchive.org.
 Requests are serialised at one per second with the `Casa/1.0` User-Agent; answers are cached in the store
 (`music.mb.*`, 7 days) and covers in `data/music-art` (capped). An album is **owned** when Navidrome has an album by the

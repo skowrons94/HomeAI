@@ -23,7 +23,8 @@ from ...i18n import _
 log = logging.getLogger("hub.games")
 
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
-IGDB_URL = "https://api.igdb.com/v4/games"
+IGDB_BASE = "https://api.igdb.com/v4/"
+IGDB_URL = IGDB_BASE + "games"
 IMG_URL = "https://images.igdb.com/igdb/image/upload/%s/%s.jpg"
 SGDB_URL = "https://www.steamgriddb.com/api/v2"
 IGDB_GAP = 0.3                    # IGDB allows 4 requests/s
@@ -274,7 +275,7 @@ class Metadata:
         self._token, self._token_exp = data["access_token"], time.time() + float(data.get("expires_in") or 3600)
         return self._token
 
-    async def _igdb(self, body: str) -> list[dict]:
+    async def _igdb(self, body: str, endpoint: str = "games") -> list[dict]:
         if not self.igdb:
             raise MetaError(_("IGDB keys not set"))
         for attempt in (0, 1):
@@ -284,7 +285,7 @@ class Metadata:
                 if wait > 0:
                     await asyncio.sleep(wait)
                 try:
-                    async with self.session.post(IGDB_URL, data=body, headers={
+                    async with self.session.post(IGDB_BASE + endpoint, data=body, headers={
                             "Client-ID": self.igdb_id, "Authorization": "Bearer " + token, "Accept": "application/json"},
                             timeout=aiohttp.ClientTimeout(total=20)) as r:
                         status = r.status
