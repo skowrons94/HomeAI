@@ -2,7 +2,7 @@
 // speakers (hub/plugins/music/). Route: #/music.
 // Tabs: Library | Discover (charts, new releases, search) | Downloads. A mini-player bar sits above the app tab bar. Playback goes either to
 // this phone (<audio> on the proxied stream) or to an AirPlay output (the hub streams and keeps the queue).
-import { api, h, icon, toast, ensureCss, act, fmt, t, sheet, debounce, locale } from "../app.js";
+import { api, h, icon, toast, ensureCss, act, fmt, t, sheet, debounce, locale, registerLocalPlayer, nowBarChanged } from "../app.js";
 
 const P = (path, opts) => api(`p/music/${path}`, opts);
 const KEY = "casa.music.view";
@@ -67,7 +67,7 @@ const section = (title, count) => h("h3.mu-section", title, count != null ? h("s
 const audio = new Audio();
 audio.preload = "auto";
 const pl = { queue: [], index: -1, state: "idle", error: "", remote: null, remoteAt: 0, volume: 100, listeners: new Set() };
-const emit = () => { pl.listeners.forEach((f) => f()); markPlaying(); };
+const emit = () => { pl.listeners.forEach((f) => f()); markPlaying(); nowBarChanged(); };
 const isPhone = () => view.output === PHONE;
 const outName = () => (isPhone() ? t("This phone") : (outputs.list.find((o) => o.id === view.output)?.name || t("Speaker")));
 
@@ -174,6 +174,20 @@ async function control(action, extra = {}) {
     }
   } catch (e) { toast(e.message, true); pollRemote(); }
 }
+// the house-wide "now playing" bar (app.js) shows and controls music playing in this browser
+registerLocalPlayer({
+  get() {
+    const tr = pl.queue[pl.index];
+    if (!audio.src || !tr) return null;
+    return { state: pl.state, title: tr.title, artist: tr.artist, position: audio.currentTime || 0,
+             duration: (Number.isFinite(audio.duration) && audio.duration) || tr.duration || 0,
+             artwork: tr.cover ? `/api/p/music/cover/${encodeURIComponent(tr.cover)}?size=100` : "" };
+  },
+  control(action) {
+    if (action === "toggle") { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); }
+    else if (action === "next") { if (pl.index + 1 < pl.queue.length) phoneLoad(pl.index + 1); else { audio.pause(); pl.state = "idle"; emit(); } }
+  },
+});
 const sendVolume = debounce((v) => control("volume", { value: v }), 120);
 
 /** Show the result of a tap at once; the hub's answer (a moment later) confirms or corrects it. */

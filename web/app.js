@@ -541,10 +541,71 @@ function shell() {
   buildNav();
 }
 
+// ---------------------------------------------------------------- now playing (every page)
+// A slim bar above the tab bar while something plays in the house: the hub's music player, the
+// Apple TV (or any media_player entity), or music playing in this browser (registered by the
+// Music page). The Music page has its own fuller player, so the bar hides there.
+
+let localPlayer = null;   // {get() -> {state, title, artist, artwork, position, duration}, control(action)}
+/** The Music page registers the in-browser player so the bar can show and control it elsewhere. */
+export function registerLocalPlayer(p) { localPlayer = p; drawNowBar(); }
+export const nowBarChanged = () => drawNowBar();
+
+function nowItems() {
+  const out = [];
+  const lp = localPlayer?.get();
+  if (lp && lp.state !== "idle" && lp.title)
+    out.push({ key: "local", ...lp, sub: [lp.artist, t("This phone")].filter(Boolean).join(" · "), page: "music",
+               control: (a) => localPlayer.control(a === "play_pause" ? "toggle" : a) });
+  for (const e of store.entities.values()) {
+    const st = e.state || {};
+    if (e.kind !== "media_player" || !e.available || !["playing", "paused"].includes(st.state)) continue;
+    if (!st.title && !st.app) continue;
+    const pos = st.state === "playing" && st.position_at ? (st.position || 0) + (Date.now() / 1000 - st.position_at) : st.position || 0;
+    out.push({ key: e.id, state: st.state, title: st.title || st.app, artwork: st.artwork,
+               sub: [st.artist, st.output || e.name].filter(Boolean).join(" · "), position: pos, duration: st.duration || 0,
+               page: e.plugin === "music" ? "music" : "home", next: (e.actions || []).includes?.("next") ?? true,
+               control: (a) => callEntity(e.id, a).catch((err) => toast(err.message, true)) });
+  }
+  return out.sort((a, b) => (a.state === "playing" ? 0 : 1) - (b.state === "playing" ? 0 : 1));
+}
+
+let nowTimer = null;
+function drawNowBar() {
+  const bar = document.getElementById("nowbar");
+  if (!bar) return;
+  const onMusic = location.hash.startsWith("#/music");
+  const items = onMusic ? [] : nowItems();
+  const it = items[0];
+  document.body.classList.toggle("has-nowbar", !!it);
+  bar.hidden = !it;
+  clearInterval(nowTimer);
+  if (!it) { bar.replaceChildren(); return; }
+  const playing = it.state === "playing";
+  const fill = h("div");
+  const tick = () => {
+    const x = nowItems().find((y) => y.key === it.key) || it;
+    fill.style.width = x.duration ? `${Math.min(100, (x.position / x.duration) * 100)}%` : "0%";
+  };
+  bar.replaceChildren(
+    h("div.nb-prog", fill),
+    h("button.nb-main", { onclick: () => { location.hash = `#/${it.page}`; }, "aria-label": t("Open the player") },
+      it.artwork ? h("img.nb-art", { src: it.artwork, alt: "", onerror: (e) => e.target.replaceWith(h("span.nb-art", icon("music"))) })
+        : h("span.nb-art", icon(it.page === "music" ? "music" : "tv")),
+      h("span.nb-text", h("b", it.title), h("span", it.sub))),
+    h("button.icon.ghost.nb-btn", { "aria-label": playing ? t("Pause") : t("Play"),
+      onclick: () => { it.control("play_pause"); if (it.key !== "local") { it.state = playing ? "paused" : "playing"; } } },
+      icon(playing ? "pause" : "play")),
+    it.next !== false ? h("button.icon.ghost.nb-btn", { "aria-label": t("Next"), onclick: () => it.control("next") }, icon("next")) : null);
+  tick();
+  if (playing && it.duration) nowTimer = setInterval(tick, 1000);
+}
+
 async function boot() {
   ensureCss(`/static/pages/attention.css?v=${window.CASA_V}`);
   await loadTexts();
   shell();
+  if (!document.getElementById("nowbar")) document.body.append(h("div#nowbar", { hidden: true, role: "region" }));
   try { await refreshState(); } catch (e) { if (e.message !== "login required") toast(e.message, true); return; }
   if (store.people.length && !store.people.includes(person())) await choosePerson({ apply: false });
   await loadPrefs();
@@ -554,6 +615,9 @@ async function boot() {
   if (window.isSecureContext && "serviceWorker" in navigator)
     navigator.serviceWorker.getRegistration("/").then((r) => r?.update()).catch(() => {});
   window.addEventListener("hashchange", render);
+  window.addEventListener("hashchange", drawNowBar);
+  bus.addEventListener("entity", (e) => { if (e.detail?.kind === "media_player") drawNowBar(); });
+  bus.addEventListener("state", drawNowBar);
   // first run: guided setup (skippable; Settings can start it again)
   if (store.onboarding && !location.hash) location.hash = "#/welcome";
   render();

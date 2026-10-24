@@ -79,5 +79,10 @@
   "Something went wrong": "Qualcosa è andato storto",
   "Try again": "Riprova",
   "Couldn't load {page}": "Impossibile aprire {page}",
-  "The {name} integration is off: turn it on in Settings": "L'integrazione {name} è spenta: attivala in Impostazioni"
+  "The {name} integration is off: turn it on in Settings": "L'integrazione {name} è spenta: attivala in Impostazioni",
+  "Open the player": "Apri il lettore",
+  "Pause": "Pausa",
+  "Play": "Riproduci",
+  "Next": "Avanti",
+  "This phone": "Questo telefono"
 }
