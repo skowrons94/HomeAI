@@ -209,5 +209,14 @@
   "Freezer": "Freezer",
   "Pantry": "Dispensa",
   "Alert for food about to expire": "Avviso per il cibo in scadenza",
-  "One notification a day when something in the fridge expires tomorrow or has expired.": "Una notifica al giorno quando qualcosa in frigo scade domani o è già scaduto."
+  "One notification a day when something in the fridge expires tomorrow or has expired.": "Una notifica al giorno quando qualcosa in frigo scade domani o è già scaduto.",
+  "Gas price": "Prezzo del gas",
+  "Gas energy content": "Potere calorifico del gas",
+  "Consumption read interval": "Intervallo di lettura dei consumi",
+  "Latitude": "Latitudine",
+  "Longitude": "Longitudine",
+  "Your tariff per standard cubic metre of gas, used for the cost estimates in Heating": "La tua tariffa per metro cubo standard di gas, usata per stimare i costi in Riscaldamento",
+  "Converts the boiler's kWh into cubic metres; see your gas bill (PCS)": "Converte i kWh della caldaia in metri cubi; lo trovi in bolletta (PCS)",
+  "How often the gas use is read from the Ariston cloud": "Ogni quanto leggere i consumi di gas dal cloud Ariston",
+  "Home location for the outdoor temperature and degree-days (Open-Meteo, no key). Empty = use the boiler's outdoor probe": "Posizione di casa per la temperatura esterna e i gradi-giorno (Open-Meteo, senza chiave). Vuoto = usa la sonda esterna della caldaia"
 }

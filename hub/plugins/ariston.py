@@ -12,6 +12,11 @@ thermostats, exactly like the original standalone bridge.
     expose_hot_water = true
     zone_names = { "1" = "Heating" }
     room = "Casa"
+    gas_price = 1.10          # EUR per standard m3 of gas: put your own tariff
+    gas_kwh_per_m3 = 10.69    # energy of 1 Smc (used to convert kWh <-> m3)
+    energy_interval = 45      # minutes between reads of the boiler's consumption data
+    latitude = 45.4           # for outdoor temperature (Open-Meteo); both empty = boiler probe only
+    longitude = 11.9
 """
 
 from __future__ import annotations
@@ -19,10 +24,14 @@ from __future__ import annotations
 import asyncio
 import time
 
+import aiohttp
+from aiohttp import web
+
 from pyhap.accessory import Accessory
 from pyhap.const import CATEGORY_THERMOSTAT
 
 from ..core import Entity, Plugin
+from ..heating import GAS_KWH_PER_M3, Heating
 from ..i18n import _
 
 HK_OFF, HK_HEAT, HK_COOL, HK_AUTO = 0, 1, 2, 3
@@ -50,6 +59,16 @@ class AristonPlugin(Plugin):
         {"key": "expose_hot_water", "label": "Expose hot water", "type": "bool", "default": True, "help": "Show domestic hot water as a thermostat"},
         {"key": "hot_water_name", "label": "Hot water name", "type": "text", "default": "Hot Water", "advanced": True},
         {"key": "room", "label": "Room", "type": "text"},
+        {"key": "gas_price", "label": "Gas price", "type": "number", "default": 1.10, "min": 0, "step": 0.01,
+         "unit": "€/Smc", "help": "Your tariff per standard cubic metre of gas, used for the cost estimates in Heating"},
+        {"key": "gas_kwh_per_m3", "label": "Gas energy content", "type": "number", "default": 10.69, "min": 5,
+         "max": 15, "step": 0.01, "unit": "kWh/Smc", "advanced": True,
+         "help": "Converts the boiler's kWh into cubic metres; see your gas bill (PCS)"},
+        {"key": "energy_interval", "label": "Consumption read interval", "type": "number", "default": 45,
+         "min": 30, "unit": "min", "advanced": True, "help": "How often the gas use is read from the Ariston cloud"},
+        {"key": "latitude", "label": "Latitude", "type": "number", "step": 0.01, "advanced": True,
+         "help": "Home location for the outdoor temperature and degree-days (Open-Meteo, no key). Empty = use the boiler's outdoor probe"},
+        {"key": "longitude", "label": "Longitude", "type": "number", "step": 0.01, "advanced": True},
     ]
 
     # the cloud needs time to push a change to the boiler and back; ignore
@@ -63,6 +82,9 @@ class AristonPlugin(Plugin):
         self._last_write = 0.0
         self.poll_interval = max(60, int(config.get("poll_interval", 120)))
         self.layout: dict = hub.store.get("ariston.layout") or {}
+        self.heat = Heating(hub.store, _num(config.get("gas_price"), 1.10),
+                            _num(config.get("gas_kwh_per_m3"), GAS_KWH_PER_M3) or GAS_KWH_PER_M3)
+        self.energy_interval = max(30, int(_num(config.get("energy_interval"), 45)))
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -79,6 +101,8 @@ class AristonPlugin(Plugin):
             self.error = _("Offline: {err}", err=err)
         self._create_entities()
         self.hub.every(self.poll_interval, self.refresh, "ariston poll")
+        self.hub.every(self.energy_interval * 60, self.refresh_energy, "ariston energy", initial_delay=45)
+        self.hub.every(3 * 3600, self.refresh_weather, "ariston weather", initial_delay=20)
 
     async def _connect(self):
         from ariston import Ariston, AristonGalevoDevice, AristonVelisBaseDevice
@@ -157,6 +181,12 @@ class AristonPlugin(Plugin):
             ))
             self.hub.homekit.add("ariston.dhw",
                                  lambda d: AristonThermostat(d, self.hub, "ariston.dhw"))
+        self.hub.add_entity(Entity(
+            id="ariston.energy", name=_("Heating use"), kind="sensor", plugin=self.name, room=room,
+            attrs={"hidden": True, "group": _("Heating"), "icon": "flame",
+                   "units": {"heating_kwh_today": "kWh", "dhw_kwh_today": "kWh", "heating_hours_today": "h",
+                             "burner_hours_today": "h", "outdoor_temp": "°C"}},
+        ))
         self._push_state()
 
     def status(self):
@@ -173,11 +203,135 @@ class AristonPlugin(Plugin):
         async with self.lock:
             try:
                 await self.device.async_update_state()
-            except Exception:
+            except Exception as err:
                 for eid in self._entity_ids():
                     self.hub.update(eid, available=False)
+                self.heat.error, self.heat.error_ts = str(err), time.time()
                 raise
+        self.heat.error = None
         self._push_state()
+        self._observe()
+
+    # -- heating log and consumption ---------------------------------------------------------
+
+    def _observe(self):
+        """Feed the heating log with what the boiler just reported."""
+        dev = self.device
+        if dev is None or not self.layout.get("zones"):
+            return
+        try:
+            zones = [self.hub.entities.get(f"ariston.zone{z['zone']}") for z in self.layout["zones"]]
+            zones = [e for e in zones if e is not None]
+            if not zones:
+                return
+            st = zones[0].state
+
+            def prop(name):
+                try:
+                    v = getattr(dev, name)
+                except Exception:
+                    return None
+                return None if v is None else bool(v)
+
+            outdoor = None
+            try:
+                outdoor = _num(dev.outside_temp_value, None)
+            except Exception:
+                pass
+            now = time.time()
+            self.heat.observe(
+                now, heat_req=any(e.state.get("heating") for e in zones), flame=prop("is_flame_on_value"),
+                pump=prop("is_heating_pump_on_value"), temp=st.get("current_temperature"),
+                target=st.get("target_temperature"), mode=st.get("mode"), outdoor=outdoor)
+            if outdoor is not None:
+                self.heat.add_boiler_outdoor(now, outdoor)
+            self._push_energy()
+        except Exception as err:
+            self.log.warning("heating log failed: %s", err)
+
+    def _push_energy(self):
+        if "ariston.energy" not in self.hub.entities:
+            return
+        t = self.heat.today()
+        h = t["hours"]
+        state = {"heating_hours_today": round(h["heat"], 2),
+                 "burner_hours_today": round(h["heat"] + h["dhw"] + h["other"], 2)}
+        if t["heat_kwh"] is not None:
+            state["heating_kwh_today"] = t["heat_kwh"]
+        if t["dhw_kwh"] is not None:
+            state["dhw_kwh_today"] = t["dhw_kwh"]
+        if t["out_c"] is not None:
+            state["outdoor_temp"] = t["out_c"]
+        self.hub.update("ariston.energy", available=True, **state)
+
+    async def refresh_energy(self):
+        """Gas use per day / month from the cloud (rate-limited: one read per energy_interval)."""
+        dev = self.device
+        if dev is None or not hasattr(dev, "async_update_energy"):
+            return
+        if time.time() - (self.heat.energy_ts or 0) < self.energy_interval * 60 * 0.9:
+            return  # restarted recently: the stored figures are fresh enough
+        async with self.lock:
+            try:
+                await dev.async_update_energy()
+            except Exception as err:
+                self.heat.error, self.heat.error_ts = str(err), time.time()
+                raise
+        seqs = list(getattr(dev, "consumptions_sequences", None) or [])
+        if not seqs:
+            self.heat.error, self.heat.error_ts = _("The boiler returned no consumption data yet"), time.time()
+            return
+        try:
+            unit = dev.gas_energy_unit
+            self.heat.gas_type = dev.gas_type
+        except Exception:
+            unit = None
+        self.hub.store.set("ariston.heat.raw", [{"k": q.get("k"), "p": q.get("p"), "v": q.get("v")} for q in seqs])
+        self.heat.ingest_energy(seqs, unit)
+        self.heat.error = None
+        self._push_energy()
+
+    async def refresh_weather(self):
+        """Hourly outdoor temperature from Open-Meteo (free, no key)."""
+        lat, lon = _num(self.config.get("latitude"), None), _num(self.config.get("longitude"), None)
+        if lat is None or lon is None:
+            return
+        first = not self.hub.store.get("ariston.heat.weather_ok")
+        url = ("https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&hourly=temperature_2m"
+               "&past_days=%d&forecast_days=1&timezone=UTC&timeformat=unixtime" % (lat, lon, 60 if first else 3))
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
+            async with s.get(url) as r:
+                r.raise_for_status()
+                data = await r.json()
+        hourly = data.get("hourly") or {}
+        pts = list(zip(hourly.get("time") or [], hourly.get("temperature_2m") or []))
+        self.heat.add_outdoor([(t, v) for t, v in pts if t <= time.time() + 3600], "om")
+        self.hub.store.set("ariston.heat.weather_ok", True)
+
+    # -- routes ---------------------------------------------------------------------------------
+
+    def routes(self):
+        return [web.get("/today", self.r_today), web.get("/summary", self.r_summary),
+                web.get("/usage", self.r_usage), web.get("/sessions", self.r_sessions)]
+
+    @staticmethod
+    def _days(request, default):
+        try:
+            return max(1, min(int(request.query.get("days", default)), 800))
+        except ValueError:
+            return default
+
+    async def r_today(self, request):
+        return web.json_response(self.heat.today())
+
+    async def r_summary(self, request):
+        return web.json_response(self.heat.summary())
+
+    async def r_usage(self, request):
+        return web.json_response(self.heat.usage(self._days(request, 30)))
+
+    async def r_sessions(self, request):
+        return web.json_response(self.heat.sessions(self._days(request, 3)))
 
     def _entity_ids(self):
         return [f"ariston.zone{z['zone']}" for z in self.layout.get("zones", [])] + ["ariston.dhw"]
@@ -232,6 +386,7 @@ class AristonPlugin(Plugin):
 
     async def set_zone_temp(self, zone: int, value):
         await self._write(self.device.async_set_comfort_temp, float(value), zone)
+        self.heat.note_change("target", float(value))
         self.hub.update(f"ariston.zone{zone}", target_temperature=float(value))
 
     async def set_zone_mode(self, zone: int, mode: str):
@@ -263,6 +418,7 @@ class AristonPlugin(Plugin):
             want = ZoneMode.TIME_PROGRAM if mode == "auto" else ZoneMode.MANUAL
             if want.value in zone_opts and dev.get_zone_mode(zone) != want:
                 await self._write(dev.async_set_zone_mode, want, zone)
+        self.heat.note_change("mode", mode)
         self.hub.update(f"ariston.zone{zone}", mode=mode)
 
     async def set_dhw_temp(self, value):

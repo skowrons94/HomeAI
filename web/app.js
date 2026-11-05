@@ -463,6 +463,7 @@ export const PAGES = [
   { id: "games", title: "Games", icon: "play", plugin: "games" },
   { id: "torrents", title: "Torrents", icon: "search", plugin: "torrents" },
   { id: "social", title: "Feed", icon: "users", plugin: "sync" },
+  { id: "heating", title: "Heating", icon: "flame", plugin: "ariston" },
   { id: "history", title: "History", icon: "chart" },
   { id: "network", title: "Network", icon: "network" },
   { id: "settings", title: "Settings", icon: "settings" },

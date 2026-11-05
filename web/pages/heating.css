@@ -1,0 +1,65 @@
+/* Heating page */
+.heat-now { display: flex; align-items: center; gap: 14px; padding: 14px 16px; margin-bottom: 12px; }
+.heat-lamp { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; flex: none;
+             background: color-mix(in srgb, var(--c) 18%, transparent); color: var(--c); }
+.heat-lamp svg { width: 22px; height: 22px; }
+.heat-nowtxt { flex: 1; min-width: 0; }
+.heat-state { font-size: 17px; font-weight: 650; }
+.heat-out { text-align: right; display: flex; flex-direction: column; font-size: 13px; }
+.heat-out b { font-size: 17px; font-variant-numeric: tabular-nums; }
+.heat-note { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border-radius: var(--radius-sm);
+             margin-bottom: 12px; font-size: 13px; background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.heat-note svg { width: 18px; height: 18px; flex: none; color: var(--warn); margin-top: 1px; }
+.heat-tip { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; margin-bottom: 8px;
+            border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 12%, transparent); font-size: 14px; }
+.heat-tip svg { width: 18px; height: 18px; flex: none; color: var(--accent); margin-top: 1px; }
+
+.heat-today, .heat-chart { padding: 14px 14px 12px; }
+.heat-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin: 0 2px 8px; }
+.heat-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.heat-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.heat-legend i.line { height: 3px; border-radius: 2px; width: 14px; }
+.heat-bar { position: relative; background: var(--surface-2); border-radius: 8px; padding: 4px 0; overflow: hidden; }
+.heat-lane { position: relative; }
+.heat-lane.req { height: 8px; margin-bottom: 4px; }
+.heat-lane.burn { height: 26px; }
+.heat-seg { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.heat-seg.request { background: color-mix(in srgb, var(--on) 55%, transparent); }
+.heat-seg.heat { background: #ff7a45; }
+.heat-seg.dhw { background: #33a4d8; }
+.heat-seg.other { background: #9a9aa5; }
+.heat-nowmark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); margin-left: -1px; opacity: .7; }
+.heat-ticks { position: relative; height: 16px; margin-top: 4px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.heat-ticks span { position: absolute; white-space: nowrap; transform: translateX(-50%); }
+.heat-ticks span:first-child { transform: none; }
+.heat-ticks span:last-child { transform: translateX(-100%); }
+.heat-hint { text-align: center; font-size: 13px; padding: 10px 6px; }
+.heat-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; margin-top: 10px; }
+@media (min-width: 700px) { .heat-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.heat-stat { display: flex; flex-direction: column; font-size: 13px; min-width: 0; }
+.heat-stat b { font-size: 19px; font-variant-numeric: tabular-nums; font-weight: 650; }
+.heat-stat small { font-size: 12px; }
+
+.heat-chart-head { gap: 10px; margin-bottom: 8px; font-size: 13px; }
+.heat-canvas { display: block; width: 100%; height: 230px; touch-action: pan-y; cursor: crosshair; }
+@media (min-width: 900px) { .heat-canvas { height: 280px; } }
+
+.heat-totals { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+@media (min-width: 700px) { .heat-totals { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.heat-total { padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.heat-total > .muted:first-child { text-transform: capitalize; font-weight: 600; }
+.heat-total .big { font-size: 24px; font-variant-numeric: tabular-nums; }
+.heat-split { display: flex; gap: 14px; font-size: 13px; color: var(--muted); }
+.heat-split span { display: inline-flex; align-items: center; gap: 6px; }
+.heat-split i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.heat-assump { grid-column: 1 / -1; font-size: 12px; padding: 0 4px; }
+
+.heat-day { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+            margin: 14px 4px 6px; }
+.heat-day:first-child { margin-top: 0; }
+.heat-log { margin-bottom: 8px; }
+.heat-row { align-items: flex-start !important; }
+.heat-dot { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; flex: none; color: #fff; }
+.heat-dot svg { width: 17px; height: 17px; }
+.heat-dot.small { background: var(--surface-2); color: var(--muted); width: 28px; height: 28px; margin: 2px; }
+.heat-row .small { font-size: 12.5px; }
