@@ -218,5 +218,22 @@
   "Your tariff per standard cubic metre of gas, used for the cost estimates in Heating": "La tua tariffa per metro cubo standard di gas, usata per stimare i costi in Riscaldamento",
   "Converts the boiler's kWh into cubic metres; see your gas bill (PCS)": "Converte i kWh della caldaia in metri cubi; lo trovi in bolletta (PCS)",
   "How often the gas use is read from the Ariston cloud": "Ogni quanto leggere i consumi di gas dal cloud Ariston",
-  "Home location for the outdoor temperature and degree-days (Open-Meteo, no key). Empty = use the boiler's outdoor probe": "Posizione di casa per la temperatura esterna e i gradi-giorno (Open-Meteo, senza chiave). Vuoto = usa la sonda esterna della caldaia"
+  "Home location for the outdoor temperature and degree-days (Open-Meteo, no key). Empty = use the boiler's outdoor probe": "Posizione di casa per la temperatura esterna e i gradi-giorno (Open-Meteo, senza chiave). Vuoto = usa la sonda esterna della caldaia",
+  "Scan the library for subtitles": "Cerca sottotitoli in tutta la libreria",
+  "Scan series too": "Anche le serie",
+  "Videos per day": "Video al giorno",
+  "Preferred translator": "Traduttore preferito",
+  "Translate during the scan": "Traduci durante la ricerca",
+  "DeepL API key": "Chiave API DeepL",
+  "Anthropic API key": "Chiave API Anthropic",
+  "Claude model": "Modello Claude",
+  "In the background, one video at a time: find Italian subtitles for films and episodes that have none (and no Italian audio), within the daily limit.": "In sottofondo, un video alla volta: cerca i sottotitoli italiani per film ed episodi che non li hanno (e non hanno l'audio italiano), entro il limite giornaliero.",
+  "The library scan stops for the day after this many searches (OpenSubtitles free allows about 20 downloads a day; keep some for manual picks). 0 = no limit.": "La ricerca si ferma per la giornata dopo questo numero di ricerche (OpenSubtitles gratuito consente circa 20 download al giorno; tienine qualcuno per le scelte a mano). 0 = nessun limite.",
+  "Used to translate an English subtitle when no Italian one exists. Needs a DeepL or Anthropic key below; with none, translation is off.": "Usato per tradurre un sottotitolo inglese quando non ne esiste uno italiano. Serve una chiave DeepL o Anthropic qui sotto; senza, la traduzione è spenta.",
+  "When the scan finds no Italian subtitle but an English one, translate it (uses your DeepL or Claude quota; counts toward the daily limit). A real Italian subtitle replaces it later.": "Se la ricerca non trova sottotitoli italiani ma ne trova di inglesi, li traduce (usa la quota DeepL o Claude; conta nel limite giornaliero). Un vero sottotitolo italiano lo sostituisce poi.",
+  "Free plan: 500,000 characters a month (about 8 films).": "Piano gratuito: 500.000 caratteri al mese (circa 8 film).",
+  "Pay as you go; a film costs a few cents with the default model.": "A consumo; un film costa pochi centesimi con il modello predefinito.",
+  "Model used to translate subtitles.": "Modello usato per tradurre i sottotitoli.",
+  "Get a DeepL API key": "Ottieni una chiave API DeepL",
+  "Get an Anthropic API key": "Ottieni una chiave API Anthropic"
 }

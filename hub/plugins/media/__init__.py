@@ -43,7 +43,8 @@ from .indexers import Indexers, Query, magnet
 from .library import Library
 from .metadata import Metadata
 from .ranking import Profile, Want, parse, rank
-from .subtitles import Subtitles, Video
+from .subs_scan import Scanner
+from .subtitles import Cand, Subtitles, Video
 from .transmission import Transmission
 from .watcher import Watcher
 
@@ -106,8 +107,30 @@ SCHEMA = [
     _f("subtitles.opensubtitles_username", "OpenSubtitles user", advanced=True,
        help="A free account raises the daily download limit."),
     _f("subtitles.opensubtitles_password", "OpenSubtitles password", "password", advanced=True),
-    _f("subtitles.subdl_api_key", "SubDL API key", "password", advanced=True,
+    _f("subtitles.subdl_api_key", "SubDL API key", "password",
        link={"url": "https://subdl.com/panel/api", "label": "Get a free API key"}),
+    _f("subtitles.scan_enabled", "Scan the library for subtitles", "bool", default=True,
+       help="In the background, one video at a time: find Italian subtitles for films and episodes that "
+            "have none (and no Italian audio), within the daily limit."),
+    _f("subtitles.scan_series", "Scan series too", "bool", default=True),
+    _f("subtitles.scan_per_day", "Videos per day", "number", default=12, min=0, max=200,
+       help="The library scan stops for the day after this many searches (OpenSubtitles free allows about "
+            "20 downloads a day; keep some for manual picks). 0 = no limit."),
+    _f("subtitles.translator", "Preferred translator", "select", default="auto",
+       options=["auto", "deepl", "claude"],
+       help="Used to translate an English subtitle when no Italian one exists. Needs a DeepL or Anthropic key "
+            "below; with none, translation is off."),
+    _f("subtitles.scan_translate", "Translate during the scan", "bool", default=True,
+       help="When the scan finds no Italian subtitle but an English one, translate it (uses your DeepL or "
+            "Claude quota; counts toward the daily limit). A real Italian subtitle replaces it later."),
+    _f("subtitles.deepl_api_key", "DeepL API key", "password",
+       help="Free plan: 500,000 characters a month (about 8 films).",
+       link={"url": "https://www.deepl.com/pro-api", "label": "Get a DeepL API key"}),
+    _f("subtitles.anthropic_api_key", "Anthropic API key", "password",
+       help="Pay as you go; a film costs a few cents with the default model.",
+       link={"url": "https://console.anthropic.com/", "label": "Get an Anthropic API key"}),
+    _f("subtitles.claude_model", "Claude model", default="claude-haiku-5-5", advanced=True,
+       help="Model used to translate subtitles."),
     _f("proxy.url", "Proxy / VPN", advanced=True, placeholder="socks5h://user:pass@host:1080",
        help="For DNS-blocked trackers. socks5h resolves DNS on the proxy; http://host:3128 also works. "
             "Point it at your VPN's proxy."),
@@ -138,6 +161,7 @@ class MediaPlugin(Plugin):
         self.downloads = Downloads(self, c)
         self.watcher = Watcher(self, c)
         self.subtitles = Subtitles(self, c)
+        self.scanner = Scanner(self.subtitles, self, c)
         self._releases: dict[str, tuple[float, dict]] = {}  # hash -> release, for one-click
 
     async def start(self):
@@ -154,6 +178,7 @@ class MediaPlugin(Plugin):
         hub.every(6 * 3600, self._scan, "library scan", initial_delay=5)
         hub.every(15 * 60, self.watcher.tick, "watchlist", initial_delay=90)
         hub.every(6 * 3600, self.subtitles.retry, "subtitle retry", initial_delay=600)
+        hub.every(120, self.scanner.tick, "subtitle scan", initial_delay=240)
 
     async def _sync_download_dir(self, path: str):
         """Best effort: make Transmission's default download folder match our setting."""
@@ -183,7 +208,7 @@ class MediaPlugin(Plugin):
             "library": self.library.stats(),
             "watchlist": len(self.watcher.keys()),
             "active_downloads": len(self.downloads.rows(True)),
-            "subtitles": self.subtitles.status(),
+            "subtitles": {**self.subtitles.status(), "scan": self.scanner.status()},
             "profile": {"languages": self.profile.languages, "quality": self.profile.quality,
                         "allow_4k": self.profile.allow_4k},
         }
@@ -299,6 +324,13 @@ class MediaPlugin(Plugin):
             web.post("/library/file/{id}/delete", self.r_lib_delete),
             web.get("/subtitles", self.r_subs_get),
             web.post("/subtitles", self.r_subs_post),
+            web.get("/subtitles/list", self.r_subs_list),
+            web.post("/subtitles/search", self.r_subs_search),
+            web.post("/subtitles/pick", self.r_subs_pick),
+            web.post("/subtitles/adapt", self.r_subs_adapt),
+            web.post("/subtitles/translate", self.r_subs_translate),
+            web.get("/subtitles/scan", self.r_subs_scan),
+            web.post("/subtitles/scan", self.r_subs_scan),
             web.post("/library/scan", self.r_scan),
             web.get("/indexers", lambda r: _json(self._indexer_info())),
             web.post("/indexers/test", self.r_indexers_test),
@@ -530,6 +562,94 @@ class MediaPlugin(Plugin):
                              imdb_id=b.get("imdb_id") or "", season=pr.season, episode=pr.episode,
                              release=os.path.splitext(os.path.basename(p))[0]), manual=True)
         return _json({"started": len(videos)})
+
+    # -- manual subtitle tools (movie page / episode sheet) ----------------------------------
+
+    async def _sub_video(self, fid: str, meta: dict | None = None) -> Video:
+        """A Video for a library file id (movie ``m-…`` or episode ``e-…``)."""
+        meta = meta or {}
+        try:
+            kind, entry = await asyncio.to_thread(self.library.entry, fid)
+            path = await asyncio.to_thread(self.library._video, kind, entry)
+        except KeyError as err:
+            raise web.HTTPNotFound(text=str(err).strip("'\""))
+        except (OSError, FileNotFoundError) as err:
+            raise web.HTTPNotFound(text=str(err))
+        if not self.subtitles.allowed(path):
+            raise web.HTTPForbidden(text=_("path is outside the library"))
+        pr = parse(os.path.basename(path))
+        return Video(path, title=meta.get("title") or pr.head or "", year=meta.get("year") or pr.year,
+                     imdb_id=meta.get("imdb_id") or "", season=pr.season, episode=pr.episode,
+                     release=os.path.splitext(os.path.basename(path))[0])
+
+    async def _sub_call(self, request, fn, post=True):
+        """Common shell: body -> Video -> fn(video, body); errors become {"error"} with a 4xx."""
+        try:
+            b = (await request.json()) if post else dict(request.query)
+            if not self.subtitles.enabled:
+                return _json({"error": _("subtitles are disabled in settings")}, 400)
+            v = await self._sub_video(b.get("file", ""), b)
+            return _json(await fn(v, b))
+        except web.HTTPException as err:
+            return _json({"error": err.text or err.reason}, err.status)
+        except (ValueError, RuntimeError, FileNotFoundError) as err:
+            return _json({"error": str(err)}, 400)
+        except Exception as err:
+            log.warning("subtitle request failed: %s", err)
+            return _json({"error": str(err) or type(err).__name__}, 500)
+
+    async def r_subs_list(self, request):
+        return await self._sub_call(request, lambda v, b: self.subtitles.listing(v), post=False)
+
+    async def r_subs_search(self, request):
+        return await self._sub_call(request, lambda v, b: self.subtitles.search_online(v, b.get("langs")))
+
+    async def r_subs_pick(self, request):
+        async def go(v, b):
+            if b.get("provider") not in self.subtitles.providers.configured() or not b.get("id"):
+                raise ValueError(_("unknown subtitle"))
+            c = Cand(b["provider"], str(b["id"]), release=b.get("release") or "", lang=b.get("lang") or "",
+                     hash_match=bool(b.get("hash_match")))
+            self.subtitles.start_job(v, "pick", lambda _p: self.subtitles.do_pick(
+                v, c, b.get("lang") or None, bool(b.get("force"))))
+            return {"started": True}
+        return await self._sub_call(request, go)
+
+    async def r_subs_adapt(self, request):
+        async def go(v, b):
+            subs, mode = self.subtitles, b.get("mode") or "auto"
+            if mode == "auto":
+                subs.start_job(v, "adapt", lambda _p: subs.do_adapt_auto(v, b.get("name", "")))
+                return {"started": True}
+            if mode == "restore":
+                return await subs.restore(v, b.get("name", ""))
+            return await subs.adjust(v, b.get("name", ""), float(b.get("offset") or 0),
+                                     float(b.get("scale") or 1), bool(b.get("save")))
+        return await self._sub_call(request, go)
+
+    async def r_subs_translate(self, request):
+        async def go(v, b):
+            subs = self.subtitles
+            if not subs.translator_names():
+                raise ValueError(_("no translation service is set up (DeepL or Claude key in Settings → Media)"))
+            src = b.get("source") if isinstance(b.get("source"), dict) else None
+            if b.get("dry"):
+                return await subs.estimate(v, src)
+            subs.start_job(v, "translate", lambda p: subs.do_translate(
+                v, b.get("provider") or None, src, p, replace_real=False))
+            return {"started": True}
+        return await self._sub_call(request, go)
+
+    async def r_subs_scan(self, request):
+        sc = self.scanner
+        if request.method == "POST":
+            b = await request.json()
+            if "paused" in b:
+                sc.set_paused(bool(b["paused"]))
+            if b.get("run"):
+                self.hub.spawn(sc.tick(), "subtitle scan")
+        await sc.refresh()
+        return _json(sc.status())
 
     def _indexer_info(self):
         return {"proxy": _mask(self.indexers.proxy), "enabled": self.indexers.enabled,

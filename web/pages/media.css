@@ -150,3 +150,21 @@
 .m-dl svg { flex: none; }
 .m-dlsize { font-size: 12px; font-weight: 600; opacity: .8; margin-left: 4px; }
 .m-path { padding: 8px 10px; border-radius: 10px; background: var(--surface-2); }
+
+/* subtitles sheet + library scan card */
+.m-scan { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; margin: 0 0 12px; }
+.m-scan:empty { display: none; }
+.m-cc { font-size: 12px; font-weight: 700; letter-spacing: .02em; min-width: 40px; }
+.m-banner.m-ok { background: color-mix(in srgb, var(--ok) 14%, var(--surface)); }
+.m-adapt { background: var(--surface-2); border-radius: var(--radius-sm); padding: 12px; }
+.m-adapt input[type=number] { min-height: 40px; }
+.m-prev { display: flex; flex-direction: column; gap: 4px; }
+.m-prow { display: grid; grid-template-columns: 44px 138px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.m-cand .chip { white-space: nowrap; }
+.m-cand b { overflow-wrap: anywhere; white-space: normal; }
+.list > .item.m-cand { flex-wrap: wrap; }
+.m-cand > .stack { flex: 1 1 200px; }
+@media (max-width: 760px) { .m-prow { grid-template-columns: 40px 120px minmax(0, 1fr); } .m-cand > button { margin-left: auto; } }
+.list > .item.m-sub { flex-wrap: wrap; }
+.m-subact { margin-left: auto; justify-content: flex-end; }
+.m-subact button { white-space: normal; text-align: center; }

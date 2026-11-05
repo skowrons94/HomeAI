@@ -24,6 +24,9 @@ const infuseLink = () => h("a.btn.ghost", { href: INFUSE }, t("Open in Infuse"))
 const flags = (langs) => (langs || []).map((l) => FLAG[l] || l.toUpperCase()).join(" ");
 
 let status = null;  // plugin status, refreshed on page load
+const subsMod = () => import(`./media_subs.js?v=${window.CASA_V}`);
+/** The "Subtitles" sheet of one library video (search, adapt, translate); `fileId` from the library index. */
+const openSubs = async (meta, onChange) => (await subsMod()).openSubsSheet(meta, { onChange });
 
 export default {
   async render(root, args) {
@@ -381,6 +384,8 @@ async function renderDetail(root, type, id, on) {
     type === "movie" && it.in_library && it.library_file && fileCard(it.library_file, {
       title: it.title, onDeleted: () => { it.in_library = false; it.library_file = null; reload(); } }),
     type === "movie" && it.in_library && it.library_path && subsButton(it),
+    type === "movie" && it.in_library && it.library_file && h("button", { onclick: () => openSubs({
+      file: it.library_file.id, title: it.title, year: it.year, imdb_id: it.imdb_id }) }, t("Subtitles…")),
     favRow, dlBox,
     it.overview && h("div.stack", { style: { gap: "4px" } }, h("p.overview", { style: { margin: 0 } }, it.overview),
       english && h("span.small.muted", t("Plot in English"))),
@@ -412,7 +417,7 @@ function subsButton(it) {
     if (key === "searching" && n < 120) setTimeout(() => poll(n + 1).catch(() => {}), 3000);
   }
   poll().catch(() => {});
-  return h("span.row", { style: { gap: "6px" } }, btn, chip);
+  return h("span.row.wrap", { style: { gap: "6px" } }, btn, chip);
 }
 
 // "Shared feed" (hub/plugins/sync): my watched/rating state + what friends said. Hidden if the plugin errors.
@@ -488,6 +493,8 @@ async function seasonsView(it, on) {
           h("b.ellipsis", e.title || t("Episode {n}", { n: e.episode })),
           h("div.small.muted", e.air_date ? fmt.date(e.air_date, { weekday: false }) : t("TBA"))),
         e.in_library ? [h("span.chip.ok", icon("check"), t("Library")),
+          e.file_id && status?.subtitles?.enabled && h("button.icon.ghost.m-cc", { title: t("Subtitles"), "aria-label": t("Subtitles"),
+            onclick: () => openSubs({ file: e.file_id, title: it.title, year: it.year, imdb_id: it.imdb_id }) }, "CC"),
           e.file_id && h("button.icon.ghost", { title: t("Download to phone"), "aria-label": t("Download to phone"),
             onclick: () => openFileSheet(`${it.title} S${String(current).padStart(2, "0")}E${String(e.episode).padStart(2, "0")}`, e.file_id, load) }, icon("download"))]
           : e.downloading ? h("span.chip.accent", `${Math.round(e.downloading.progress * 100)}%`)
@@ -751,11 +758,15 @@ async function renderLibrary(el) {
       }, !!x.meta_id))) : genre ? h("div.empty", t("Nothing found.")) : emptyState("film", t("Your library is empty. Films you download will show up here."),
                                                                        t("Discover movies"), "#/media"));
   }
+  if (!status) status = await P("status").catch(() => null);
+  const scanSlot = h("div");
+  subsMod().then((m) => scanSlot.append(m.scanCard())).catch(() => {});
   const tech = await sourcesPanel();
   const down = status?.transmission && status.transmission.enabled !== false && status.transmission.ok === false;
   const noSources = tech.info.enabled.length && tech.info.enabled.every((n) => tech.info.health?.[n]?.ok === false);
   fill(el, 
     h("div.section", h("h2", t("Your library"))), stats,
+    status?.subtitles?.enabled && status.subtitles.scan?.enabled ? scanSlot : null,
     (noSources && !down) ? h("div.m-banner", "⚠️", h("div", t("Downloads are unavailable at the moment."))) : null,
     h("div.section", h("div.m-gctl", seg, genreSel)), grid,
     h("details.m-tech", h("summary", t("Technical details")),

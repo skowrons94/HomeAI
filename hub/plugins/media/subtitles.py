@@ -14,7 +14,10 @@ video as ``<stem>.<lang>.srt`` (what Infuse picks up). Videos without a result a
 
 Per-video state lives in kv ``media.subs.<sha1(path)>``:
     {path, status, provider, release, score, offset, scale, checked_at, message}
-status: searching | found | in_sync | adapted | unverified | not_found | error | skipped
+status: searching | found | in_sync | adapted | unverified | translated | not_found | error | skipped
+Also in the state: ``sha`` (of the file we wrote, so a hand-edited file is left alone), ``translated``
+({provider, from, cues, chars, usd, at}: the Italian file is a machine translation and is replaced as soon
+as a real one is found) and ``job`` (the manual search / pick / adapt / translate that runs or just ran).
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ import aiohttp
 from .downloads import LANG3, _is_within
 from .library import VIDEO_EXT, _videos
 from .ranking import parse
+from . import subs_translate as T
 from ...i18n import _
 
 log = logging.getLogger("hub.media.subtitles")
@@ -54,7 +58,9 @@ MAX_TRIES = 3
 RETRY_EVERY = 6 * 3600
 RETRY_DAYS = 14
 SUB_EXTS = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
-OK_STATUS = ("found", "in_sync", "adapted", "unverified")
+OK_STATUS = ("found", "in_sync", "adapted", "unverified", "translated")
+LANG_WORDS = {"italian": "it", "english": "en", "spanish": "es", "french": "fr", "german": "de",
+              "portuguese": "pt"}
 
 SCALES = [1.0, 25 / 23.976, 23.976 / 25, 24 / 25, 25 / 24, 24 / 23.976, 23.976 / 24]
 MAX_SHIFT = 180.0
@@ -429,6 +435,8 @@ class Cand:
     forced: bool = False
     downloads: int = 0
     hash_match: bool = False
+    lang: str = ""
+    name: str = ""
     data: dict = field(default_factory=dict)
     score: float = 0.0
 
@@ -575,13 +583,16 @@ class Providers:
         if self.session:
             await self.session.close()
 
-    async def search(self, v: Video) -> list[Cand]:
+    async def search(self, v: Video, lang: str | None = None) -> list[Cand]:
         out: list[Cand] = []
+        lang = lang or self.lang
         for name, fn in (("opensubtitles", self._os_search), ("subdl", self._subdl_search)):
             if name not in self.configured():
                 continue
             try:
-                got = await fn(v)
+                got = await fn(v, lang)
+                for c in got:
+                    c.lang = lang
                 log.debug("%s: %d candidates for %s", name, len(got), Path(v.path).name)
                 out += got
             except Exception as err:
@@ -647,8 +658,8 @@ class Providers:
         log.info("OpenSubtitles download quota used up; pausing until %s",
                  datetime.fromtimestamp(until).isoformat(timespec="minutes"))
 
-    async def _os_search(self, v: Video) -> list[Cand]:
-        params = {"languages": self.lang}
+    async def _os_search(self, v: Video, lang: str) -> list[Cand]:
+        params = {"languages": lang}
         if v.hash:
             params["moviehash"] = v.hash
         imdb = _imdb_num(v.imdb_id)
@@ -670,7 +681,8 @@ class Providers:
             if not files:
                 continue
             out.append(Cand("opensubtitles", str(files[0].get("file_id")),
-                            release=a.get("release") or "", fps=float(a.get("fps") or 0),
+                            release=a.get("release") or "", name=files[0].get("file_name") or "",
+                            fps=float(a.get("fps") or 0),
                             hi=bool(a.get("hearing_impaired")), forced=bool(a.get("foreign_parts_only")),
                             downloads=int(a.get("download_count") or 0),
                             hash_match=bool(a.get("moviehash_match"))))
@@ -688,9 +700,9 @@ class Providers:
 
     # -- SubDL ---------------------------------------------------------------------
 
-    async def _subdl_search(self, v: Video) -> list[Cand]:
+    async def _subdl_search(self, v: Video, lang: str) -> list[Cand]:
         imdb = _imdb_num(v.imdb_id)
-        params = {"api_key": self.subdl_key, "languages": self.lang.upper(),
+        params = {"api_key": self.subdl_key, "languages": lang.upper(),
                   "type": "tv" if v.season is not None else "movie"}
         if imdb:
             params["imdb_id"] = f"tt{imdb}"
@@ -711,7 +723,8 @@ class Providers:
         for it in data.get("subtitles", []):
             if it.get("url"):
                 out.append(Cand("subdl", it["url"], release=it.get("release_name") or it.get("name") or "",
-                                hi=bool(it.get("hi"))))
+                                name=it.get("name") or "", hi=bool(it.get("hi")),
+                                downloads=int(it.get("downloads") or it.get("download_count") or 0)))
         return out
 
     async def _subdl_download(self, c: Cand) -> bytes:
@@ -731,10 +744,15 @@ class Subtitles:
         self.lang = (langs[0] if langs else "it").lower()
         self.movies_dir = cfg.get("movies_dir", "")
         self.series_dir = cfg.get("series_dir", "")
+        self.cfg = c
         self.providers = Providers(c, self.store, self.lang)
         self._job_lock = asyncio.Lock()
         self._ffmpeg_lock = asyncio.Lock()
         self._running: set[str] = set()
+        dd = getattr(self.hub, "data_dir", None)
+        self.orig_dir = Path(dd) / "subs-orig" if dd else None
+        self._tsession: aiohttp.ClientSession | None = None
+        self._translators: dict[str, object] = {}
 
     async def open(self):
         if self.enabled:
@@ -742,11 +760,43 @@ class Subtitles:
 
     async def close(self):
         await self.providers.close()
+        if self._tsession:
+            await self._tsession.close()
 
     def status(self) -> dict:
         return {"enabled": self.enabled, "language": self.lang,
                 "providers": self.providers.configured() if self.enabled else [],
+                "translators": self.translator_names() if self.enabled else [],
                 "ffmpeg": have_ffmpeg()}
+
+    # -- translators ---------------------------------------------------------------------
+
+    def translator_names(self) -> list[str]:
+        out = []
+        if (self.cfg.get("deepl_api_key") or "").strip():
+            out.append("deepl")
+        if (self.cfg.get("anthropic_api_key") or "").strip():
+            out.append("claude")
+        pref = (self.cfg.get("translator") or "auto").lower()
+        if pref in out:  # the preferred one first
+            out.remove(pref)
+            out.insert(0, pref)
+        return out
+
+    def translator(self, name: str | None = None):
+        """A DeepL / Claude client, or None when that provider has no key."""
+        names = self.translator_names()
+        name = name or (names[0] if names else None)
+        if name not in names:
+            return None
+        if name not in self._translators:
+            if not self._tsession:
+                self._tsession = aiohttp.ClientSession(headers={"User-Agent": UA})
+            self._translators[name] = (
+                T.DeepL(self.cfg["deepl_api_key"], self.store, self._tsession) if name == "deepl" else
+                T.Claude(self.cfg["anthropic_api_key"], self.cfg.get("claude_model") or "claude-haiku-5-5",
+                         self.store, self._tsession))
+        return self._translators[name]
 
     # -- state ----------------------------------------------------------------------
 
@@ -840,10 +890,11 @@ class Subtitles:
 
     # -- the job ------------------------------------------------------------------------
 
-    def target_path(self, v: Video) -> str:
-        return str(Path(v.path).with_suffix("")) + f".{self.lang}.srt"
+    def target_path(self, v: Video, lang: str | None = None) -> str:
+        return str(Path(v.path).with_suffix("")) + f".{lang or self.lang}.srt"
 
-    def existing_sub(self, v: Video) -> str | None:
+    def existing_sub(self, v: Video, lang: str | None = None) -> str | None:
+        lang = lang or self.lang
         p = Path(v.path)
         try:
             names = os.listdir(p.parent)
@@ -853,46 +904,75 @@ class Subtitles:
             if not n.startswith(p.stem + ".") or Path(n).suffix.lower() not in SUB_EXTS:
                 continue
             tags = n[len(p.stem) + 1:].lower().rsplit(".", 1)[0].split(".")
-            if self.lang in tags and "forced" not in tags:
+            if lang in tags and "forced" not in tags:
                 return str(p.parent / n)
         return None
 
-    def other_sidecars(self, v: Video) -> list[str]:
+    def other_sidecars(self, v: Video, all_langs=False) -> list[str]:
         p = Path(v.path)
         out = []
         with contextlib.suppress(OSError):
             for n in sorted(os.listdir(p.parent)):
                 if n.startswith(p.stem + ".") and n.lower().endswith(".srt"):
                     tags = n[len(p.stem) + 1:-4].lower().split(".")
-                    if self.lang not in tags and "forced" not in tags:
+                    if (all_langs or self.lang not in tags) and "forced" not in tags:
                         out.append(str(p.parent / n))
         return sorted(out, key=lambda n: ".en." not in n.lower())
 
-    async def fetch(self, v: Video, check_audio=False, manual=False) -> dict:
+    def _ours(self, prev: dict, old: str | None, target: str) -> bool:
+        """The file at ``target`` is one we wrote and nobody has replaced since (sync I/O)."""
+        if not old or old != target or not (prev.get("written") or prev.get("translated")):
+            return False
+        want = prev.get("sha")
+        if want:
+            try:
+                return hashlib.sha1(Path(target).read_bytes()).hexdigest() == want
+            except OSError:
+                return False
+        return True
+
+    async def prepare(self, v: Video):
+        """Duration / frame rate (ffprobe), size and OpenSubtitles hash of the video."""
+        if v.duration and v.hash:
+            return
+        info = await probe(v.path)
+        v.duration, v.fps = info.get("duration", 0.0), info.get("fps", 0.0)
+        with contextlib.suppress(OSError):
+            v.size = await asyncio.to_thread(os.path.getsize, v.path)
+            v.hash = await asyncio.to_thread(osdb_hash, v.path)
+
+    async def fetch(self, v: Video, check_audio=False, manual=False, scan=False) -> dict:
         now = time.time
         target = self.target_path(v)
-        old = self.existing_sub(v)
+        old = await asyncio.to_thread(self.existing_sub, v)
         prev = self.state(v.path) or {}
-        ours = bool(prev.get("written")) and old == target
+        ours = await asyncio.to_thread(self._ours, prev, old, target)
+        translated = ours and bool(prev.get("translated"))  # a machine translation: keep looking
         if old and not ours:
             return self._set(v, status="found", provider="", message=_("a subtitle already exists"),
-                             checked_at=now(), written=False)
+                             checked_at=now(), written=False, translated=None)
         info = await probe(v.path)
         v.duration, v.fps = info.get("duration", 0.0), info.get("fps", 0.0)
         if check_audio and not manual and self.lang in info.get("audio", []):
             self._drop_pending(v)
             return self._set(v, status="skipped", message=_("audio already has the language"),
                              checked_at=now())
+        if (check_audio or scan) and not manual and any(lang == self.lang for _i, _c, lang in info.get("subs", [])):
+            self._drop_pending(v)
+            return self._set(v, status="skipped", message=_("an embedded subtitle has the language"),
+                             checked_at=now())
         with contextlib.suppress(OSError):
-            v.size = os.path.getsize(v.path)
+            v.size = await asyncio.to_thread(os.path.getsize, v.path)
             v.hash = await asyncio.to_thread(osdb_hash, v.path)
-        self._set(v, status="searching", message="", checked_at=now())
+        if not translated:
+            self._set(v, status="searching", message="", checked_at=now())
 
         if not self.providers.configured():
-            return self._miss(v, _("add an OpenSubtitles or SubDL API key in Settings → Media"))
+            return self._miss(v, _("add an OpenSubtitles or SubDL API key in Settings → Media"),
+                              keep=translated, scan=scan)
         cands = rank_candidates(await self.providers.search(v), v.release or Path(v.path).stem, v.fps)
         if not cands:
-            return self._miss(v, _("no subtitles found online"))
+            return self._miss(v, _("no subtitles found online"), keep=translated, scan=scan)
         ref_cache: dict = {}
         tried, last = 0, _("no candidate passed the checks")
         rejected = set(prev.get("rejected") or [])
@@ -922,19 +1002,24 @@ class Subtitles:
                 log.info("subtitles: rejected %s %s for %s: %s", c.provider, c.release,
                          Path(v.path).name, last)
                 continue
-            await asyncio.to_thread(self._write, target, res["text"])
+            digest = await self._commit(v, self.lang, res["text"], backup=bool(old))
             status = res["status"]
             st = self._set(v, status=status, provider=c.provider, release=c.release,
                            score=res.get("score"), offset=round(res.get("offset", 0.0), 2),
                            scale=round(res.get("scale", 1.0), 5), checked_at=now(), written=True,
-                           message=res.get("note", ""))
+                           sha=digest, translated=None, message=res.get("note", ""))
             self._drop_pending(v)
             await self._notify(v, st)
             return st
-        return self._miss(v, last)
+        return self._miss(v, last, keep=translated, scan=scan)
 
-    def _miss(self, v: Video, msg: str) -> dict:
-        self._add_pending(v)
+    def _miss(self, v: Video, msg: str, keep=False, scan=False) -> dict:
+        """No real subtitle this time. ``keep``: the file on disk is a translation, which stays (and
+        stays marked translated). ``scan``: the library scan does its own re-checks, no retry queue."""
+        if not scan:
+            self._add_pending(v)
+        if keep:
+            return self._set(v, search_message=msg, checked_at=time.time())
         return self._set(v, status="not_found", message=msg, checked_at=time.time())
 
     async def _notify(self, v: Video, st: dict):
@@ -963,14 +1048,55 @@ class Subtitles:
                 os.remove(tmp)
             raise
 
+    def _backup(self, v: Video, target: str, overwrite: bool) -> bool:
+        """Copy the file about to be replaced to the hub's data dir (never onto the NAS)."""
+        if not self.orig_dir or not os.path.exists(target):
+            return False
+        dest = self.orig_dir / sha(v.path) / Path(target).name
+        if dest.exists() and not overwrite:
+            return True
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(target, dest)
+        return True
+
+    def has_backup(self, v: Video, target: str) -> bool:
+        return bool(self.orig_dir and (self.orig_dir / sha(v.path) / Path(target).name).exists())
+
+    async def _commit(self, v: Video, lang: str, text: str, backup=False, overwrite_backup=True,
+                      target: str | None = None) -> str:
+        """Write the subtitle next to the video (off the event loop); returns the sha1 of the text."""
+        target = target or self.target_path(v, lang)
+
+        def work():
+            if backup:
+                with contextlib.suppress(OSError):
+                    self._backup(v, target, overwrite_backup)
+            self._write(target, text)
+        await asyncio.to_thread(work)
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
     # -- validation -----------------------------------------------------------------------
 
-    async def _check(self, v: Video, c: Cand, text: str, ref_cache: dict) -> dict:
+    async def _check(self, v: Video, c: Cand, text: str, ref_cache: dict, lang: str | None = "",
+                     force: bool = False) -> dict:
+        """Validate and, if needed, re-time a candidate. ``lang``: the language it must be (default the
+        wanted one, None = don't check). ``force``: a manual pick the user insists on: keep the text as it is
+        whatever the checks say."""
+        res = await self._check_strict(v, c, text, ref_cache, self.lang if lang == "" else lang)
+        if force and res.get("reject"):
+            cues = await asyncio.to_thread(parse_srt, text)
+            if not cues:
+                return res
+            return {"status": "unverified", "scale": 1.0, "offset": 0.0, "score": None,
+                    "text": format_srt(cues), "note": _("kept as is: {why}", why=res["reject"])}
+        return res
+
+    async def _check_strict(self, v: Video, c: Cand, text: str, ref_cache: dict, lang: str | None) -> dict:
         cues = await asyncio.to_thread(parse_srt, text)
         need = 20 if v.season is not None else 50
         if len(cues) < need:
             return {"reject": _("only {n} cues", n=len(cues))}
-        if not language_ok(" ".join(t for _, _, t in cues), self.lang):
+        if lang and not language_ok(" ".join(t for _a, _b, t in cues), lang):
             return {"reject": _("wrong language")}
         if v.duration and cues[-1][1] > v.duration * 1.06 + 60:
             return {"reject": _("longer than the video")}
@@ -1008,7 +1134,7 @@ class Subtitles:
         """('sub', Ref) | ('audio', [Ref]) | None, cheapest first; each step is computed once per job.
         Sampling the audio is skipped for a moviehash match (accepted as in sync)."""
         if "free" not in cache:
-            cache["free"] = await self._free_reference(v)
+            cache["free"] = await self._free_reference(v, cache.get("exclude"))
         if cache["free"] or c.hash_match or not v.duration or not have_ffmpeg():
             return cache["free"]
         if "audio" not in cache:
@@ -1021,9 +1147,12 @@ class Subtitles:
                 log.debug("speech sampling failed: %s", err)
         return cache["audio"]
 
-    async def _free_reference(self, v: Video):
-        """Sidecar subtitle in another language, else an embedded text stream (small files only)."""
-        for side in self.other_sidecars(v):
+    async def _free_reference(self, v: Video, exclude: str | None = None):
+        """Sidecar subtitle in another language, else an embedded text stream (small files only).
+        ``exclude``: the file being checked, which must not serve as its own reference."""
+        for side in await asyncio.to_thread(self.other_sidecars, v, bool(exclude)):
+            if exclude and os.path.abspath(side) == os.path.abspath(exclude):
+                continue
             try:
                 cues = parse_srt(decode_text(await asyncio.to_thread(Path(side).read_bytes)))
             except OSError:
@@ -1040,3 +1169,326 @@ class Subtitles:
                 except Exception as err:
                     log.debug("embedded subtitle extraction failed: %s", err)
         return None
+
+    # -- manual tools: list, search, pick, adapt, translate ---------------------------------
+
+    def sidecar_lang(self, v: Video, name: str) -> str:
+        tags = name[len(Path(v.path).stem) + 1:].lower().rsplit(".", 1)[0].split(".")
+        for t in tags:
+            t = LANG_WORDS.get(t, LANG3.get(t, t))
+            if len(t) == 2 and t.isalpha() and t not in ("hi", "cc"):
+                return t
+        return ""
+
+    def sidecar_path(self, v: Video, name: str, editable=True) -> str:
+        """The full path of a subtitle next to the video, validated (same folder, subtitle extension)."""
+        p = Path(v.path)
+        ok = {".srt"} if editable else SUB_EXTS
+        if (Path(name).name != name or not name.startswith(p.stem + ".")
+                or Path(name).suffix.lower() not in ok):
+            raise ValueError(_("not a subtitle of this video"))
+        full = p.parent / name
+        if not full.is_file():
+            raise FileNotFoundError(_("The file is no longer there"))
+        return str(full)
+
+    def _sidecars(self, v: Video) -> list[dict]:
+        p = Path(v.path)
+        st = self.state(v.path) or {}
+        mine = Path(self.target_path(v)).name
+        out = []
+        for n in sorted(os.listdir(p.parent)):
+            if not n.startswith(p.stem + ".") or Path(n).suffix.lower() not in SUB_EXTS:
+                continue
+            tags = n[len(p.stem) + 1:].lower().rsplit(".", 1)[0].split(".")
+            try:
+                size = os.path.getsize(p.parent / n)
+            except OSError:
+                size = 0
+            row = {"name": n, "kind": "sidecar", "lang": self.sidecar_lang(v, n), "size": size,
+                   "forced": "forced" in tags, "hi": bool({"hi", "sdh", "cc"} & set(tags)),
+                   "editable": n.lower().endswith(".srt"), "has_backup": self.has_backup(v, str(p.parent / n))}
+            if n == mine:
+                row["origin"] = ("translated" if st.get("translated") else
+                                 st.get("status") if st.get("written") else "")
+            out.append(row)
+        return out
+
+    async def listing(self, v: Video) -> dict:
+        """What sits next to (and inside) the video, plus the state of the last job."""
+        try:
+            side = await asyncio.to_thread(self._sidecars, v)
+        except OSError as err:
+            raise FileNotFoundError(_("The file is no longer there")) from err
+        emb = []
+        if have_ffmpeg():
+            emb = [{"name": f"#{i}", "kind": "embedded", "lang": lang, "codec": codec, "index": i}
+                   for i, codec, lang in (await probe(v.path)).get("subs", [])]
+        st = dict(self.state(v.path) or {})
+        tr = self.translator()
+        info = {"video": Path(v.path).name, "language": self.lang, "subs": side, "embedded": emb,
+                "state": st, "busy": v.path in self._running,
+                "providers": self.providers.configured() if self.enabled else [],
+                "translators": [{"name": n, "label": "DeepL" if n == "deepl" else "Claude"}
+                                for n in self.translator_names()],
+                "os_quota_left": self.providers.os_quota_left()}
+        if tr is not None and tr.name == "deepl":
+            info["deepl"] = await tr.usage()
+        return info
+
+    async def search_online(self, v: Video, langs: list[str] | None = None) -> dict:
+        """Candidates from every configured provider, per language, best first."""
+        if not self.providers.configured():
+            raise RuntimeError(_("add an OpenSubtitles or SubDL API key in Settings → Media"))
+        await self.prepare(v)
+        release = v.release or Path(v.path).stem
+        out = []
+        for lang in langs or [self.lang, "en"]:
+            if lang != self.lang and lang != "en":
+                continue
+            ranked = rank_candidates(await self.providers.search(v, lang), release, v.fps)
+            for c in ranked[:15]:
+                out.append({"provider": c.provider, "id": c.id, "lang": lang, "release": c.release,
+                            "name": c.name, "downloads": c.downloads, "hi": c.hi, "forced": c.forced,
+                            "fps": c.fps, "hash_match": c.hash_match,
+                            "match": 100 if c.hash_match else round(100 * release_sim(c.release, release))})
+        return {"candidates": out, "providers": self.providers.configured()}
+
+    # jobs: a manual action that runs in the background and leaves its outcome in the video's state
+
+    def job_state(self, v: Video) -> dict:
+        return (self.state(v.path) or {}).get("job") or {}
+
+    def _job(self, v: Video, **kw) -> dict:
+        job = {**self.job_state(v), **kw, "at": time.time()}
+        self._set(v, job=job)
+        return job
+
+    def start_job(self, v: Video, kind: str, fn) -> None:
+        """Run ``fn(progress) -> result dict`` for this video, one job at a time across the library."""
+        if v.path in self._running:
+            raise RuntimeError(_("this video is busy, try again in a minute"))
+        self._running.add(v.path)
+        self._set(v, job={"kind": kind, "phase": "running", "message": "", "done": 0, "total": 0,
+                          "at": time.time()})
+        self.hub.spawn(self._job_guard(v, kind, fn), "subtitle job")
+
+    async def _job_guard(self, v: Video, kind: str, fn):
+        def progress(done, total):
+            self._job(v, done=done, total=total)
+        try:
+            async with self._job_lock:
+                res = await fn(progress)
+            self._job(v, kind=kind, phase="done", **{"ok": True, **(res or {})})
+        except T.TranslateError as err:
+            self._job(v, kind=kind, phase="done", ok=False, message=str(err))
+        except Exception as err:
+            log.warning("subtitle %s job for %s failed: %s", kind, v.path, err)
+            self._job(v, kind=kind, phase="done", ok=False, message=str(err) or type(err).__name__)
+        finally:
+            self._running.discard(v.path)
+
+    async def do_pick(self, v: Video, c: Cand, lang: str | None = None, force=False) -> dict:
+        """Download one candidate, validate / re-time it and write it as <stem>.<lang>.srt."""
+        lang = lang or c.lang or self.lang
+        await self.prepare(v)
+        raw = await self.providers.download(c)
+        srt = extract_srt(raw, v.season, v.episode)
+        if not srt:
+            return {"ok": False, "outcome": "rejected", "message": _("download had no usable .srt")}
+        res = await self._check(v, c, decode_text(srt), {}, lang=lang, force=force)
+        if res.get("reject"):
+            return {"ok": False, "outcome": "rejected", "can_force": True,
+                    "message": _("rejected: {why}", why=res["reject"])}
+        target = self.target_path(v, lang)
+        digest = await self._commit(v, lang, res["text"], backup=True)
+        if lang == self.lang:
+            self._set(v, status=res["status"], provider=c.provider, release=c.release,
+                      score=res.get("score"), offset=round(res.get("offset", 0.0), 2),
+                      scale=round(res.get("scale", 1.0), 5), checked_at=time.time(), written=True,
+                      sha=digest, translated=None, message=res.get("note", ""))
+            self._drop_pending(v)
+        return {"outcome": res["status"], "file": Path(target).name, "offset": round(res.get("offset", 0.0), 2),
+                "scale": round(res.get("scale", 1.0), 5), "message": res.get("note", "")}
+
+    async def do_adapt_auto(self, v: Video, name: str) -> dict:
+        """Run the sync against a reference again on an existing subtitle."""
+        path = self.sidecar_path(v, name)
+        lang = self.sidecar_lang(v, name) or None
+        text = decode_text(await asyncio.to_thread(Path(path).read_bytes))
+        await self.prepare(v)
+        res = await self._check(v, Cand("local", name, lang=lang or ""), text, {"exclude": path}, lang=lang)
+        if res.get("reject"):
+            return {"ok": False, "outcome": "rejected", "message": res["reject"]}
+        if res["status"] == "unverified":
+            return {"ok": False, "outcome": "unverified",
+                    "message": _("nothing to compare the timing with (no other subtitle, no audio)")}
+        if res["status"] == "adapted":
+            digest = await self._commit(v, lang or self.lang, res["text"], backup=True, overwrite_backup=False,
+                                        target=path)
+            self._after_edit(v, path, digest, _("timing adjusted again"), res)
+        return {"outcome": res["status"], "offset": round(res.get("offset", 0.0), 2),
+                "scale": round(res.get("scale", 1.0), 5), "score": res.get("score")}
+
+    def _after_edit(self, v: Video, path: str, digest: str, note: str, res: dict | None = None):
+        if Path(path).name == Path(self.target_path(v)).name:
+            st = self.state(v.path) or {}
+            kw = dict(sha=digest, written=True, message=note, checked_at=time.time())
+            if not st.get("translated"):
+                kw["status"] = "adapted"
+            if res:
+                kw.update(offset=round(res.get("offset", 0.0), 2), scale=round(res.get("scale", 1.0), 5))
+            self._set(v, **kw)
+
+    async def adjust(self, v: Video, name: str, offset: float = 0.0, scale: float = 1.0, save=False) -> dict:
+        """Preview (and with ``save`` apply) t' = scale * t + offset on one .srt next to the video."""
+        if not (-3600 <= offset <= 3600 and 0.5 <= scale <= 2.0):
+            raise ValueError(_("offset or scale out of range"))
+        path = self.sidecar_path(v, name)
+        text = decode_text(await asyncio.to_thread(Path(path).read_bytes))
+        cues = await asyncio.to_thread(parse_srt, text)
+        if not cues:
+            raise ValueError(_("no cues in this file"))
+        out = {"cues": len(cues), "rows": T.preview_rows(cues, offset, scale), "saved": False}
+        if save:
+            new = T.shift_cues(cues, offset, scale)
+            digest = await self._commit(v, "", format_srt(new), backup=True, overwrite_backup=False, target=path)
+            self._after_edit(v, path, digest, _("timing set by hand"), {"offset": offset, "scale": scale})
+            out.update(saved=True, cues=len(new), has_backup=True)
+        return out
+
+    async def restore(self, v: Video, name: str) -> dict:
+        path = self.sidecar_path(v, name)
+        src = self.orig_dir / sha(v.path) / name if self.orig_dir else None
+        if not src or not src.exists():
+            raise FileNotFoundError(_("no original copy of this subtitle"))
+        text = decode_text(await asyncio.to_thread(src.read_bytes))
+        digest = await self._commit(v, "", text, target=path)
+        self._after_edit(v, path, digest, _("original timing restored"))
+        return {"restored": True}
+
+    # translation
+
+    async def _translation_source(self, v: Video, source: dict | None) -> tuple[list, str, str]:
+        """(cues, language, label) of the subtitle to translate: a sidecar, an embedded stream, or an
+        English subtitle fetched online (validated and synced to the video like any other)."""
+        src = source or {}
+        kind = src.get("kind") or "auto"
+        if kind in ("auto", "sidecar"):
+            if kind == "sidecar":
+                paths = [self.sidecar_path(v, src.get("name", ""), editable=False)]
+            else:
+                paths = await asyncio.to_thread(self.other_sidecars, v)
+            for path in paths:
+                try:
+                    cues = parse_srt(decode_text(await asyncio.to_thread(Path(path).read_bytes)))
+                except OSError:
+                    continue
+                if len(cues) >= 20:
+                    return cues, self.sidecar_lang(v, Path(path).name) or "en", Path(path).name
+        if kind in ("auto", "embedded") and have_ffmpeg():
+            subs = [s for s in (await probe(v.path)).get("subs", []) if s[2] != self.lang]
+            if kind == "embedded" and src.get("index") is not None:
+                subs = [s for s in subs if s[0] == int(src["index"])]
+            for idx, _codec, lang in sorted(subs, key=lambda s: s[2] != "en"):
+                try:
+                    cues = parse_srt(await extract_embedded(v.path, idx))
+                except Exception as err:
+                    log.debug("embedded extraction failed: %s", err)
+                    continue
+                if len(cues) >= 20:
+                    return cues, lang or "en", f"#{idx}"
+        if kind in ("auto", "online") and self.providers.configured():
+            await self.prepare(v)
+            cands = rank_candidates(await self.providers.search(v, "en"), v.release or Path(v.path).stem, v.fps)
+            cache: dict = {}
+            for c in cands[:MAX_TRIES]:
+                if c.provider == "opensubtitles" and not self.providers.os_quota_left():
+                    continue
+                try:
+                    srt = extract_srt(await self.providers.download(c), v.season, v.episode)
+                    res = await self._check(v, c, decode_text(srt), cache, lang="en") if srt else {"reject": "x"}
+                except Exception as err:
+                    log.info("subtitles: English source %s failed: %s", c.id, err)
+                    continue
+                if res.get("reject"):
+                    continue
+                en = self.target_path(v, "en")
+                if not await asyncio.to_thread(os.path.exists, en):  # keep it: handy in Infuse, a future reference
+                    await self._commit(v, "en", res["text"])
+                return parse_srt(res["text"]), "en", f"{c.provider} {c.release}"
+        raise T.TranslateError(_("no subtitle to translate from (no sidecar, no embedded text, none online)"))
+
+    async def estimate(self, v: Video, source: dict | None = None) -> dict:
+        if (source or {}).get("kind") == "online":
+            return {"cues": None, "chars": None}
+        cues, lang, label = await self._translation_source(v, source)
+        chars = T.source_chars(cues)
+        out = {"cues": len(cues), "chars": chars, "lang": lang, "label": label}
+        for n in self.translator_names():
+            tr = self.translator(n)
+            if n == "deepl":
+                u = await tr.usage()
+                out["deepl"] = {**u, "enough": u["remaining"] >= chars}
+            else:
+                out["claude"] = {**tr.estimate(chars, len(cues)), "model": tr.model}
+        return out
+
+    async def do_translate(self, v: Video, provider: str | None = None, source: dict | None = None,
+                           progress=None, replace_real=False) -> dict:
+        tr = self.translator(provider)
+        if tr is None:
+            raise T.TranslateError(_("no translation service is set up (DeepL or Claude key in Settings → Media)"))
+        target = self.target_path(v)
+        old = await asyncio.to_thread(self.existing_sub, v)
+        prev = self.state(v.path) or {}
+        if old:
+            ours = await asyncio.to_thread(self._ours, prev, old, target)
+            if not (ours and prev.get("translated")) and not replace_real:
+                raise T.TranslateError(_("an Italian subtitle already exists"))
+        cues, src_lang, label = await self._translation_source(v, source)
+        chars = T.source_chars(cues)
+        if tr.name == "deepl":
+            u = await tr.usage()
+            if u["remaining"] < chars:
+                raise T.TranslateError(_("DeepL has {left} characters left this month, {need} needed",
+                                         left=u["remaining"], need=chars))
+        t_in = getattr(tr, "tokens_in", 0), getattr(tr, "tokens_out", 0)
+        out = await T.translate_cues(cues, tr, title=v.title or Path(v.path).stem, src=src_lang, progress=progress)
+        text = format_srt(out)
+        if not language_ok(" ".join(t for _a, _b, t in out), self.lang):
+            raise T.TranslateError(_("the translation doesn't look like {lang}", lang=self.lang))
+        digest = await self._commit(v, self.lang, text, backup=bool(old))
+        usd = round(tr.cost(tr.tokens_in - t_in[0], tr.tokens_out - t_in[1]), 4) if tr.name == "claude" else 0
+        meta = {"provider": tr.name, "model": getattr(tr, "model", ""), "from": src_lang, "source": label,
+                "cues": len(out), "chars": chars, "usd": usd, "at": time.time()}
+        self._set(v, status="translated", provider=tr.name, release="", translated=meta, written=True,
+                  sha=digest, checked_at=time.time(), message=_("translated from {lang}", lang=src_lang))
+        self._drop_pending(v)
+        return {"outcome": "translated", "provider": tr.name, "usd": usd, "chars": chars,
+                "message": _("translated with {name}", name=tr.label)}
+
+    async def scan_one(self, v: Video, translate=True) -> str:
+        """One step of the library scan on one video: a real Italian subtitle first, else (if a translator
+        is set up) a translation of an English one. Returns the resulting status."""
+        if v.path in self._running:
+            return "busy"
+        self._running.add(v.path)
+        try:
+            async with self._job_lock:
+                st = await self.fetch(v, check_audio=True, scan=True)
+                if st.get("status") == "not_found" and translate and self.translator_names():
+                    try:
+                        await self.do_translate(v)
+                        st = self.state(v.path) or st
+                    except T.TranslateError as err:
+                        log.info("scan: no translation for %s: %s", Path(v.path).name, err)
+                        st = self._set(v, status="not_found", message=f"{st.get('message', '')} · {err}".strip(" ·"),
+                                       checked_at=time.time())
+                return st.get("status", "")
+        except Exception as err:
+            log.warning("scan: %s failed: %s", v.path, err)
+            self._set(v, status="error", message=str(err), checked_at=time.time())
+            return "error"
+        finally:
+            self._running.discard(v.path)

@@ -10,3 +10,4 @@ tomli-w>=1.0
 qrcode>=7.4
 pywebpush>=2.0
 mutagen>=1.47
+anthropic>=2.5
