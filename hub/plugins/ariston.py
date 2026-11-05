@@ -287,7 +287,9 @@ class AristonPlugin(Plugin):
         except Exception:
             unit = None
         self.hub.store.set("ariston.heat.raw", [{"k": q.get("k"), "p": q.get("p"), "v": q.get("v")} for q in seqs])
-        self.heat.ingest_energy(seqs, unit)
+        # The sequences are kWh whatever display unit the account has: on the user's boiler (unit "SMC")
+        # one hour held 17.2 and a morning 37.6 — as m³ that would be ~180 kW from a home boiler.
+        self.heat.ingest_energy(seqs, "KWH")
         self.heat.error = None
         self._push_energy()
 
