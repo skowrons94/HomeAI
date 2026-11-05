@@ -1,7 +1,7 @@
 // Heating: when the heating and the boiler ran, how much gas it used and what it cost (plugin: ariston).
 // Data: /api/p/ariston/{today,usage,sessions,summary}. Gas figures come from the boiler's own daily
 // counters (about an hour late), on/off times from the hub's polling (about 2 minutes).
-import { api, h, icon, store, bus, ensureCss, fmt, t, locale, errorCard } from "../app.js";
+import { api, h, icon, store, bus, ensureCss, fmt, t, locale, errorCard, sheet, act, toast } from "../app.js";
 
 const C_HEAT = "#ff7a45", C_DHW = "#33a4d8", C_OUT = "#30b85a", C_OTHER = "#9a9aa5";
 const num = (v, d = 1) => (v === null || v === undefined ? "–" : fmt.num(v, d));
@@ -176,8 +176,50 @@ export default {
         card(t("Last month"), lm),
         card(new Date().getFullYear(), yr, yr && yr.months < new Date().getMonth() + 1
           ? h("div.muted", t("Only {n} months recorded", { n: yr.months })) : null),
-        h("div.heat-assump.muted", t("Cost uses {price} per m³ and {f} kWh per m³ (change them in the Ariston settings). Gas comes from the boiler's counters{unit}.",
-          { price: eur(summary.price), f: fmt.num(summary.kwh_per_m3, 2), unit: summary.gas_unit ? ` (${summary.gas_unit})` : "" })));
+        tariffCard());
+    }
+
+    // -- the user's gas tariffs ----------------------------------------------------------------------
+    function tariffCard() {
+      const tf = summary.tariff || { price: summary.price, fixed: 0, pcs: summary.kwh_per_m3 };
+      const own = (summary.tariffs || []).length > 0;
+      return h("div.card.heat-tariff",
+        h("div.heat-tariff-main",
+          h("div.muted", t("Gas tariff")),
+          h("b", t("{price} per Smc", { price: eur(tf.price) })),
+          h("div.muted", [tf.fixed ? t("+ {fee} a month fixed", { fee: eur(tf.fixed) }) : null,
+            t("PCS {pcs} kWh/Smc", { pcs: fmt.num(tf.pcs, 3) }),
+            tf.from ? t("since {d}", { d: fmt.date(new Date(tf.from + "T12:00")) }) : null].filter(Boolean).join(" · ")),
+          own ? null : h("div.heat-warn-sm", icon("alert"), t("Example price: enter the one from your bill"))),
+        h("button", { onclick: editTariffs }, icon("edit"), t("Edit")));
+    }
+
+    async function editTariffs() {
+      let rows = [];
+      try { rows = (await api("/api/p/ariston/tariffs")).tariffs; } catch (e) { toast(e.message, true); return; }
+      if (!rows.length) rows = [{ from: `${new Date().getFullYear()}-01-01`, price: "", fixed: "", pcs: summary.kwh_per_m3 }];
+      const list = h("div.heat-tlist");
+      const field = (r, k, label, attrs) => h("label.heat-tf", h("span", label),
+        h("input", { value: r[k] ?? "", ...attrs, oninput: (e) => { r[k] = e.target.value; } }));
+      const paint = () => list.replaceChildren(...rows.map((r, i) => h("div.heat-trow",
+        field(r, "from", t("Starts on"), { type: "date" }),
+        field(r, "price", t("€ per Smc"), { type: "number", step: "0.001", min: "0", inputmode: "decimal", placeholder: "1,150" }),
+        field(r, "fixed", t("€ a month fixed"), { type: "number", step: "0.01", min: "0", inputmode: "decimal", placeholder: "0" }),
+        field(r, "pcs", t("PCS kWh/Smc"), { type: "number", step: "0.001", min: "8", max: "13", inputmode: "decimal" }),
+        h("button.icon.ghost", { "aria-label": t("Remove"), onclick: () => { rows.splice(i, 1); paint(); } }, icon("trash")))));
+      const s = sheet(t("Gas tariffs"), [
+        h("p.muted", t("Take them from your gas bill: the price per Smc is everything you pay for the gas used (materia gas, transport, system charges, excise and VAT) divided by the Smc billed; the fixed part is the monthly fee. When the price changes, add a row from that date: past days keep their own price.")),
+        list,
+        h("button", { onclick: () => { rows.push({ from: new Date().toISOString().slice(0, 10), price: "", fixed: rows.at(-1)?.fixed ?? "", pcs: rows.at(-1)?.pcs ?? summary.kwh_per_m3 }); paint(); } },
+          icon("plus"), t("Add a price change")),
+        h("button.primary", { onclick: (e) => act(async () => {
+          const body = rows.filter((r) => r.from && r.price !== "").map((r) => ({
+            from: r.from, price: +String(r.price).replace(",", "."), fixed: +String(r.fixed || 0).replace(",", "."),
+            pcs: +String(r.pcs || summary.kwh_per_m3).replace(",", ".") }));
+          await api("/api/p/ariston/tariffs", { method: "PUT", body: { tariffs: body } });
+          s.close(); toast(t("Saved")); load();
+        }, e.currentTarget) }, t("Save"))]);
+      paint();
     }
 
     // -- log ---------------------------------------------------------------------------------------------

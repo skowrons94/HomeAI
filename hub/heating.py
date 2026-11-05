@@ -138,6 +138,9 @@ def parse_sequences(seqs: list, unit: str | None, today: date,
     return rows
 
 
+TARIFFS_KEY = "ariston.heat.tariffs"     # the user's gas prices: [{from, price €/Smc, fixed €/month, pcs}]
+
+
 class Heating:
     def __init__(self, store, price: float = 1.10, kwh_per_m3: float = GAS_KWH_PER_M3):
         self.store = store
@@ -155,6 +158,7 @@ class Heating:
         self.last: dict = store.get("ariston.heat.last", {})
         self._last_prune = 0.0
         self._close_stale()
+        self.tariffs: list[dict] = self._load_tariffs()
         self.now: dict = {}                     # latest observation, for /today
         self.error: str | None = None
         self.error_ts: float | None = None
@@ -339,10 +343,11 @@ class Heating:
                     "heat_kwh": None, "dhw_kwh": None, "heat_m3": None, "dhw_m3": None,
                     "cost": None, "heat_cost": None, "dhw_cost": None, "kwh_per_hdd": None}
             if r:
-                for k in ("heat_kwh", "dhw_kwh", "heat_m3", "dhw_m3"):
+                for k in ("heat_kwh", "dhw_kwh"):
                     item[k] = None if r[k] is None else round(r[k], 3)
-                item["heat_cost"] = self._cost(r["heat_m3"])
-                item["dhw_cost"] = self._cost(r["dhw_m3"])
+                item["heat_m3"], item["dhw_m3"] = self._m3(r["heat_kwh"], key), self._m3(r["dhw_kwh"], key)
+                item["heat_cost"] = self._cost(r["heat_kwh"], key)
+                item["dhw_cost"] = self._cost(r["dhw_kwh"], key)
                 item["cost"] = self._sum(item["heat_cost"], item["dhw_cost"])
                 if hdd and hdd >= 2 and r["heat_kwh"]:
                     item["kwh_per_hdd"] = round(r["heat_kwh"] / hdd, 2)
@@ -350,8 +355,66 @@ class Heating:
         return {"days": series, "price": self.price, "kwh_per_m3": self.kwh_per_m3,
                 "gas_unit": self.gas_unit, "hdd_base": HDD_BASE}
 
-    def _cost(self, m3) -> float | None:
-        return None if m3 is None else round(m3 * self.price, 2)
+    # -- tariffs: the user's own gas prices, each from a date (a bill's price applies to its own days) --
+    def _load_tariffs(self) -> list[dict]:
+        t = self.store.get(TARIFFS_KEY)
+        return sorted(t, key=lambda x: x["from"]) if isinstance(t, list) else []
+
+    def set_tariffs(self, items: list) -> list[dict]:
+        """Validate and store [{from: 'YYYY-MM-DD', price: €/Smc, fixed: €/month, pcs: kWh/Smc}]."""
+        if not isinstance(items, list) or len(items) > 60:
+            raise ValueError(_("Invalid tariffs"))
+        out, seen = [], set()
+        for it in items:
+            if not isinstance(it, dict):
+                raise ValueError(_("Invalid tariffs"))
+            try:
+                day = date.fromisoformat(str(it.get("from", ""))[:10]).isoformat()
+                price = float(it.get("price"))
+                fixed = float(it.get("fixed") or 0)
+                pcs = float(it.get("pcs") or GAS_KWH_PER_M3)
+            except (TypeError, ValueError):
+                raise ValueError(_("Each tariff needs a start date and a price"))
+            if not (0 < price <= 10) or not (0 <= fixed <= 500) or not (8 <= pcs <= 13):
+                raise ValueError(_("Price 0–10 €/Smc, fixed fee 0–500 €/month, PCS 8–13 kWh/Smc"))
+            if day in seen:
+                raise ValueError(_("Two tariffs start on {day}", day=day))
+            seen.add(day)
+            out.append({"from": day, "price": round(price, 4), "fixed": round(fixed, 2), "pcs": round(pcs, 3)})
+        out.sort(key=lambda x: x["from"])
+        self.store.set(TARIFFS_KEY, out)
+        self.tariffs = out
+        return out
+
+    def tariff_on(self, day: str) -> dict:
+        """The tariff in force on ``day`` (YYYY-MM-DD or YYYY-MM): the latest one started by then; before the
+        first one (or with none) the price from the settings."""
+        cur = {"from": None, "price": self.price, "fixed": 0.0, "pcs": self.kwh_per_m3}
+        for t in self.tariffs:
+            if t["from"] <= (day if len(day) == 10 else day + "-31"):
+                cur = t
+        return cur
+
+    def _cost(self, kwh, day: str) -> float | None:
+        """Gas cost of ``kwh`` on ``day`` at that day's tariff (variable part only)."""
+        if kwh is None:
+            return None
+        t = self.tariff_on(day)
+        return round(kwh / t["pcs"] * t["price"], 2)
+
+    def _m3(self, kwh, day: str) -> float | None:
+        return None if kwh is None else round(kwh / self.tariff_on(day)["pcs"], 3)
+
+    def _fixed(self, month: str, now: float | None = None) -> float:
+        """Fixed fee of a month: the tariff's €/month, pro rata for the month in progress."""
+        t = self.tariff_on(month + "-15")
+        if not t.get("fixed"):
+            return 0.0
+        nowd = datetime.fromtimestamp(now or time.time())
+        if month == nowd.strftime("%Y-%m"):
+            dim = ((nowd.date().replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)).day
+            return round(t["fixed"] * (nowd.day - 1 + nowd.hour / 24) / dim, 2)
+        return t["fixed"]
 
     @staticmethod
     def _sum(*vals):
@@ -364,15 +427,24 @@ class Heating:
         cur = datetime.fromtimestamp(now or time.time()).strftime("%Y-%m")
         r = self.store.query("SELECT * FROM ariston_month WHERE month=?", (month,)) if month != cur else []
         if r:
-            r = r[0]
-            tot = {k: r[k] for k in ("heat_kwh", "dhw_kwh", "heat_m3", "dhw_m3")}
+            r, mid = r[0], month + "-15"
+            tot = {k: r[k] for k in ("heat_kwh", "dhw_kwh")}
+            tot["heat_m3"], tot["dhw_m3"] = self._m3(r["heat_kwh"], mid), self._m3(r["dhw_kwh"], mid)
+            gas = self._sum(self._cost(r["heat_kwh"], mid), self._cost(r["dhw_kwh"], mid))
         else:
             days = self.store.query("SELECT * FROM ariston_day WHERE day LIKE ?", (month + "-%",))
             if not days:
                 return None
-            tot = {k: sum(d[k] or 0 for d in days) for k in ("heat_kwh", "dhw_kwh", "heat_m3", "dhw_m3")}
+            tot = {k: sum(d[k] or 0 for d in days) for k in ("heat_kwh", "dhw_kwh")}
+            tot["heat_m3"] = sum(self._m3(d["heat_kwh"] or 0, d["day"]) for d in days)
+            tot["dhw_m3"] = sum(self._m3(d["dhw_kwh"] or 0, d["day"]) for d in days)
+            gas = self._sum(*[self._cost(d["heat_kwh"] or 0, d["day"]) for d in days],
+                            *[self._cost(d["dhw_kwh"] or 0, d["day"]) for d in days])
         tot = {k: None if v is None else round(v, 1) for k, v in tot.items()}
-        tot["cost"] = self._sum(self._cost(tot["heat_m3"]), self._cost(tot["dhw_m3"]))
+        tot["gas_cost"] = gas
+        tot["fixed"] = self._fixed(month, now)
+        tot["cost"] = self._sum(gas, tot["fixed"] or None)
+        tot["month"] = month
         return tot
 
     def summary(self, now: float | None = None) -> dict:
@@ -382,27 +454,31 @@ class Heating:
         prev_d = today.replace(day=1) - timedelta(days=1)
         prev = prev_d.strftime("%Y-%m")
         month, last_month = self.month_totals(cur, now), self.month_totals(prev, now)
-        year_rows = self.store.query("SELECT * FROM ariston_month WHERE month >= ? AND month < ?",
-                                     (f"{today.year}-01", cur))
+        months = [r["month"] for r in self.store.query(
+            "SELECT month FROM ariston_month WHERE month >= ? AND month < ?", (f"{today.year}-01", cur))]
+        year_rows = [m for m in (self.month_totals(x, now) for x in months) if m]
         if month:      # the current month, from its days
             year_rows = [*year_rows, month]
         year = None
         if year_rows:
             year = {k: round(sum(r[k] or 0 for r in year_rows), 1)
                     for k in ("heat_kwh", "dhw_kwh", "heat_m3", "dhw_m3")}
-            year["cost"] = self._sum(self._cost(year["heat_m3"]), self._cost(year["dhw_m3"]))
+            year["gas_cost"] = self._sum(*[r["gas_cost"] for r in year_rows])
+            year["fixed"] = round(sum(r["fixed"] or 0 for r in year_rows), 2)
+            year["cost"] = self._sum(year["gas_cost"], year["fixed"] or None)
             year["months"] = len(year_rows)
         projection = None
-        if month and today.day >= 3 and month["cost"] is not None:
+        if month and today.day >= 3 and month["gas_cost"] is not None:
             dim = (today.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-            per_day = month["cost"] / (today.day - 1 + (datetime.fromtimestamp(now).hour / 24))
-            projection = {"cost": round(per_day * dim.day, 2),
+            per_day = month["gas_cost"] / (today.day - 1 + (datetime.fromtimestamp(now).hour / 24))
+            projection = {"cost": round(per_day * dim.day + self.tariff_on(cur + "-15").get("fixed", 0), 2),
                           "kwh": round(((month["heat_kwh"] or 0) + (month["dhw_kwh"] or 0))
                                        / (today.day - 1 + datetime.fromtimestamp(now).hour / 24) * dim.day)}
         days = self.usage(45, now)["days"]
         first = self.store.query("SELECT MIN(day) AS d FROM ariston_day")[0]["d"]
         return {"month": month, "last_month": last_month, "year": year, "projection": projection,
                 "tips": self.tips(days, today, now), "price": self.price, "kwh_per_m3": self.kwh_per_m3,
+                "tariff": self.tariff_on(today.isoformat()), "tariffs": self.tariffs,
                 "gas_unit": self.gas_unit, "energy_updated": self.energy_ts, "first_day": first,
                 "has_outdoor": bool(self.store.query("SELECT 1 FROM ariston_outdoor LIMIT 1")),
                 "error": self.error, "error_ts": self.error_ts}

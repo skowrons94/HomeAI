@@ -170,6 +170,38 @@ def test_usage_cost_degree_days_tips():
         assert s["first_day"] == "2026-10-07" and s["has_outdoor"]
 
 
+def test_tariffs_apply_by_date_with_fixed_fee():
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = new(tmp, price=1.0)
+        hh.ingest_energy(seqs(today_val=3.0), "KWH", now=NOON)
+        # before any tariff: the settings price (1.0 €/Smc) and the standard PCS
+        d = hh.usage(30, now=NOON)["days"]
+        day = next(x for x in d if x["heat_kwh"])
+        assert abs(day["heat_cost"] - day["heat_kwh"] / heating.GAS_KWH_PER_M3 * 1.0) < 0.011
+        hh.set_tariffs([{"from": "2026-11-01", "price": 1.25, "fixed": 9.5, "pcs": 10.5},
+                        {"from": "2026-01-01", "price": 0.9, "fixed": 6}])
+        assert [t["from"] for t in hh.tariffs] == ["2026-01-01", "2026-11-01"]       # sorted
+        assert hh.tariff_on("2026-10-31")["price"] == 0.9 and hh.tariff_on("2026-11-05")["price"] == 1.25
+        assert hh.tariff_on("2025-12-31")["price"] == 1.0                             # settings before the first
+        u = {x["day"]: x for x in hh.usage(30, now=NOON)["days"]}
+        nov, octo = u["2026-11-04"], u["2026-10-20"]
+        assert abs(nov["heat_cost"] - round(nov["heat_kwh"] / 10.5 * 1.25, 2)) < 1e-9
+        assert abs(octo["heat_cost"] - round(octo["heat_kwh"] / 10.69 * 0.9, 2)) < 1e-9
+        s = hh.summary(now=NOON)
+        # November in progress (5th, noon): fixed fee pro rata, gas at the November tariff
+        assert 0 < s["month"]["fixed"] < 9.5 and s["month"]["cost"] == round(s["month"]["gas_cost"] + s["month"]["fixed"], 2)
+        assert s["last_month"]["fixed"] == 6 and s["tariff"]["price"] == 1.25
+        for bad in ([{"from": "x", "price": 1}], [{"from": "2026-01-01", "price": 0}],
+                    [{"from": "2026-01-01", "price": 1}, {"from": "2026-01-01", "price": 2}],
+                    [{"from": "2026-01-01", "price": 1, "pcs": 30}]):
+            try:
+                hh.set_tariffs(bad)
+                raise AssertionError(bad)
+            except ValueError:
+                pass
+        assert len(hh.tariffs) == 2                                                    # a bad save changes nothing
+
+
 def test_degree_days_need_enough_hours():
     with tempfile.TemporaryDirectory() as tmp:
         hh = new(tmp)
@@ -252,7 +284,7 @@ def test_plugin_and_routes():
         # a cloud failure keeps the last data and carries a note
         p.heat.error, p.heat.error_ts = "boom", 1.0
         assert json.loads(asyncio.run(p.r_today(Req())).text)["error"] == "boom"
-        assert p.routes()[0].path == "/today" and len(p.routes()) == 4
+        assert p.routes()[0].path == "/today" and len(p.routes()) == 6
         keys = {f["key"] for f in AristonPlugin.schema}
         assert {"gas_price", "gas_kwh_per_m3", "energy_interval", "latitude", "longitude"} <= keys
 

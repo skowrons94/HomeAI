@@ -314,7 +314,15 @@ class AristonPlugin(Plugin):
 
     def routes(self):
         return [web.get("/today", self.r_today), web.get("/summary", self.r_summary),
-                web.get("/usage", self.r_usage), web.get("/sessions", self.r_sessions)]
+                web.get("/usage", self.r_usage), web.get("/sessions", self.r_sessions),
+                web.get("/tariffs", self.r_tariffs), web.put("/tariffs", self.r_tariffs_put)]
+
+    async def r_tariffs(self, request):
+        return web.json_response({"tariffs": self.heat.tariffs, "default": self.heat.tariff_on("1900-01-01")})
+
+    async def r_tariffs_put(self, request):
+        b = await request.json()
+        return web.json_response({"tariffs": self.heat.set_tariffs((b or {}).get("tariffs"))})
 
     @staticmethod
     def _days(request, default):

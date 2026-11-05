@@ -46,5 +46,22 @@
   "{cur} °C now, set to {tgt} °C": "{cur} °C ora, impostata a {tgt} °C",
   "{m} for hot water": "{m} per l'acqua calda",
   "{n} in {d} days": "{n} in {d} giorni",
-  "{n} kWh in {d} days": "{n} kWh in {d} giorni"
+  "{n} kWh in {d} days": "{n} kWh in {d} giorni",
+  "Gas tariff": "Tariffa gas",
+  "{price} per Smc": "{price} per Smc",
+  "+ {fee} a month fixed": "+ {fee} al mese di quota fissa",
+  "PCS {pcs} kWh/Smc": "PCS {pcs} kWh/Smc",
+  "since {d}": "dal {d}",
+  "Example price: enter the one from your bill": "Prezzo di esempio: inserisci quello della tua bolletta",
+  "Gas tariffs": "Tariffe del gas",
+  "€ per Smc": "€ per Smc",
+  "€ a month fixed": "€ al mese fissi",
+  "PCS kWh/Smc": "PCS kWh/Smc",
+  "Take them from your gas bill: the price per Smc is everything you pay for the gas used (materia gas, transport, system charges, excise and VAT) divided by the Smc billed; the fixed part is the monthly fee. When the price changes, add a row from that date: past days keep their own price.": "Prendili dalla bolletta del gas: il prezzo per Smc è tutto ciò che paghi per il gas consumato (materia gas, trasporto, oneri di sistema, accise e IVA) diviso per gli Smc fatturati; la parte fissa è la quota mensile. Quando il prezzo cambia, aggiungi una riga da quella data: i giorni passati mantengono il loro prezzo.",
+  "Add a price change": "Aggiungi un cambio di prezzo",
+  "Invalid tariffs": "Tariffe non valide",
+  "Each tariff needs a start date and a price": "Ogni tariffa richiede una data di inizio e un prezzo",
+  "Price 0–10 €/Smc, fixed fee 0–500 €/month, PCS 8–13 kWh/Smc": "Prezzo 0–10 €/Smc, quota fissa 0–500 €/mese, PCS 8–13 kWh/Smc",
+  "Two tariffs start on {day}": "Due tariffe iniziano il {day}",
+  "Starts on": "Dal"
 }
