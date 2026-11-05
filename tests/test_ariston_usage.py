@@ -109,8 +109,24 @@ def test_parse_sequences_units():
     assert d["2026-11-05"]["heat_src"] == "gas"
     assert abs(d["2026-11-05"]["heat_m3"] - 3.6 / 10.69) < 1e-9
     assert d["2026-11-04"]["dhw_kwh"] == 1.5
-    m = rows["month"]
-    assert m["2026-11"]["heat_kwh"] == 24.0 and m["2026-01"]["heat_kwh"] == 120.0 and "2025-12" in m and "2025-11" not in m
+    m = rows["month"]      # the monthly series ends LAST month: the current one comes from the days
+    assert "2026-11" not in m and m["2026-10"]["heat_kwh"] == 24.0 and m["2025-11"]["heat_kwh"] == 120.0
+    assert "2025-10" not in m
+
+
+def test_alignment_matches_the_real_boiler():
+    """Values read from the user's boiler on 2026-11-05 11:27: the daily heating series (p=3) ends today,
+    the monthly one (p=4) ends with October: Oct 2-31 from the daily series + Oct 1 = 190.91 kWh."""
+    daily = [0.0] * 15 + [5.37] + [0.0] * 7 + [17.18, 34.36, 30.0, 24.3, 22.7, 22.12, 18.14,
+                                                16.74, 17.36, 21.03, 24.75, 37.6]
+    monthly = [1733.22, 1807.24, 1425.98, 900.33, 238.81, 7.56, 0, 0, 0, 441.62, 1191.81, 1417.53, 1628.84,
+               1071.89, 682.66, 58.73, 70.28, 0, 0, 0, 0, 190.91]
+    rows = parse_sequences([{"k": 7, "p": 3, "v": daily}, {"k": 7, "p": 4, "v": monthly}], "KWH", date(2026, 11, 5))
+    d, m = rows["day"], rows["month"]
+    assert d["2026-11-05"]["heat_kwh"] == 37.6 and d["2026-10-02"]["heat_kwh"] == 0.0 and "2026-10-01" not in d
+    october_days = sum(v["heat_kwh"] for k, v in d.items() if k.startswith("2026-10"))
+    assert m["2026-10"]["heat_kwh"] == 190.91 and october_days <= 190.91 and "2026-11" not in m
+    assert m["2025-01"]["heat_kwh"] == 1733.22                       # 22 months back from October 2026
     # volume unit: the figure is Smc, energy follows from the heating value
     r2 = parse_sequences([{"k": 7, "p": 3, "v": [2.0]}], "SMC", date(2026, 11, 5), 10.0)
     assert r2["day"]["2026-11-05"]["heat_m3"] == 2.0 and r2["day"]["2026-11-05"]["heat_kwh"] == 20.0
@@ -145,9 +161,11 @@ def test_usage_cost_degree_days_tips():
                          (9 * heating.GAS_KWH_PER_M3,))
         s = hh.summary(now=NOON)
         assert any("50%" in t for t in s["tips"]), s["tips"]
-        # month: cloud monthly figure; projection from days elapsed
-        assert s["month"]["heat_m3"] == 24.0 and s["last_month"]["heat_m3"] == 120.0
-        assert s["year"]["months"] == 11 and s["year"]["heat_m3"] == 10 * 120 + 24
+        # current month = sum of its days; last month = the cloud's figure (its series ends with October)
+        nov = round(sum(x["heat_m3"] or 0 for x in u["days"] if x["day"].startswith("2026-11")), 1)
+        assert s["month"]["heat_m3"] == round(nov - 6.0 + 9.0, 1) and s["last_month"]["heat_m3"] == 24.0
+        # year 2026: Jan-Sep 120 each + October 24 (cloud) + November so far (days)
+        assert s["year"]["months"] == 11 and abs(s["year"]["heat_m3"] - (9 * 120 + 24 + s["month"]["heat_m3"])) < 0.2
         assert s["projection"] is not None and s["projection"]["cost"] > 0
         assert s["first_day"] == "2026-10-07" and s["has_outdoor"]
 

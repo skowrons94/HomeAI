@@ -84,7 +84,9 @@ def to_kwh(value: float, unit: str | None, kwh_per_m3: float = GAS_KWH_PER_M3) -
 
 
 def _align(values: list, last: date, step: str) -> list[tuple[str, float]]:
-    """Dates for a sequence whose last value is the current period (today / this month)."""
+    """Dates for a sequence. Checked on the real boiler (2026-11-05): daily series end TODAY (this morning's
+    hourly values add up to the last daily value), monthly series end LAST MONTH (Oct 2–31 from the daily
+    series + Oct 1 = the last monthly value; the current month is not in it)."""
     out = []
     n = len(values)
     for i, v in enumerate(values):
@@ -92,7 +94,7 @@ def _align(values: list, last: date, step: str) -> list[tuple[str, float]]:
         if step == "day":
             key = (last - timedelta(days=back)).strftime("%Y-%m-%d")
         else:
-            y, m = last.year, last.month - back
+            y, m = last.year, last.month - 1 - back
             while m <= 0:
                 y, m = y - 1, m + 12
             key = f"{y:04d}-{m:02d}"
@@ -357,8 +359,10 @@ class Heating:
         return round(sum(v), 2) if v else None
 
     def month_totals(self, month: str, now: float | None = None) -> dict | None:
-        """Totals of a month: the cloud's monthly figure, or the sum of the days we hold."""
-        r = self.store.query("SELECT * FROM ariston_month WHERE month=?", (month,))
+        """Totals of a month: the cloud's monthly figure, or the sum of the days we hold. The current month
+        is always the sum of its days (the cloud's monthly series stops at last month)."""
+        cur = datetime.fromtimestamp(now or time.time()).strftime("%Y-%m")
+        r = self.store.query("SELECT * FROM ariston_month WHERE month=?", (month,)) if month != cur else []
         if r:
             r = r[0]
             tot = {k: r[k] for k in ("heat_kwh", "dhw_kwh", "heat_m3", "dhw_m3")}
@@ -378,7 +382,10 @@ class Heating:
         prev_d = today.replace(day=1) - timedelta(days=1)
         prev = prev_d.strftime("%Y-%m")
         month, last_month = self.month_totals(cur, now), self.month_totals(prev, now)
-        year_rows = self.store.query("SELECT * FROM ariston_month WHERE month >= ?", (f"{today.year}-01",))
+        year_rows = self.store.query("SELECT * FROM ariston_month WHERE month >= ? AND month < ?",
+                                     (f"{today.year}-01", cur))
+        if month:      # the current month, from its days
+            year_rows = [*year_rows, month]
         year = None
         if year_rows:
             year = {k: round(sum(r[k] or 0 for r in year_rows), 1)
